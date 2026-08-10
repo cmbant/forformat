@@ -1,0 +1,10 @@
+program p
+x = y + &
+  fun(a, &
+  b)
+10 call sub1(a,&
+  b,&
+  fun(3,&
+  4),&
+  c)
+end

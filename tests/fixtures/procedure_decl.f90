@@ -1,0 +1,11 @@
+module m
+abstract interface
+subroutine state_function()
+end subroutine state_function
+end interface
+procedure(state_function), private :: dtauda
+contains
+subroutine s
+integer :: x
+end subroutine s
+end module m

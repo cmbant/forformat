@@ -1,0 +1,26 @@
+subroutine remred
+ x       = p       +fun        (a,           &
+  b,&
+  c)
+100 format(4habcd             , &
+       4hx(bc,&
+       i5)
+
+101 format("abcd      "             , &
+       'pqr  st    '    ,                  &
+       i5)
+
+      call      sub1(a,   "hello              &
+   world  "     ,  &
+   10)
+!$      call      sub1(a,   "hello              &
+!$   world  "     ,  &
+!$   10)
+      call      sub1(a,   'hello              &
+   world  '     ,  &
+   10)
+#if 0
+   write(10   '  6)       '  a    b    c  '
+   write(10   "  6)       ",  a,    b,    c  ! this    is    not    fortran
+#endif
+  end

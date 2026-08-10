@@ -1,0 +1,18 @@
+program p
+  call foo(a, &
+#ifdef EXTRA
+  & b, &
+#else
+  & c, &
+#endif
+  & d)
+  if (a &
+#ifdef EXTRA
+  & .eq. b &
+#else
+  & .eq. c &
+#endif
+  &) then
+  x = 1
+  end if
+end program p

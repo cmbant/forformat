@@ -1,0 +1,51 @@
+PROGRAM TYPE_bug
+   structure /reg/
+      union ! U0                ! rax
+         map
+            character(16) rx
+         end map
+         map
+            character(8) rh         ! rah
+            union ! U1
+               map
+                  character(8) rl     ! ral
+               end map
+               map
+                  character(8) ex     ! eax
+               end map
+               map
+                  character(4) eh     ! eah
+                  union ! U2
+                     map
+                        character(4) el ! eal
+                     end map
+                     map
+                        character(4) x  ! ax
+                     end map
+                     map
+                        character(2) h  ! ah
+                        character(2) l  ! al
+                     end map
+                  end union
+               end map
+            end union
+         end map
+      end union
+   end structure
+   record /reg/ a
+
+   STRUCTURE /s/
+      INTEGER :: i = 2
+   END STRUCTURE
+   RECORD /s/ :: TYPES_MESH
+
+   a.rl = 'x'
+   IF ( TYPES_MESH.i == 1 ) THEN
+      TYPES_MESH.i = 11
+   ELSE IF ( TYPES_MESH.i == 2 ) THEN
+      TYPES_MESH.i = 22
+   ELSE IF ( TYPES_MESH.i == 3 ) THEN
+      TYPES_MESH.i = 33
+   END IF
+   PRINT *, TYPES_MESH
+END PROGRAM

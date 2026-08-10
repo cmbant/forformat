@@ -1,0 +1,7 @@
+program p
+include 'x.inc'
+   10 if (x) then
+      20 x = 1 + &
+               & 2
+   30 end if
+end program p

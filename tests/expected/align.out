@@ -1,0 +1,5 @@
+program p
+   x = f(a, &
+         b, &
+         c)
+end

@@ -1,0 +1,20 @@
+module m
+   type t
+   contains
+      procedure :: p
+   END TYPE t
+   integer :: sibling
+END MODULE m
+
+program p
+   x = [ a, &
+      [ b, &
+      c ], &
+      d ]
+END PROGRAM p
+
+abstract interface
+   subroutine callback(x)
+      integer :: x
+   END SUBROUTINE callback
+end interface

@@ -1,0 +1,7 @@
+module m
+contains
+   subroutine s
+   END SUBROUTINE s
+   integer function f()
+   END FUNCTION f
+END MODULE m

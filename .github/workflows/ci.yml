@@ -1,0 +1,144 @@
+name: Rust conversion checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    name: checks (Rust ${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.85.0", stable]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --all-targets
+      - run: ./tools/check_fuzz_regression.sh
+      - run: ./tools/check_cli_contract.sh target/debug/findent
+
+  release:
+    name: release and benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - run: cargo build --locked --release
+      - run: ./tools/check_cli_contract.sh target/release/findent
+      - run: ./tools/check_release.sh target/release/findent | tee target/release-metrics.txt
+      - run: ./tools/check_package.sh
+      - run: cargo bench --locked --bench throughput
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-measurements
+          path: target/release-metrics.txt
+
+  target-checks:
+    name: target check (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+      - run: cargo check --locked --target ${{ matrix.target }} --all-targets
+
+  static-artifacts:
+    name: static artifact (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - run: CARGO_TARGET_DIR=target/repro-a cross build --locked --release --target ${{ matrix.target }}
+      - run: CARGO_TARGET_DIR=target/repro-b cross build --locked --release --target ${{ matrix.target }}
+      - run: test "$(sha256sum target/repro-a/${{ matrix.target }}/release/findent | awk '{print $1}')" = "$(sha256sum target/repro-b/${{ matrix.target }}/release/findent | awk '{print $1}')"
+      - run: |
+          artifact=target/repro-a/${{ matrix.target }}/release/findent
+          hash=$(sha256sum "$artifact" | awk '{print $1}')
+          printf '%s  %s\n' "$hash" "$(basename "$artifact")" > "$(dirname "$artifact")/findent.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: findent-${{ matrix.target }}
+          path: |
+            target/repro-a/${{ matrix.target }}/release/findent
+            target/repro-a/${{ matrix.target }}/release/findent.sha256
+
+  windows-artifact:
+    name: Windows release artifact
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: -C debuginfo=0 -C strip=debuginfo -C link-arg=/Brepro -C link-arg=/DEBUG:NONE
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: x86_64-pc-windows-msvc
+      - shell: pwsh
+        run: |
+          $env:CARGO_TARGET_DIR = "target/repro-a"
+          cargo build --locked --release --target x86_64-pc-windows-msvc
+      - shell: pwsh
+        run: |
+          $env:CARGO_TARGET_DIR = "target/repro-b"
+          cargo build --locked --release --target x86_64-pc-windows-msvc
+      - shell: pwsh
+        run: |
+          $a = (Get-FileHash target/repro-a/x86_64-pc-windows-msvc/release/findent.exe -Algorithm SHA256).Hash
+          $b = (Get-FileHash target/repro-b/x86_64-pc-windows-msvc/release/findent.exe -Algorithm SHA256).Hash
+          if ($a -ne $b) { throw "reproducible Windows build hash mismatch" }
+          "$a  findent.exe" | Out-File target/repro-a/x86_64-pc-windows-msvc/release/findent.exe.sha256 -Encoding ascii
+          Write-Output $a
+      - uses: actions/upload-artifact@v4
+        with:
+          name: findent-x86_64-pc-windows-msvc
+          path: |
+            target/repro-a/x86_64-pc-windows-msvc/release/findent.exe
+            target/repro-a/x86_64-pc-windows-msvc/release/findent.exe.sha256
+
+  artifact-verification:
+    name: verify uploaded release artifacts
+    needs: [static-artifacts, windows-artifact]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: findent-*
+          path: artifacts
+      - name: Verify artifact checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          sidecars=$(find artifacts -type f -name '*.sha256' -print)
+          test -n "$sidecars"
+          while IFS= read -r sidecar; do
+            (cd "$(dirname "$sidecar")" && sha256sum -c "$(basename "$sidecar")")
+          done <<< "$sidecars"

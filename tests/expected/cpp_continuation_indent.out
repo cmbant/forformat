@@ -1,0 +1,13 @@
+  program p
+     a=10 &
+#ifdef b
+        +5 &
+#ifdef c
+        +6 &
+#endif c
+#endif b
+        + 7
+     do i=1,20
+        continue
+     enddo
+  end

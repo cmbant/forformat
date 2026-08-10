@@ -1,0 +1,32 @@
+# Rust build artifacts
+/target/
+
+# Rust compiler and coverage output
+*.pdb
+*.profraw
+*.mod
+/coverage/
+
+*.f90*
+# Checked-in Fortran snippets under tests are compatibility data, not build
+# products. Keep the broad rule above for local source/output files while
+# allowing the manifest fixtures to ship with the package.
+!/tests/fixtures/*.f90
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+
+fortran/

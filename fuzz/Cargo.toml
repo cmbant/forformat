@@ -1,0 +1,46 @@
+[package]
+name = "findent-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+findent = { path = ".." }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "scanner"
+path = "fuzz_targets/scanner.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "assembler"
+path = "fuzz_targets/assembler.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "classifier"
+path = "fuzz_targets/classifier.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "engine"
+path = "fuzz_targets/engine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "format"
+path = "fuzz_targets/format.rs"
+test = false
+doc = false
+bench = false

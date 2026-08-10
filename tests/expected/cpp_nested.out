@@ -1,0 +1,25 @@
+program cpp_nested
+#if OUTER
+   if (x) then
+#if INNER
+      do i = 1, 2
+#else
+      select case (i)
+       case (1)
+         continue
+      end select
+#endif
+      continue
+   end if
+#else
+   do i = 1, 2
+#if INNER
+      continue
+#else
+      if (y) then
+         continue
+      end if
+#endif
+   end do
+#endif
+end program cpp_nested

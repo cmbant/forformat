@@ -1,0 +1,33 @@
+program advanced
+integer :: i, j
+select type (x => value)
+type is (t)
+continue
+class default
+continue
+end select
+select rank (x)
+rank (0)
+continue
+rank default
+continue
+end select
+outer: do i = 1, 2
+inner: do j = 1, 2
+continue
+end do inner
+end do outer
+do 100 i = 1, 2
+do 100 j = 1, 2
+continue
+100 continue
+end program advanced
+
+structure /s/
+integer :: i
+union
+map
+integer :: j
+end map
+end union
+end structure

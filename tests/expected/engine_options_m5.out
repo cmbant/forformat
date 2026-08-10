@@ -1,0 +1,15 @@
+    program options
+     if (a) then
+     do i = 1, 2
+     do j = 1, 2
+     continue
+     end do
+     end do
+     end if
+    contains
+     subroutine worker
+     if (b) then
+     continue
+     end if
+     end
+    end program options

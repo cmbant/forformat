@@ -1,0 +1,7 @@
+program p
+character(len=20) :: x
+x = "a;b!c"; if (x == "a;b!c") then; y = 1; end if
+!$omp parallel
+!$  x = x
+!$omp end parallel
+end program

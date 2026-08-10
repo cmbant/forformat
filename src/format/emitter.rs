@@ -1,0 +1,433 @@
+use super::continuation::leading_ampersand;
+use crate::{
+    config::FormatConfig,
+    error::FormatError,
+    source::{Newline, PhysicalLineKind, SourceBuffer},
+};
+use std::io::Write;
+
+static SPACES: [u8; 128] = [b' '; 128];
+
+pub fn newline_bytes(n: Newline) -> &'static [u8] {
+    match n {
+        Newline::Lf | Newline::None => b"\n",
+        Newline::CrLf => b"\r\n",
+    }
+}
+
+/// Compatibility wrapper used by small callers and tests.  The formatter's
+/// production path uses `emit_line_to`, which writes directly to its sink.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_line(
+    buf: &SourceBuffer,
+    index: usize,
+    indent: usize,
+    config: &FormatConfig,
+    first: bool,
+    previous_cont: bool,
+    alignment: Option<usize>,
+    replacement: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    emit_line_to(
+        buf,
+        index,
+        indent,
+        config,
+        first,
+        previous_cont,
+        alignment,
+        replacement,
+        &mut out,
+    )
+    .expect("writing to a Vec cannot fail");
+    out
+}
+
+/// Emit one physical line without allocating an intermediate line buffer.
+/// The default policy replaces leading horizontal whitespace and trims
+/// trailing horizontal whitespace.  Other bytes in the line body remain
+/// source-owned unless an explicit transformation is enabled.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_line_to<W: Write>(
+    buf: &SourceBuffer,
+    index: usize,
+    indent: usize,
+    config: &FormatConfig,
+    first: bool,
+    previous_cont: bool,
+    alignment: Option<usize>,
+    replacement: Option<&[u8]>,
+    out: &mut W,
+) -> Result<(), FormatError> {
+    let mut quote = 0u8;
+    emit_line_to_with_quote(
+        buf,
+        index,
+        indent,
+        config,
+        first,
+        previous_cont,
+        alignment,
+        replacement,
+        &mut quote,
+        out,
+    )
+}
+
+/// Emit one physical line while carrying the redundant-whitespace transform's
+/// quote state across a logical continuation group.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_line_to_with_quote<W: Write>(
+    buf: &SourceBuffer,
+    index: usize,
+    indent: usize,
+    config: &FormatConfig,
+    first: bool,
+    previous_cont: bool,
+    alignment: Option<usize>,
+    replacement: Option<&[u8]>,
+    quote: &mut u8,
+    out: &mut W,
+) -> Result<(), FormatError> {
+    let line = &buf.lines[index];
+    let original = buf.line_bytes(line);
+
+    // Preprocessor spelling is preserved, but its source indentation is always
+    // structural noise and trailing horizontal whitespace is normalized.  This
+    // must run before the apply-indent fast path because the engine deliberately disables normal
+    // code indentation while emitting directive groups.
+    if line.kind == PhysicalLineKind::Preprocessor {
+        out.write_all(trim_end_horizontal(trim_start(original)))
+            .map_err(FormatError::Write)?;
+        write_newline(buf, index, out)?;
+        return Ok(());
+    }
+
+    if !config.apply_indent {
+        let leading = leading_len(original);
+        if let Some(replacement) = replacement {
+            out.write_all(&original[..leading])
+                .map_err(FormatError::Write)?;
+            out.write_all(trim_end_horizontal(replacement))
+                .map_err(FormatError::Write)?;
+        } else {
+            out.write_all(trim_end_horizontal(original))
+                .map_err(FormatError::Write)?;
+        }
+        write_newline(buf, index, out)?;
+        return Ok(());
+    }
+
+    if line.kind == PhysicalLineKind::Blank {
+        write_newline(buf, index, out)?;
+        return Ok(());
+    }
+
+    // The directive is a source comment which also feeds a synthetic
+    // statement to the classifier.  Its spelling is retained, apart from
+    // trailing horizontal whitespace normalization.
+    if line.kind == PhysicalLineKind::FindentFix {
+        out.write_all(trim_end_horizontal(original))
+            .map_err(FormatError::Write)?;
+        write_newline(buf, index, out)?;
+        return Ok(());
+    }
+
+    if line.kind == PhysicalLineKind::Comment {
+        let comment = trim_end_horizontal(original);
+        let near_omp = near_openmp_comment(trim_start(comment));
+        if has_leading_horizontal_space(comment) {
+            // findent keeps a single separating blank before an indented
+            // comment even when the surrounding construct is at column zero.
+            // This also prevents a previously over-indented comment from
+            // retaining stale source indentation after `--indent_contains=restart`.
+            write_spaces(out, clamp_indent(indent, config.max_indent).max(1))?;
+            if let Some(rest) = near_omp {
+                out.write_all(b"!$ ").map_err(FormatError::Write)?;
+                out.write_all(rest).map_err(FormatError::Write)?;
+            } else {
+                out.write_all(trim_start(comment))
+                    .map_err(FormatError::Write)?;
+            }
+        } else {
+            if let Some(rest) = near_omp {
+                out.write_all(b"!$ ").map_err(FormatError::Write)?;
+                out.write_all(rest).map_err(FormatError::Write)?;
+            } else {
+                out.write_all(comment).map_err(FormatError::Write)?;
+            }
+        }
+        write_newline(buf, index, out)?;
+        return Ok(());
+    }
+
+    // With OpenMP disabled, an exact sentinel is an ordinary comment.  Keep
+    // unindented comments at column zero, while bringing a source-indented
+    // comment to the current structural level just like other comments.
+    if line.omp && !config.openmp {
+        if has_leading_horizontal_space(original) {
+            write_spaces(out, clamp_indent(indent, config.max_indent).max(1))?;
+            out.write_all(trim_end_horizontal(trim_start(original)))
+                .map_err(FormatError::Write)?;
+        } else {
+            out.write_all(trim_end_horizontal(original))
+                .map_err(FormatError::Write)?;
+        }
+        write_newline(buf, index, out)?;
+        return Ok(());
+    }
+
+    let mut source = trim_start(original);
+    let omp = line.omp && config.openmp;
+    if omp {
+        // SourceBuffer only marks the exact free-form sentinel `!$ ` as
+        // OpenMP.  Near-misses remain ordinary comments and never arrive
+        // here.
+        source = trim_start(source.get(3..).unwrap_or_default());
+        out.write_all(b"!$ ").map_err(FormatError::Write)?;
+    }
+
+    let mut target = indent;
+    if omp {
+        target = target.saturating_sub(3);
+    }
+    if !first {
+        if leading_ampersand(source) {
+            if config.indent_ampersand && previous_cont {
+                target = target.saturating_add(config.continuation_indent);
+            }
+        } else if let Some(alignment) = alignment {
+            target = alignment;
+        } else if config.indent_continuation && previous_cont {
+            target = target.saturating_add(config.continuation_indent);
+        } else if !config.indent_continuation && previous_cont {
+            target = if omp { 0 } else { leading_len(original) };
+        }
+    }
+    if omp && config.max_indent != 0 {
+        target = target.min(config.max_indent.saturating_sub(3));
+    }
+    if (!first || previous_cont) && is_label_fragment(source) {
+        target = 0;
+    }
+
+    if let Some(replacement) = replacement {
+        source = replacement;
+    }
+
+    let remred = config.ws_remred || config.ws_remred_value != 0;
+    if first && !(previous_cont && is_label_fragment(source)) {
+        if let Some((label, rest)) = split_label(source) {
+            if config.label_left {
+                out.write_all(label).map_err(FormatError::Write)?;
+                let padding =
+                    clamp_indent(target.saturating_sub(label.len()), config.max_indent).max(1);
+                write_spaces(out, padding)?;
+            } else {
+                write_spaces(out, clamp_indent(target, config.max_indent))?;
+                out.write_all(label).map_err(FormatError::Write)?;
+                out.write_all(b" ").map_err(FormatError::Write)?;
+            }
+            write_body(rest, remred, quote, out)?;
+        } else {
+            write_spaces(out, clamp_indent(target, config.max_indent))?;
+            write_body(source, remred, quote, out)?;
+        }
+    } else {
+        write_spaces(out, clamp_indent(target, config.max_indent))?;
+        write_body(source, remred, quote, out)?;
+    }
+    write_newline(buf, index, out)
+}
+
+fn write_body<W: Write>(
+    body: &[u8],
+    remred: bool,
+    quote: &mut u8,
+    out: &mut W,
+) -> Result<(), FormatError> {
+    let body = trim_end_horizontal(body);
+    if remred {
+        crate::transform::whitespace::reduce_to_with_quote(body, quote, out)
+            .map_err(FormatError::Write)
+    } else {
+        out.write_all(body).map_err(FormatError::Write)
+    }
+}
+
+fn trim_end_horizontal(mut s: &[u8]) -> &[u8] {
+    while s.last().is_some_and(|byte| *byte == b' ' || *byte == b'\t') {
+        s = &s[..s.len() - 1];
+    }
+    s
+}
+
+fn write_newline<W: Write>(
+    buf: &SourceBuffer,
+    index: usize,
+    out: &mut W,
+) -> Result<(), FormatError> {
+    out.write_all(newline_bytes(buf.newline(index)))
+        .map_err(FormatError::Write)
+}
+
+fn write_spaces<W: Write>(out: &mut W, mut count: usize) -> Result<(), FormatError> {
+    while count >= SPACES.len() {
+        out.write_all(&SPACES).map_err(FormatError::Write)?;
+        count -= SPACES.len();
+    }
+    out.write_all(&SPACES[..count]).map_err(FormatError::Write)
+}
+
+fn leading_len(s: &[u8]) -> usize {
+    s.iter().take_while(|c| is_horizontal(**c)).count()
+}
+
+fn has_leading_horizontal_space(s: &[u8]) -> bool {
+    leading_len(s) != 0
+}
+
+fn trim_start(s: &[u8]) -> &[u8] {
+    &s[leading_len(s)..]
+}
+
+fn is_horizontal(c: u8) -> bool {
+    c == b' ' || c == b'\t'
+}
+
+fn clamp_indent(indent: usize, max: usize) -> usize {
+    if max == 0 {
+        indent
+    } else {
+        indent.min(max)
+    }
+}
+
+fn near_openmp_comment(s: &[u8]) -> Option<&[u8]> {
+    if !s.starts_with(b"!$") {
+        return None;
+    }
+    match s.get(2) {
+        None => Some(&s[2..]),
+        Some(byte) if is_horizontal(*byte) => Some(trim_start(&s[2..])),
+        _ => None,
+    }
+}
+
+fn split_label(s: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut i = 0;
+    while i < s.len() && s[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i > 0 && i < s.len() && (is_horizontal(s[i]) || s[i] == b'&') {
+        let mut j = i;
+        while j < s.len() && is_horizontal(s[j]) {
+            j += 1;
+        }
+        Some((&s[..i], &s[j..]))
+    } else {
+        None
+    }
+}
+
+fn is_label_fragment(s: &[u8]) -> bool {
+    let Some(amp) = s.iter().position(|byte| *byte == b'&') else {
+        return false;
+    };
+    amp > 0 && s[..amp].iter().all(u8::is_ascii_digit) && s[amp + 1..].is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::emit_line;
+    use crate::{config::FormatConfig, source::SourceBuffer};
+
+    #[test]
+    fn direct_emitter_handles_labels_and_continuations() {
+        let labeled = SourceBuffer::new(b"  10 x=1\n").unwrap();
+        let config = FormatConfig::default();
+        assert_eq!(
+            emit_line(&labeled, 0, 3, &config, true, false, None, None),
+            b"10 x=1\n"
+        );
+
+        let continued = SourceBuffer::new(b"x = &\n  & y\n").unwrap();
+        assert_eq!(
+            emit_line(&continued, 1, 3, &config, false, true, None, None),
+            b"   & y\n"
+        );
+    }
+
+    #[test]
+    fn direct_emitter_preserves_comment_and_openmp_boundaries() {
+        let comments = SourceBuffer::new(b"  ! comment\n!$    call x\n").unwrap();
+        let config = FormatConfig::default();
+        assert_eq!(
+            emit_line(&comments, 0, 0, &config, true, false, None, None),
+            b" ! comment\n"
+        );
+        assert_eq!(
+            emit_line(&comments, 1, 6, &config, true, false, None, None),
+            b"!$    call x\n"
+        );
+    }
+
+    #[test]
+    fn direct_emitter_covers_label_alignment_replacement_and_whitespace_modes() {
+        let labeled = SourceBuffer::new(b"10 x=1\n").unwrap();
+        let label_right = FormatConfig {
+            label_left: false,
+            ..FormatConfig::default()
+        };
+        assert_eq!(
+            emit_line(&labeled, 0, 3, &label_right, true, false, None, None),
+            b"   10 x=1\n"
+        );
+
+        let continuation = SourceBuffer::new(b"x = f(a, &\n  b)\n").unwrap();
+        let config = FormatConfig::default();
+        assert_eq!(
+            emit_line(&continuation, 1, 3, &config, false, true, Some(9), None),
+            b"         b)\n"
+        );
+
+        assert_eq!(
+            emit_line(&labeled, 0, 0, &config, true, false, None, Some(b"10 y=2")),
+            b"10 y=2\n"
+        );
+
+        let whitespace = SourceBuffer::new(b"x = \"a  b\"  \n").unwrap();
+        assert_eq!(
+            emit_line(&whitespace, 0, 0, &config, true, false, None, None),
+            b"x = \"a  b\"\n"
+        );
+        let mut reduced = config;
+        reduced.ws_remred = true;
+        assert_eq!(
+            emit_line(&whitespace, 0, 0, &reduced, true, false, None, None),
+            b"x = \"a  b\"\n"
+        );
+    }
+
+    #[test]
+    fn direct_emitter_preserves_mixed_terminators_and_ampersand_policy() {
+        let source = SourceBuffer::new(b"x = a &\r\n  & b\ny = c\n").unwrap();
+        let config = FormatConfig::default();
+        assert_eq!(
+            emit_line(&source, 0, 0, &config, true, false, None, None),
+            b"x = a &\r\n"
+        );
+        assert_eq!(
+            emit_line(&source, 1, 3, &config, false, true, None, None),
+            b"   & b\n"
+        );
+
+        let mut indented_ampersand = config;
+        indented_ampersand.indent_ampersand = true;
+        assert_eq!(
+            emit_line(&source, 1, 3, &indented_ampersand, false, true, None, None),
+            b"      & b\n"
+        );
+    }
+}

@@ -1,0 +1,8 @@
+program p
+   logical :: x
+   if (x) then
+      y = 1
+   else
+      y = 2
+   end if
+end program
