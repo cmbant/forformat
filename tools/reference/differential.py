@@ -168,6 +168,31 @@ def apply(text: str, name: str, stride: int) -> str:
     return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
 
+def reference_format(module, text: str) -> str:
+    """Run the reference the way its own CLI does.
+
+    `format_text` takes the declaration case tables as *arguments*; calling it
+    bare applies almost no declared casing, which silently turns the `case`
+    perturbation into a comparison against a crippled reference.  This mirrors
+    the `--stdin` branch of `standardize_fortran.main` exactly: one file, no
+    project, every table passed through.
+    """
+    from pathlib import Path as _Path
+
+    cases = module.collect_declaration_cases({_Path("<stdin>"): text})[_Path("<stdin>")]
+    return module.format_text(
+        text,
+        module_cases=cases.module_cases,
+        symbol_cases=cases.symbol_cases,
+        procedure_cases=cases.procedure_cases,
+        scope_cases=cases.scope_cases,
+        type_procedure_cases=cases.type_procedure_cases,
+        type_component_cases=cases.type_component_cases,
+        variable_type_cases=cases.variable_type_cases,
+        type_component_type_cases=cases.type_component_type_cases,
+    )
+
+
 def run(command: list[str], text: str) -> str:
     result = subprocess.run(command, input=text, capture_output=True, text=True, check=False)
     if result.returncode != 0:
@@ -201,7 +226,7 @@ def main() -> int:
             text = path.read_text(errors="surrogateescape")
             perturbed = apply(text, name, args.stride)
             try:
-                expected = module.format_text(run([args.findent, *FINDENT_ARGS], perturbed))
+                expected = reference_format(module, run([args.findent, *FINDENT_ARGS], perturbed))
                 actual = run([args.binary, "--full", *FINDENT_ARGS], perturbed)
             except RuntimeError as error:
                 print(f"  ERROR {name} {path}: {error}", file=sys.stderr)

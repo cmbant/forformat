@@ -57,7 +57,7 @@ pub fn paren_alignment(line: &[u8]) -> Option<usize> {
     None
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ParenAlignmentState {
     stack: Vec<OpenParen>,
     quote: u8,
@@ -65,7 +65,7 @@ pub struct ParenAlignmentState {
     start_indent: Option<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct OpenParen {
     alignment: usize,
     first_item_seen: bool,

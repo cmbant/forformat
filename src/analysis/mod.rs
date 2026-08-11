@@ -10,6 +10,6 @@ pub mod project;
 pub mod scope;
 
 pub use declarations::{scoped_declared_names, DeclaredNameIndex, FileFacts, TypeMaps};
-pub use names::{CaseMap, CaseResolver, CaseTables, NameSpace};
+pub use names::{CaseMap, CaseResolver, CaseTables, ComponentCaseMap, NameSpace};
 pub use project::{analyze_file, analyze_project, ProjectContext};
 pub use scope::{Scope, ScopeKind, ScopeTree};

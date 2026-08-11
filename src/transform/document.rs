@@ -32,9 +32,8 @@ impl Document {
     /// Split `source` into lines, recording the dominant terminator.
     ///
     /// Mixed terminators are normalized to the dominant one in full mode; this
-    /// is the Python contract and `CAMB/forutils/` (CRLF throughout) is the
-    /// concrete test material for it.  Indent-only mode never builds a
-    /// `Document` and keeps per-line terminators untouched.
+    /// is the Python contract.  Indent-only mode never builds a `Document`
+    /// and keeps per-line terminators untouched.
     pub fn from_bytes(source: &[u8]) -> Self {
         let mut lines = Vec::new();
         let mut crlf = 0usize;

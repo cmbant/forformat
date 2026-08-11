@@ -14,6 +14,7 @@
 //! What *is* ported from Python is the ranking of candidate break points, which
 //! encodes real taste about where a human would split an expression.
 
+use crate::format::continuation::ParenAlignmentState;
 use crate::source::{
     regions::LexState,
     tokens::{tokenize, Token, TokenKind},
@@ -74,6 +75,18 @@ pub fn wrap_body(
     layout: ContinuationLayout,
     line_length: usize,
 ) -> Result<Vec<Vec<u8>>, Decline> {
+    wrap_body_with_alignment(body, layout, line_length, false)
+}
+
+/// Variant used by full-mode reflow when parenthesis alignment is active.
+/// The alignment state is advanced after each chosen break, so nested calls
+/// can change the target for the following physical line.
+pub fn wrap_body_with_alignment(
+    body: &[u8],
+    layout: ContinuationLayout,
+    line_length: usize,
+    align_paren: bool,
+) -> Result<Vec<Vec<u8>>, Decline> {
     let mut state = LexState::default();
     let tokens = tokenize(body, &mut state);
     if state.in_literal() {
@@ -90,6 +103,7 @@ pub fn wrap_body(
     let mut rest = body;
     let mut current = layout.first_indent;
     let mut first_break = true;
+    let mut paren_state = ParenAlignmentState::default();
     while current + rest.len() > line_length {
         // Two columns are reserved for the ` &` this line will end with.
         let limit = line_length.saturating_sub(current + 2);
@@ -97,7 +111,15 @@ pub fn wrap_body(
         if first_break {
             if let Some(candidate) = assignment_wrap_position(rest, limit) {
                 let remainder = trim_start(&rest[candidate..]);
-                if layout.continuation + remainder.len() <= line_length {
+                let mut trial_state = paren_state.clone();
+                let next = next_continuation(
+                    &mut trial_state,
+                    &rest[..candidate],
+                    current,
+                    layout.continuation,
+                    align_paren,
+                );
+                if next + remainder.len() <= line_length {
                     position = Some(candidate);
                 }
             }
@@ -109,12 +131,32 @@ pub fn wrap_body(
         let mut line = trim_end(&rest[..position]).to_vec();
         line.extend_from_slice(b" &");
         out.push(line);
+        current = next_continuation(
+            &mut paren_state,
+            out.last().expect("wrapped line was just pushed"),
+            current,
+            layout.continuation,
+            align_paren,
+        );
         rest = trim_start(&rest[position..]);
-        current = layout.continuation;
         first_break = false;
     }
     out.push(rest.to_vec());
     Ok(out)
+}
+
+fn next_continuation(
+    state: &mut ParenAlignmentState,
+    line: &[u8],
+    target: usize,
+    fallback: usize,
+    align_paren: bool,
+) -> usize {
+    if !align_paren {
+        return fallback;
+    }
+    state.scan(line, target);
+    state.current().unwrap_or(fallback)
 }
 
 /// The best break position at or before `limit`, as an offset into `body`.
@@ -335,7 +377,7 @@ fn trim_end(mut s: &[u8]) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
-    use super::{wrap_body, wrap_position, ContinuationLayout, Decline};
+    use super::{wrap_body, wrap_body_with_alignment, wrap_position, ContinuationLayout, Decline};
 
     fn shown(lines: &[Vec<u8>]) -> Vec<String> {
         lines
@@ -463,5 +505,24 @@ mod tests {
                         + literal_start,
             "break at {position} falls inside the literal"
         );
+    }
+
+    #[test]
+    fn aligned_wrapping_uses_the_nested_parenthesis_target_per_break() {
+        let body = b"call outer(first, inner(alpha, beta, gamma), last_value)";
+        let lines = wrap_body_with_alignment(
+            body,
+            ContinuationLayout {
+                first_indent: 2,
+                continuation: 6,
+            },
+            32,
+            true,
+        )
+        .unwrap();
+        assert!(lines.len() > 1);
+        for line in &lines[..lines.len() - 1] {
+            assert!(line.ends_with(b" &"));
+        }
     }
 }

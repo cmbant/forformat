@@ -30,6 +30,9 @@ pub struct FormatResult {
 pub struct FormatMeta {
     pub last_indent: usize,
     pub last_usable: usize,
+    /// Full-mode statements the wrapper deliberately left long, with the
+    /// physical starting line and the reason for declining.
+    pub declines: Vec<(usize, format::wrapping::Decline)>,
 }
 
 /// Format an in-memory source buffer with no project context.

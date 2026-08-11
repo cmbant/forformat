@@ -30,9 +30,9 @@ three columns are hand-maintained and preserved.
 | `FormattingTests.test_normalizes_dimension_and_write_output_spacing` | blank-line/layout | — | — | todo |
 | `FormattingTests.test_preserves_nested_parentheses_in_arguments_and_associations` | blank-line/layout | — | — | todo |
 | `DeclarationCaseTests.test_declaration_array_constructor_is_one_entity` | scope/project-case | — | — | todo |
-| `DeclarationCaseTests.test_extracts_and_matches_declarations` | scope/project-case | — | — | todo |
-| `DeclarationCaseTests.test_duplicate_resolution` | scope/project-case | — | — | todo |
-| `DeclarationCaseTests.test_named_end_cases_follow_start_cases` | scope/project-case | — | — | todo |
+| `DeclarationCaseTests.test_extracts_and_matches_declarations` | scope/project-case | `src/transform/passes/case_pass.rs` | `declared_occurrences_use_their_name_spaces_and_are_idempotent` | ported |
+| `DeclarationCaseTests.test_duplicate_resolution` | scope/project-case | `src/transform/passes/case_pass.rs` | `ambiguous_local_and_project_cases_are_silent` | ported |
+| `DeclarationCaseTests.test_named_end_cases_follow_start_cases` | scope/project-case | `src/transform/passes/case_pass.rs` | `declared_occurrences_use_their_name_spaces_and_are_idempotent` | ported |
 | `DeclarationCaseTests.test_compact_named_ends_follow_start_cases` | scope/project-case | — | — | todo |
 | `DeclarationCaseTests.test_compact_procedure_end_closes_local_case_scope` | scope/project-case | — | — | todo |
 | `DeclarationCaseTests.test_nested_procedure_uses_innermost_local_case` | scope/project-case | — | — | todo |
@@ -40,9 +40,9 @@ three columns are hand-maintained and preserved.
 | `DeclarationCaseTests.test_module_procedure_is_not_a_module_or_module_variable_scope` | scope/project-case | — | — | todo |
 | `DeclarationCaseTests.test_interface_dummies_are_not_module_variables` | scope/project-case | — | — | todo |
 | `DeclarationCaseTests.test_lexical_join_refreshes_procedure_line_ranges` | scope/project-case | — | — | todo |
-| `DeclarationCaseTests.test_local_variables_override_and_leave_global_pool` | scope/project-case | — | — | todo |
-| `DeclarationCaseTests.test_local_case_does_not_apply_to_derived_type_components` | scope/project-case | — | — | todo |
-| `DeclarationCaseTests.test_module_variables_are_case_matched_without_leaking_local_shadowing` | scope/project-case | — | — | todo |
+| `DeclarationCaseTests.test_local_variables_override_and_leave_global_pool` | scope/project-case | `src/transform/passes/case_pass.rs` | `declared_occurrences_use_their_name_spaces_and_are_idempotent` | covered by broader test |
+| `DeclarationCaseTests.test_local_case_does_not_apply_to_derived_type_components` | scope/project-case | `src/transform/passes/case_pass.rs` | `declared_occurrences_use_their_name_spaces_and_are_idempotent` | covered by broader test |
+| `DeclarationCaseTests.test_module_variables_are_case_matched_without_leaking_local_shadowing` | scope/project-case | `src/transform/passes/case_pass.rs` | `declared_occurrences_use_their_name_spaces_and_are_idempotent` | covered by broader test |
 | `DeclarationCaseTests.test_select_type_aliases_are_local` | scope/project-case | — | — | todo |
 | `ContinuationTests.test_file_reads_and_writes_preserve_crlf` | continuation | — | — | todo |
 | `ContinuationTests.test_preserves_continued_cpp_directives` | continuation | — | — | todo |

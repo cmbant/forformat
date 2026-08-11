@@ -103,6 +103,83 @@ impl CaseMap {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// The normalized keys recorded in this map.  Case application uses this
+    /// only to build compact scope metadata; callers still use `get` for the
+    /// spelling decision so ambiguity remains silent.
+    pub fn keys(&self) -> impl Iterator<Item = &[u8]> {
+        self.entries.keys().map(Vec::as_slice)
+    }
+}
+
+/// A case-insensitive map for derived-type components.
+///
+/// Components are not a global name space: `first%tcmb` and `second%tcmb`
+/// may have different authoritative spellings.  Keep the owner type in the
+/// key so case application never has to guess from a name-only fallback.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComponentCaseMap {
+    entries: HashMap<(Vec<u8>, Vec<u8>), Entry>,
+}
+
+impl ComponentCaseMap {
+    pub fn insert(&mut self, type_name: &[u8], spelling: &[u8]) {
+        if type_name.is_empty() || spelling.is_empty() {
+            return;
+        }
+        let key = (
+            type_name.to_ascii_lowercase(),
+            spelling.to_ascii_lowercase(),
+        );
+        match self.entries.get(&key) {
+            None => {
+                self.entries.insert(key, Entry::Unique(spelling.to_vec()));
+            }
+            Some(Entry::Unique(existing)) if existing.as_slice() != spelling => {
+                self.entries.insert(key, Entry::Ambiguous);
+            }
+            _ => {}
+        }
+    }
+
+    pub fn get(&self, type_name: &[u8], name: &[u8]) -> Option<&[u8]> {
+        match self
+            .entries
+            .get(&(type_name.to_ascii_lowercase(), name.to_ascii_lowercase()))?
+        {
+            Entry::Unique(spelling) => Some(spelling),
+            Entry::Ambiguous => None,
+        }
+    }
+
+    pub fn contains(&self, type_name: &[u8], name: &[u8]) -> bool {
+        self.entries
+            .contains_key(&(type_name.to_ascii_lowercase(), name.to_ascii_lowercase()))
+    }
+
+    pub fn contains_name(&self, name: &[u8]) -> bool {
+        let key = name.to_ascii_lowercase();
+        self.entries.keys().any(|(_, component)| component == &key)
+    }
+
+    pub fn merge(&mut self, other: &ComponentCaseMap) {
+        for (key, entry) in &other.entries {
+            match (self.entries.get(key), entry) {
+                (None, entry) => {
+                    self.entries.insert(key.clone(), entry.clone());
+                }
+                (Some(Entry::Ambiguous), _) => {}
+                (Some(Entry::Unique(_)), Entry::Ambiguous) => {
+                    self.entries.insert(key.clone(), Entry::Ambiguous);
+                }
+                (Some(Entry::Unique(mine)), Entry::Unique(theirs)) => {
+                    if mine != theirs {
+                        self.entries.insert(key.clone(), Entry::Ambiguous);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The five independent name spaces the reference formatter tracks.
@@ -115,7 +192,12 @@ pub struct CaseTables {
     /// Derived-type names.
     pub types: CaseMap,
     /// Derived-type component names.
-    pub components: CaseMap,
+    ///
+    /// The reference keys its authoritative component table by
+    /// `(type_name, component_name)`.  Case application uses TypeMaps to
+    /// identify that owner type and stays inert when a chain is unresolved,
+    /// rather than guessing from a name-only component entry.
+    pub components: ComponentCaseMap,
     /// Type-bound procedure names.
     pub type_procedures: CaseMap,
 }
@@ -141,13 +223,13 @@ pub enum NameSpace {
 }
 
 impl NameSpace {
-    fn select(self, tables: &CaseTables) -> &CaseMap {
+    fn select(self, tables: &CaseTables) -> Option<&CaseMap> {
         match self {
-            NameSpace::Module => &tables.modules,
-            NameSpace::Symbol => &tables.symbols,
-            NameSpace::Type => &tables.types,
-            NameSpace::Component => &tables.components,
-            NameSpace::TypeProcedure => &tables.type_procedures,
+            NameSpace::Module => Some(&tables.modules),
+            NameSpace::Symbol => Some(&tables.symbols),
+            NameSpace::Type => Some(&tables.types),
+            NameSpace::Component => None,
+            NameSpace::TypeProcedure => Some(&tables.type_procedures),
         }
     }
 }
@@ -184,7 +266,25 @@ impl<'a> CaseResolver<'a> {
         if self.macros.is_ambiguous(name) {
             return None;
         }
-        resolve(space.select(self.local), space.select(self.project), name)
+        let (Some(local), Some(project)) = (space.select(self.local), space.select(self.project))
+        else {
+            return None;
+        };
+        resolve(local, project, name)
+    }
+
+    /// Resolve a component using its resolved owner type.
+    pub fn component_spelling(&self, type_name: &[u8], name: &[u8]) -> Option<&'a [u8]> {
+        if let Some(spelling) = self.macros.get(name) {
+            return Some(spelling);
+        }
+        if self.macros.is_ambiguous(name) {
+            return None;
+        }
+        if self.local.components.contains(type_name, name) {
+            return self.local.components.get(type_name, name);
+        }
+        self.project.components.get(type_name, name)
     }
 
     /// The spelling for an ordinary identifier occurrence: a declared name if
@@ -228,10 +328,11 @@ impl<'a> CaseResolver<'a> {
         [
             (&self.local.symbols, &self.project.symbols),
             (&self.local.types, &self.project.types),
-            (&self.local.components, &self.project.components),
         ]
         .into_iter()
         .any(|(local, project)| local.contains(name) || project.contains(name))
+            || self.local.components.contains_name(name)
+            || self.project.components.contains_name(name)
     }
 }
 

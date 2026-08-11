@@ -24,13 +24,22 @@ fn main() {
                 std::process::exit(1)
             }
             let mut out = io::BufWriter::with_capacity(64 * 1024, io::stdout());
-            if let Err(e) = format_to_owned(input, &config, &mut out)
-                .and_then(|_| out.flush().map_err(FormatError::Write))
-            {
+            let result = format_to_owned(input, &config, &mut out);
+            if let Err(e) = result.as_ref() {
                 if !matches!(&e, FormatError::Write(error) if error.kind() == io::ErrorKind::BrokenPipe)
                 {
                     eprintln!("findent: {e}");
                     std::process::exit(1)
+                }
+            } else if let Err(e) = out.flush().map_err(FormatError::Write) {
+                if !matches!(&e, FormatError::Write(error) if error.kind() == io::ErrorKind::BrokenPipe)
+                {
+                    eprintln!("findent: {e}");
+                    std::process::exit(1)
+                }
+            } else if let Ok(meta) = result {
+                for (line, reason) in meta.declines {
+                    eprintln!("findent: declined wrap at line {}: {reason:?}", line + 1);
                 }
             }
         }

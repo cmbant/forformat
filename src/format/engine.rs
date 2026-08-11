@@ -78,6 +78,7 @@ pub fn format_buffer<W: Write>(
         return Ok(FormatMeta {
             last_indent: 0,
             last_usable: 1,
+            declines: Vec::new(),
         });
     }
     let query_mode = config.last_indent || config.last_usable;
@@ -108,6 +109,7 @@ pub fn format_buffer<W: Write>(
         return Ok(FormatMeta {
             last_indent,
             last_usable,
+            declines: Vec::new(),
         });
     }
     if config.last_indent {
@@ -115,11 +117,13 @@ pub fn format_buffer<W: Write>(
         return Ok(FormatMeta {
             last_indent,
             last_usable,
+            declines: Vec::new(),
         });
     }
     Ok(FormatMeta {
         last_indent,
         last_usable,
+        declines: Vec::new(),
     })
 }
 

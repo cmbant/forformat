@@ -43,6 +43,7 @@ files=0
 differing=0
 changed_lines=0
 not_idempotent=0
+declined=0
 longest=0
 longest_file=""
 
@@ -54,10 +55,18 @@ for f in "$CAMB"/fortran/*.f90 "$CAMB"/fortran/tests/*.f90 \
     files=$((files + 1))
     out="$WORK/out"
     twice="$WORK/twice"
+    diag="$WORK/diag"
     # shellcheck disable=SC2086
-    $BIN $ARGS < "$f" > "$out"
+    $BIN $ARGS < "$f" > "$out" 2> "$diag"
+    if [ -s "$diag" ]; then
+        count=$(wc -l < "$diag")
+        declined=$((declined + count))
+        while IFS= read -r message; do
+            printf 'DECLINED         %s  %s\n' "$f" "$message"
+        done < "$diag"
+    fi
     # shellcheck disable=SC2086
-    $BIN $ARGS < "$out" > "$twice"
+    $BIN $ARGS < "$out" > "$twice" 2> "$diag"
 
     if ! cmp -s "$out" "$twice"; then
         not_idempotent=$((not_idempotent + 1))
@@ -81,6 +90,7 @@ echo "files              $files"
 echo "differing          $differing"
 echo "changed lines      $changed_lines"
 echo "non-idempotent     $not_idempotent"
+echo "decline diagnostics $declined"
 echo "longest line       $longest  ($longest_file)"
 
 # Gate D wants zero differing files; a nonzero exit keeps this usable in CI once

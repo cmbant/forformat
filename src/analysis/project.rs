@@ -101,7 +101,7 @@ mod tests {
 
     const MODULE: &[u8] = b"module Precision\ninteger, parameter :: dl = 8\nend module Precision\n";
     const USER: &[u8] = b"program p\nuse Precision\nend program p\n";
-    const SHOUTER: &[u8] = b"program q\nuse PRECISION\nend program q\n";
+    const SHOUTER: &[u8] = b"module PRECISION\nend module PRECISION\n";
 
     #[test]
     fn a_project_wide_agreement_applies_to_a_file_that_does_not_declare_the_name() {
@@ -135,7 +135,7 @@ mod tests {
     #[test]
     fn a_local_spelling_still_wins_over_the_project() {
         let project = analyze_project([(Path::new("a.f90"), MODULE)]).unwrap();
-        let local = analyze_file(b"program r\nuse PRECISION\nend program r\n").unwrap();
+        let local = analyze_file(b"module PRECISION\nend module PRECISION\n").unwrap();
         assert_eq!(
             project
                 .resolver(&local)
@@ -164,6 +164,69 @@ mod tests {
                 .resolver(&local)
                 .spelling(NameSpace::Symbol, b"mpi_enabled"),
             Some(b"MPI_Enabled".as_slice())
+        );
+    }
+
+    #[test]
+    fn synthetic_project_cases_cover_local_and_project_precedence() {
+        let declared = analyze_project([(
+            Path::new("declared.f90"),
+            b"module SharedName\nend module SharedName\n".as_slice(),
+        )])
+        .unwrap();
+        let no_local = analyze_file(b"program p\nend program p\n").unwrap();
+        assert_eq!(
+            declared
+                .resolver(&no_local)
+                .spelling(NameSpace::Module, b"sharedname"),
+            Some(b"SharedName".as_slice())
+        );
+
+        let split = analyze_project([
+            (
+                Path::new("a.f90"),
+                b"module SplitName\nend module\n".as_slice(),
+            ),
+            (
+                Path::new("b.f90"),
+                b"module SPLITNAME\nend module\n".as_slice(),
+            ),
+        ])
+        .unwrap();
+        assert_eq!(
+            split
+                .resolver(&no_local)
+                .spelling(NameSpace::Module, b"splitname"),
+            None
+        );
+
+        let project = analyze_project([(
+            Path::new("global.f90"),
+            b"module M\ninteger :: Colliding\nend module M\n".as_slice(),
+        )])
+        .unwrap();
+        let local =
+            analyze_file(b"module Local\ninteger :: COLLIDING\nend module Local\n").unwrap();
+        assert_eq!(
+            project
+                .resolver(&local)
+                .spelling(NameSpace::Symbol, b"colliding"),
+            Some(b"COLLIDING".as_slice())
+        );
+
+        let component_project = analyze_project([(
+            Path::new("component.f90"),
+            b"module C\ntype :: T\ninteger :: Component\nend type T\nend module C\n".as_slice(),
+        )])
+        .unwrap();
+        let component_local = analyze_file(
+            b"module L\ntype :: T\ninteger :: COMPONENT\nend type T\ninteger :: Component\nend module L\n",
+        )
+        .unwrap();
+        let resolver = component_project.resolver(&component_local);
+        assert_eq!(
+            resolver.component_spelling(b"t", b"component"),
+            Some(b"COMPONENT".as_slice())
         );
     }
 }

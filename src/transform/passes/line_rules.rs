@@ -122,9 +122,12 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 PhysicalLineKind::Code | PhysicalLineKind::FindentFix
             ) {
                 let code = cx.analysis.buffer.code_bytes(physical);
+                let prior_named_parameter = continued_named_parameter;
                 continued_statement = trailing_ampersand(code);
                 continued_infix = trailing_continuation_operand(code);
-                continued_named_parameter = continued_statement && has_unclosed_group(code);
+                continued_named_parameter = continued_statement
+                    && is_call_group(cx, index)
+                    && (prior_named_parameter || has_unclosed_group(code));
             }
         }
         if line != document.lines[index] {
@@ -135,14 +138,38 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
     Ok(changed)
 }
 
+fn is_call_group(cx: &PassContext, line_index: usize) -> bool {
+    let Some(statement) = cx
+        .analysis
+        .group_of_line(line_index)
+        .and_then(|group| group.statements.first())
+    else {
+        return false;
+    };
+    let tokens = crate::source::tokens::tokens(&statement.text);
+    tokens
+        .iter()
+        .find(|token| token.kind == TokenKind::Name)
+        .is_some_and(|token| token.is_name(b"call"))
+        || tokens
+            .iter()
+            .enumerate()
+            .any(|(index, token)| token.text == b"=" && is_named_parameter_token(&tokens, index))
+}
+
 /// The full chain for one physical line, carrying literal state across
 /// continuations.
-pub fn apply(line: &[u8], cx: &PassContext, line_index: usize, state: &mut LexState) -> Vec<u8> {
-    let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
+pub fn apply(
+    line: &[u8],
+    cx: &PassContext,
+    declared_names: &DeclaredNameIndex,
+    line_index: usize,
+    state: &mut LexState,
+) -> Vec<u8> {
     apply_with_options(
         line,
         cx,
-        &declared_names,
+        declared_names,
         line_index,
         state,
         LineOptions::default(),
@@ -169,10 +196,15 @@ fn apply_with_options(
         options.continued_declaration,
         options.continued_named_parameter,
     );
-    text = normalize_keyword_spacing_with_state(&text, cx, declared_names, line_index, incoming);
+    text = normalize_keyword_spacing_with_state(&text, declared_names, line_index, incoming);
     text = normalize_write_output_spacing_with_state(&text, cx, incoming);
     text = normalize_delimiter_spacing_with_state(&text, cx, incoming);
-    normalize_comment_spacing_with_state(&text, cx, incoming, options.preserve_comment_after)
+    let mut text =
+        normalize_comment_spacing_with_state(&text, cx, incoming, options.preserve_comment_after);
+    if options.continued_statement && options.continued_named_parameter {
+        text = compact_continued_named_argument(&text);
+    }
+    text
 }
 
 /// Rules 1, 2 and 4 for a statement the wrapper has just joined.
@@ -180,13 +212,17 @@ fn apply_with_options(
 /// This exists because joining two physical lines creates spacing the per-line
 /// pass never saw: `if ( .not. (` only becomes `if (.not. (` once the keyword
 /// rule runs after the `.not.` padding that rule 1 adds.
-pub fn respace_joined(line: &[u8], cx: &PassContext, line_index: usize) -> Vec<u8> {
+pub fn respace_joined(
+    line: &[u8],
+    cx: &PassContext,
+    declared_names: &DeclaredNameIndex,
+    line_index: usize,
+) -> Vec<u8> {
     let mut state = LexState::default();
-    let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
     let mut text = lowercase_line_with_context(
         line,
         cx,
-        &declared_names,
+        declared_names,
         line_index,
         &mut state,
         false,
@@ -196,12 +232,52 @@ pub fn respace_joined(line: &[u8], cx: &PassContext, line_index: usize) -> Vec<u
     );
     text = normalize_keyword_spacing_with_state(
         &text,
-        cx,
-        &declared_names,
+        declared_names,
         line_index,
         LexState::default(),
     );
-    normalize_delimiter_spacing(&text, cx)
+    text = normalize_delimiter_spacing(&text, cx);
+    compact_joined_named_arguments(&text)
+}
+
+/// Joining physical continuation lines can turn a named argument into a token
+/// sequence whose original per-line context was unavailable. Keep the
+/// `name=value` spelling that the ordinary line pass uses for argument
+/// specifiers, without compacting top-level assignments.
+fn compact_joined_named_arguments(line: &[u8]) -> Vec<u8> {
+    let tokens = tokenize(line, &mut LexState::default());
+    let mut edits = EditBuffer::new(line);
+    for (index, token) in tokens.iter().enumerate() {
+        if token.text != b"=" || !is_named_parameter_token(&tokens, index) {
+            continue;
+        }
+        let Some(previous) = index.checked_sub(1).and_then(|i| tokens.get(i)) else {
+            continue;
+        };
+        let Some(next) = tokens.get(index + 1) else {
+            continue;
+        };
+        edits.replace(previous.span.end..next.span.start, b"=");
+    }
+    edits.finish()
+}
+
+fn compact_continued_named_argument(line: &[u8]) -> Vec<u8> {
+    let tokens = tokenize(line, &mut LexState::default());
+    let mut edits = EditBuffer::new(line);
+    for (index, token) in tokens.iter().enumerate() {
+        if token.text != b"=" || !is_continued_named_parameter(&tokens, index) {
+            continue;
+        }
+        let Some(previous) = index.checked_sub(1).and_then(|i| tokens.get(i)) else {
+            continue;
+        };
+        let Some(next) = tokens.get(index + 1) else {
+            continue;
+        };
+        edits.replace(previous.span.end..next.span.start, b"=");
+    }
+    edits.finish()
 }
 
 /// Rule 1: keyword case, and the case decisions the project agreed on.
@@ -218,14 +294,14 @@ pub fn respace_joined(line: &[u8], cx: &PassContext, line_index: usize) -> Vec<u
 pub fn lowercase_line(
     line: &[u8],
     cx: &PassContext,
+    declared_names: &DeclaredNameIndex,
     line_index: usize,
     state: &mut LexState,
 ) -> Vec<u8> {
-    let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
     lowercase_line_with_context(
         line,
         cx,
-        &declared_names,
+        declared_names,
         line_index,
         state,
         false,
@@ -306,7 +382,7 @@ fn lowercase_line_with_context(
 
                 let lower = token.text.to_ascii_lowercase();
                 let specifier_argument = is_specifier_keyword_argument(&tokens, index);
-                if is_contextual_declaration_name(&tokens, index) && !specifier_argument {
+                if is_contextual_declaration_name(line, &tokens, index) && !specifier_argument {
                     continue;
                 }
                 if vocab::contains(vocab::FORTRAN_KEYWORDS, token.text)
@@ -395,14 +471,16 @@ fn keyword_in_context(tokens: &[crate::source::Token], index: usize) -> bool {
 /// [`vocab::PARENTHESIZED_STATEMENT_NAMES`], empty `subroutine s()`, `only:`,
 /// bracket-adjacent whitespace, `) then`, and the arithmetic/one-line `IF` body
 /// separator.
-pub fn normalize_keyword_spacing(line: &[u8], cx: &PassContext, line_index: usize) -> Vec<u8> {
-    let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
-    normalize_keyword_spacing_with_state(line, cx, &declared_names, line_index, LexState::default())
+pub fn normalize_keyword_spacing(
+    line: &[u8],
+    declared_names: &DeclaredNameIndex,
+    line_index: usize,
+) -> Vec<u8> {
+    normalize_keyword_spacing_with_state(line, declared_names, line_index, LexState::default())
 }
 
 fn normalize_keyword_spacing_with_state(
     line: &[u8],
-    _cx: &PassContext,
     declared_names: &DeclaredNameIndex,
     line_index: usize,
     incoming: LexState,
@@ -1433,24 +1511,39 @@ fn is_specifier_keyword_argument(tokens: &[crate::source::Token<'_>], index: usi
         .is_some_and(|token| token.text == b"=" && is_named_parameter_token(tokens, index + 1))
 }
 
-fn is_contextual_declaration_name(tokens: &[crate::source::Token<'_>], index: usize) -> bool {
+fn is_contextual_declaration_name(
+    line: &[u8],
+    tokens: &[crate::source::Token<'_>],
+    index: usize,
+) -> bool {
     let Some(separator) = tokens[..index].iter().rposition(|token| {
         token.kind == TokenKind::Operator && token.text == b"::" && token.depth == 0
     }) else {
         return false;
     };
-    // The reference treats every name in the current declaration entity's
-    // shape expression as contextual until a top-level initializer/association
-    // begins.  Thus an intrinsic in `x(merge(...))` is protected, while the
-    // same word after `x =` is an ordinary value expression.
-    for token in tokens
-        .iter()
-        .skip(separator + 1)
-        .take(index - separator - 1)
-    {
-        if token.kind == TokenKind::Operator
-            && (token.text == b"=" || token.text == b"=>")
-            && token.depth == 0
+    // Match `is_contextual_identifier`: a top-level comma starts a new
+    // declaration entity, so an initializer on an earlier entity does not
+    // affect a later one.  Its initializer scan is character-based rather
+    // than depth-filtered, so `=` inside nested parentheses still qualifies.
+    let mut item_start = separator + 1;
+    for (position, token) in tokens.iter().enumerate().take(index).skip(separator + 1) {
+        if token.kind == TokenKind::Comma && token.depth == 0 {
+            item_start = position + 1;
+        }
+    }
+    for token in tokens.iter().take(index).skip(item_start) {
+        if token.kind != TokenKind::Operator || token.text != b"=" {
+            continue;
+        }
+        let previous = token.span.start.checked_sub(1).and_then(|at| line.get(at));
+        let following = line.get(token.span.end);
+        if following == Some(&b'>')
+            || (previous != Some(&b'<')
+                && previous != Some(&b'>')
+                && previous != Some(&b'=')
+                && previous != Some(&b'/')
+                && following != Some(&b'=')
+                && following != Some(&b'>'))
         {
             return false;
         }
@@ -2068,6 +2161,42 @@ module b\nX = size(1)\nend module b\n"
     }
 
     #[test]
+    fn dollar_sentinel_clause_bodies_follow_fortran_normalization() {
+        assert_eq!(normalized(b"!$ USE OMP_LIB\n"), "!$ use OMP_LIB\n");
+        assert_eq!(
+            normalized(b"!$ IF(X.EQ.1) CALL F( A , B )\n"),
+            "!$ if (X == 1) call F(A, B)\n"
+        );
+    }
+
+    #[test]
+    fn dollar_sentinel_boundaries_and_protected_text_are_preserved() {
+        let source = b"! USE OMP_LIB\n!$OMP IF(X.EQ.1) CALL F( A , B )\n!$\n  !$ USE OMP_LIB\n!$ CALL F('IF THEN', A)\n";
+        let once = normalized(source);
+        assert_eq!(
+            once,
+            "! USE OMP_LIB\n!$OMP IF(X.EQ.1) CALL F( A , B )\n!$\n  !$ use OMP_LIB\n!$ call F('IF THEN', A)\n"
+        );
+        assert_eq!(normalized(once.as_bytes()), once);
+    }
+
+    #[test]
+    fn contextual_declaration_names_reset_after_top_level_initializers() {
+        assert_eq!(
+            normalized(b"INTEGER :: A = 1, SIZE\n"),
+            "integer :: A = 1, SIZE\n"
+        );
+    }
+
+    #[test]
+    fn contextual_declaration_initializer_scan_sees_nested_equals() {
+        assert_eq!(
+            normalized(b"REAL :: X(F(N=1) + SIZE)\n"),
+            "real :: X(F(N=1) + size)\n"
+        );
+    }
+
+    #[test]
     fn uppercase_single_l_is_opt_in_and_protected_bytes_are_untouched() {
         let source = b"x = l + 'l' ! l\n#define L 1\n";
         let mut document = Document::from_bytes(source);
@@ -2090,6 +2219,16 @@ module b\nX = size(1)\nend module b\n"
         assert_eq!(
             String::from_utf8_lossy(&document.to_bytes()),
             "x = L + 'l' ! l\n#define L 1\n"
+        );
+    }
+
+    #[test]
+    fn joined_named_arguments_keep_compact_equals() {
+        assert_eq!(
+            super::compact_joined_named_arguments(
+                b"call compute(alpha, nested(first, second), named = value)"
+            ),
+            b"call compute(alpha, nested(first, second), named=value)"
         );
     }
 }
