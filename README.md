@@ -5,11 +5,11 @@ formatter. It reads bytes from stdin and writes formatted bytes to stdout, prese
 spelling while adjusting indentation and removing trailing spaces/tabs:
 
 ```sh
-cargo run --release -- -ifree < equations.f90 > equations.f90.indented
+cargo run --release -- -ifree < source.f90 > source.f90.indented
 ```
 
-With the reference installation available, `tools/check_equations.sh target/release/findent`
-checks that the generated file is idempotent and matches findent 4.3.7 byte-for-byte.
+With the reference installation available, `tools/differential_free.sh target/release/findent`
+checks the retained legacy fixtures against findent 4.3.7 byte-for-byte.
 
 The public library API is `findent::format_source` / `findent::format_to` /
 `findent::format_to_owned`. Fixed-form conversion,

@@ -23,11 +23,9 @@ test "$first_hash" = "$second_hash"
 cargo test --manifest-path "$package_root/Cargo.toml" --locked --all-targets >/dev/null
 echo "package check: unpacked crate tests passed"
 
-if test -f equations.f90 && test -f equations.f90.indented; then
-    cargo build --manifest-path "$package_root/Cargo.toml" --locked --release >/dev/null
-    ./tools/check_equations.sh "$package_root/target/release/findent" equations.f90 equations.f90.indented
-    echo "package check: unpacked release binary passed equations.f90"
-fi
+cargo build --manifest-path "$package_root/Cargo.toml" --locked --release >/dev/null
+./tools/check_cli_contract.sh "$package_root/target/release/findent"
+echo "package check: unpacked release binary passed the CLI contract"
 
 tar -tzf "$archive" | grep -F 'findent-0.1.0/Cargo.toml' >/dev/null
 tar -tzf "$archive" | grep -F 'findent-0.1.0/src/main.rs' >/dev/null

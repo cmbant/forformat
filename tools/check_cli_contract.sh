@@ -45,7 +45,7 @@ test "$(printf '' | "$binary" --last-indent)" = 0
 test "$(printf 'program p\n' | "$binary" --last-usable)" = 1
 
 set +e
-"$binary" -ifree < equations.f90 | head -c 1 >/dev/null
+"$binary" -ifree < tests/fixtures/legacy_free_matrix.f90 | head -c 1 >/dev/null
 pipe_status=${PIPESTATUS[0]}
 set -e
 test "$pipe_status" -eq 0

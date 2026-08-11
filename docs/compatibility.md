@@ -32,9 +32,9 @@ statements, keyword identifiers, `findentfix`, CPP branch restoration, labeled `
 and preservation. When the 4.3.7 reference installation is available, run
 `tools/differential_free.sh target/release/findent`; it compares the retained non-fixed legacy
 fixtures `progfree.f`, `progfree1.f`, and `progfree-dos.f` with the oracle and reports the
-intentional preservation-boundary differences. For the large real-world input, run
-`tools/check_equations.sh target/release/findent equations.f90 equations.f90.indented`; it checks
-the generated output, idempotence, and exact oracle agreement when `/opt/findent` is present. The
+intentional preservation-boundary differences. Large real-world inputs are verified against the
+external CAMB corpus during development rather than from checked-in copies; see
+`FORTRAN_COMBINED_RUST_PORT_PLAN.md` for that workflow. The
 complete legacy shell suite is not a normal Rust test dependency because it includes fixed-form,
 relabeling, editor-wrapper, and other explicitly excluded features.
 
