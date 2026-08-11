@@ -30,3 +30,6 @@
 Thumbs.db
 
 fortran/
+# Python bytecode from the frozen reference tooling
+__pycache__/
+*.pyc

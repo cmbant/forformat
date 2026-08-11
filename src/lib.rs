@@ -5,6 +5,7 @@
 //! and emits the original spelling with leading indentation adjusted and
 //! trailing horizontal whitespace removed.
 
+pub mod analysis;
 pub mod classify;
 pub mod cli;
 pub mod config;
@@ -13,7 +14,8 @@ pub mod format;
 pub mod source;
 pub mod transform;
 
-pub use config::FormatConfig;
+pub use analysis::{analyze_project, ProjectContext};
+pub use config::{FormatConfig, FormatMode, MacroDefine, WrapConfig};
 pub use error::FormatError;
 
 /// The result of formatting a source buffer.
@@ -30,9 +32,31 @@ pub struct FormatMeta {
     pub last_usable: usize,
 }
 
-/// Format an in-memory source buffer.
+/// Format an in-memory source buffer with no project context.
+///
+/// Equivalent to [`format_source_with_context`] with
+/// [`ProjectContext::empty`](analysis::ProjectContext::empty): the whole golden,
+/// property and fuzz suite calls this, and it stays valid after full mode
+/// arrives because a lone buffer simply declares no project.
 pub fn format_source(source: &[u8], config: &FormatConfig) -> Result<FormatResult, FormatError> {
-    format::engine::format(source, config)
+    if config.mode == config::FormatMode::IndentOnly {
+        return format::engine::format(source, config);
+    }
+    format_source_with_context(source, &analysis::ProjectContext::empty(), config)
+}
+
+/// Format one source with the declarations of the whole project available.
+///
+/// A single `&[u8]` cannot express project context, so it is passed separately
+/// rather than smuggled into `FormatConfig`.  Build the context once per
+/// invocation with [`analysis::analyze_project`] — that is what Gate G of the
+/// port plan measures.
+pub fn format_source_with_context(
+    source: &[u8],
+    context: &analysis::ProjectContext,
+    config: &FormatConfig,
+) -> Result<FormatResult, FormatError> {
+    format::full::format_with_context(source, context, config)
 }
 
 /// Format into a caller-provided writer.
@@ -41,7 +65,18 @@ pub fn format_to<W: std::io::Write>(
     config: &FormatConfig,
     out: &mut W,
 ) -> Result<FormatMeta, FormatError> {
-    format::engine::format_to(source, config, out)
+    if config.mode == config::FormatMode::IndentOnly {
+        return format::engine::format_to(source, config, out);
+    }
+    write_result(format_source(source, config)?, out)
+}
+
+fn write_result<W: std::io::Write>(
+    result: FormatResult,
+    out: &mut W,
+) -> Result<FormatMeta, FormatError> {
+    out.write_all(&result.bytes).map_err(FormatError::Write)?;
+    Ok(result.meta)
 }
 
 /// Format an owned source buffer into a caller-provided writer.
@@ -54,7 +89,10 @@ pub fn format_to_owned<W: std::io::Write>(
     config: &FormatConfig,
     out: &mut W,
 ) -> Result<FormatMeta, FormatError> {
-    format::engine::format_to_owned(source, config, out)
+    if config.mode == config::FormatMode::IndentOnly {
+        return format::engine::format_to_owned(source, config, out);
+    }
+    write_result(format_source(&source, config)?, out)
 }
 
 #[cfg(test)]

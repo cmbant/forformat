@@ -1,9 +1,12 @@
-use crate::{config::FormatConfig, error::FormatError};
+use crate::{
+    config::{FormatConfig, FormatMode, MacroDefine},
+    error::FormatError,
+};
 
 pub const VERSION: &str = "findent 0.1.0";
 
 pub enum Command {
-    Run(FormatConfig),
+    Run(Box<FormatConfig>),
     Help,
     Version,
 }
@@ -135,6 +138,23 @@ where
                 }
                 "last-indent" => c.last_indent = true,
                 "last-usable" => c.last_usable = true,
+                // Mode selection.  `indent-only` must be matched before the
+                // generic `indent-*` construct arm below, which would otherwise
+                // read it as a construct name.
+                "indent-only" => c.mode = FormatMode::IndentOnly,
+                "full" => c.mode = FormatMode::Full,
+                "normalize-only" => c.mode = FormatMode::NormalizeOnly,
+                "wrap" => {
+                    c.wrap.enabled = value
+                        .as_deref()
+                        .map(parse_bool)
+                        .transpose()?
+                        .unwrap_or(true)
+                }
+                "no-wrap" => c.wrap.enabled = false,
+                "line-length" => c.wrap.line_length = parse_num(&need(&mut value, &mut a)?)?,
+                "uppercase-single-l" => c.uppercase_single_l = true,
+                "define" => push_define(&mut c, &need(&mut value, &mut a)?),
                 "indent-changeteam" => {
                     c.construct_indents.changeteam = parse_num(&need(&mut value, &mut a)?)?
                 }
@@ -262,6 +282,16 @@ where
                         c.continuation_indent = parse_num(&v)?
                     }
                 }
+                'D' => {
+                    let v = if value.is_empty() {
+                        a.next().ok_or_else(|| {
+                            FormatError::InvalidOption("-D requires a value".into())
+                        })?
+                    } else {
+                        value.to_string()
+                    };
+                    push_define(&mut c, &v);
+                }
                 'K' => c.indent_ampersand = true,
                 'l' => {
                     let v = if value.is_empty() {
@@ -298,7 +328,22 @@ where
     } else if version {
         Ok(Command::Version)
     } else {
-        Ok(Command::Run(c))
+        Ok(Command::Run(Box::new(c)))
+    }
+}
+
+/// Record a `-D NAME[=VALUE]` definition.  Only the name affects casing, but
+/// the value is kept for the CPP evaluation the port will need.
+fn push_define(c: &mut FormatConfig, spec: &str) {
+    let (name, value) = match spec.split_once('=') {
+        Some((name, value)) => (name, Some(value.to_string())),
+        None => (spec, None),
+    };
+    if !name.is_empty() {
+        c.defines.push(MacroDefine {
+            name: name.to_string(),
+            value,
+        });
     }
 }
 
@@ -388,6 +433,13 @@ Free-form Fortran formatter.\n\
   -Rr, -RR, --refactor-end[=upcase]  complete END definition statements\n\
   --ws-remred[=<n>]                  reduce redundant whitespace\n\
   -lastindent, -lastusable           print query result instead of source\n\
+  --indent-only                      findent-compatible indentation only (default)\n\
+  --full                             full formatting: normalization and wrapping\n\
+  --normalize-only                   normalization without structural layout\n\
+  --wrap[=<0|1>], --no-wrap          reflow over-long statements (full mode)\n\
+  --line-length=<n>                  wrapping budget (default 120)\n\
+  -D NAME[=VALUE], --define=...      define a macro name (repeatable)\n\
+  --uppercase-single-l               uppercase a lone `l` used as a name\n\
   -h, --help                         show this help\n\
   -v, --version                      show version\n\
 Fixed-form input/output and automatic format detection are intentionally unsupported."
@@ -401,7 +453,7 @@ mod tests {
         let mut argv = vec!["findent".to_string()];
         argv.extend(args.iter().map(|arg| (*arg).to_string()));
         match parse(argv).unwrap() {
-            Command::Run(config) => config,
+            Command::Run(config) => *config,
             _ => panic!("expected a formatting command"),
         }
     }
@@ -600,6 +652,39 @@ mod tests {
                 _ => panic!("unexpected result for {args:?}"),
             }
         }
+    }
+
+    #[test]
+    fn mode_and_full_format_options_parse_and_do_not_collide_with_construct_names() {
+        use crate::config::FormatMode;
+        assert_eq!(run(&[]).mode, FormatMode::IndentOnly);
+        assert_eq!(run(&["--full"]).mode, FormatMode::Full);
+        assert_eq!(run(&["--normalize-only"]).mode, FormatMode::NormalizeOnly);
+        // `--indent-only` must not be read as `--indent-<construct>`.
+        assert_eq!(
+            run(&["--full", "--indent-only"]).mode,
+            FormatMode::IndentOnly
+        );
+        assert_eq!(run(&["--indent_only"]).mode, FormatMode::IndentOnly);
+
+        assert!(run(&[]).wrap.enabled);
+        assert!(!run(&["--no-wrap"]).wrap.enabled);
+        assert!(!run(&["--wrap=0"]).wrap.enabled);
+        assert_eq!(run(&["--line-length=100"]).wrap.line_length, 100);
+        assert!(run(&["--uppercase-single-l"]).uppercase_single_l);
+    }
+
+    #[test]
+    fn macro_definitions_accumulate_in_order_from_both_spellings() {
+        let config = run(&["-DFIRST", "-D", "Second=2", "--define=Third"]);
+        let names: Vec<&str> = config
+            .defines
+            .iter()
+            .map(|define| define.name.as_str())
+            .collect();
+        assert_eq!(names, ["FIRST", "Second", "Third"]);
+        assert_eq!(config.defines[1].value.as_deref(), Some("2"));
+        assert_eq!(config.defines[0].value, None);
     }
 
     #[test]

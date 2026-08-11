@@ -1,7 +1,7 @@
 use findent::{
     format_source, format_to, format_to_owned,
-    source::{LogicalGroup, SourceBuffer},
-    FormatConfig,
+    source::{regions::regions, LogicalGroup, RegionKind, SourceBuffer},
+    FormatConfig, FormatMode,
 };
 
 #[test]
@@ -23,6 +23,38 @@ fn default_formatting_is_idempotent_on_malformed_and_lexical_corpus() {
             .bytes;
         assert_eq!(once, twice, "source was not idempotent: {source:?}");
     }
+}
+
+#[test]
+fn full_mode_chunk_a_preserves_protected_bytes_and_is_idempotent() {
+    let source = b"PROGRAM P\nCALL F('IF  THEN  ', 4Hab  c) ! x=1+2\n#define IF_THING 1\nIF (X) THEN\nEND IF\nEND PROGRAM P\n";
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        ..FormatConfig::default()
+    };
+    let once = format_source(source, &config).unwrap().bytes;
+    let twice = format_source(&once, &config).unwrap().bytes;
+    assert_eq!(once, twice, "full mode is not a fixed point");
+
+    let protected = |bytes: &[u8]| {
+        let mut literals = Vec::new();
+        let mut cpp = Vec::new();
+        for line in bytes.split(|byte| *byte == b'\n') {
+            if line.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'#') {
+                cpp.push(line.to_vec());
+            }
+            for region in regions(line) {
+                if matches!(
+                    region.kind,
+                    RegionKind::StringLiteral | RegionKind::Hollerith
+                ) {
+                    literals.push(line[region.range].to_vec());
+                }
+            }
+        }
+        (literals, cpp)
+    };
+    assert_eq!(protected(source), protected(&once));
 }
 
 #[test]

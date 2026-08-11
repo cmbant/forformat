@@ -15,32 +15,59 @@ pub fn newline_bytes(n: Newline) -> &'static [u8] {
     }
 }
 
+/// Per-group emission policy.
+///
+/// These two flags used to be expressed by cloning `FormatConfig` once per
+/// logical group and mutating a field.  They are separated so the config can
+/// grow keyword and symbol tables without the clone becoming a real cost.
+#[derive(Debug, Clone, Copy)]
+pub struct EmitStyle<'a> {
+    pub config: &'a FormatConfig,
+    /// False for CPP directive groups, whose source indentation is structural
+    /// noise, and for `-i-`.
+    pub apply_indent: bool,
+    /// Redundant-whitespace reduction, disabled for Hollerith-bearing groups
+    /// because their payload length is positional.
+    pub remred: bool,
+}
+
+impl<'a> EmitStyle<'a> {
+    /// The style for an ordinary group: indentation as configured, whitespace
+    /// reduction as configured.
+    pub fn new(config: &'a FormatConfig) -> Self {
+        Self {
+            config,
+            apply_indent: config.apply_indent,
+            remred: config.ws_remred || config.ws_remred_value != 0,
+        }
+    }
+}
+
+/// Where one physical line goes.  This is the part of the layout plan the
+/// emitter consumes; the planner decides it, ahead of any byte being written.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LinePlacement {
+    pub indent: usize,
+    /// First physical line of its logical group.
+    pub first: bool,
+    /// The group's first line ended with `&`.
+    pub previous_cont: bool,
+    /// Active parenthesis alignment column, when `--align-paren` is on.
+    pub alignment: Option<usize>,
+}
+
 /// Compatibility wrapper used by small callers and tests.  The formatter's
 /// production path uses `emit_line_to`, which writes directly to its sink.
-#[allow(clippy::too_many_arguments)]
 pub fn emit_line(
     buf: &SourceBuffer,
     index: usize,
-    indent: usize,
-    config: &FormatConfig,
-    first: bool,
-    previous_cont: bool,
-    alignment: Option<usize>,
+    place: LinePlacement,
+    style: &EmitStyle,
     replacement: Option<&[u8]>,
 ) -> Vec<u8> {
     let mut out = Vec::new();
-    emit_line_to(
-        buf,
-        index,
-        indent,
-        config,
-        first,
-        previous_cont,
-        alignment,
-        replacement,
-        &mut out,
-    )
-    .expect("writing to a Vec cannot fail");
+    emit_line_to(buf, index, place, style, replacement, &mut out)
+        .expect("writing to a Vec cannot fail");
     out
 }
 
@@ -48,48 +75,36 @@ pub fn emit_line(
 /// The default policy replaces leading horizontal whitespace and trims
 /// trailing horizontal whitespace.  Other bytes in the line body remain
 /// source-owned unless an explicit transformation is enabled.
-#[allow(clippy::too_many_arguments)]
 pub fn emit_line_to<W: Write>(
     buf: &SourceBuffer,
     index: usize,
-    indent: usize,
-    config: &FormatConfig,
-    first: bool,
-    previous_cont: bool,
-    alignment: Option<usize>,
+    place: LinePlacement,
+    style: &EmitStyle,
     replacement: Option<&[u8]>,
     out: &mut W,
 ) -> Result<(), FormatError> {
     let mut quote = 0u8;
-    emit_line_to_with_quote(
-        buf,
-        index,
-        indent,
-        config,
-        first,
-        previous_cont,
-        alignment,
-        replacement,
-        &mut quote,
-        out,
-    )
+    emit_line_to_with_quote(buf, index, place, style, replacement, &mut quote, out)
 }
 
 /// Emit one physical line while carrying the redundant-whitespace transform's
 /// quote state across a logical continuation group.
-#[allow(clippy::too_many_arguments)]
 pub fn emit_line_to_with_quote<W: Write>(
     buf: &SourceBuffer,
     index: usize,
-    indent: usize,
-    config: &FormatConfig,
-    first: bool,
-    previous_cont: bool,
-    alignment: Option<usize>,
+    place: LinePlacement,
+    style: &EmitStyle,
     replacement: Option<&[u8]>,
     quote: &mut u8,
     out: &mut W,
 ) -> Result<(), FormatError> {
+    let LinePlacement {
+        indent,
+        first,
+        previous_cont,
+        alignment,
+    } = place;
+    let config = style.config;
     let line = &buf.lines[index];
     let original = buf.line_bytes(line);
 
@@ -104,7 +119,7 @@ pub fn emit_line_to_with_quote<W: Write>(
         return Ok(());
     }
 
-    if !config.apply_indent {
+    if !style.apply_indent {
         let leading = leading_len(original);
         if let Some(replacement) = replacement {
             out.write_all(&original[..leading])
@@ -216,7 +231,7 @@ pub fn emit_line_to_with_quote<W: Write>(
         source = replacement;
     }
 
-    let remred = config.ws_remred || config.ws_remred_value != 0;
+    let remred = style.remred;
     if first && !(previous_cont && is_label_fragment(source)) {
         if let Some((label, rest)) = split_label(source) {
             if config.label_left {
@@ -340,21 +355,37 @@ fn is_label_fragment(s: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::emit_line;
+    use super::{emit_line, EmitStyle, LinePlacement};
     use crate::{config::FormatConfig, source::SourceBuffer};
+
+    fn first(indent: usize) -> LinePlacement {
+        LinePlacement {
+            indent,
+            first: true,
+            previous_cont: false,
+            alignment: None,
+        }
+    }
+
+    fn continued(indent: usize, alignment: Option<usize>) -> LinePlacement {
+        LinePlacement {
+            indent,
+            first: false,
+            previous_cont: true,
+            alignment,
+        }
+    }
 
     #[test]
     fn direct_emitter_handles_labels_and_continuations() {
         let labeled = SourceBuffer::new(b"  10 x=1\n").unwrap();
         let config = FormatConfig::default();
-        assert_eq!(
-            emit_line(&labeled, 0, 3, &config, true, false, None, None),
-            b"10 x=1\n"
-        );
+        let style = EmitStyle::new(&config);
+        assert_eq!(emit_line(&labeled, 0, first(3), &style, None), b"10 x=1\n");
 
-        let continued = SourceBuffer::new(b"x = &\n  & y\n").unwrap();
+        let source = SourceBuffer::new(b"x = &\n  & y\n").unwrap();
         assert_eq!(
-            emit_line(&continued, 1, 3, &config, false, true, None, None),
+            emit_line(&source, 1, continued(3, None), &style, None),
             b"   & y\n"
         );
     }
@@ -363,12 +394,13 @@ mod tests {
     fn direct_emitter_preserves_comment_and_openmp_boundaries() {
         let comments = SourceBuffer::new(b"  ! comment\n!$    call x\n").unwrap();
         let config = FormatConfig::default();
+        let style = EmitStyle::new(&config);
         assert_eq!(
-            emit_line(&comments, 0, 0, &config, true, false, None, None),
+            emit_line(&comments, 0, first(0), &style, None),
             b" ! comment\n"
         );
         assert_eq!(
-            emit_line(&comments, 1, 6, &config, true, false, None, None),
+            emit_line(&comments, 1, first(6), &style, None),
             b"!$    call x\n"
         );
     }
@@ -381,31 +413,32 @@ mod tests {
             ..FormatConfig::default()
         };
         assert_eq!(
-            emit_line(&labeled, 0, 3, &label_right, true, false, None, None),
+            emit_line(&labeled, 0, first(3), &EmitStyle::new(&label_right), None),
             b"   10 x=1\n"
         );
 
-        let continuation = SourceBuffer::new(b"x = f(a, &\n  b)\n").unwrap();
+        let source = SourceBuffer::new(b"x = f(a, &\n  b)\n").unwrap();
         let config = FormatConfig::default();
+        let style = EmitStyle::new(&config);
         assert_eq!(
-            emit_line(&continuation, 1, 3, &config, false, true, Some(9), None),
+            emit_line(&source, 1, continued(3, Some(9)), &style, None),
             b"         b)\n"
         );
 
         assert_eq!(
-            emit_line(&labeled, 0, 0, &config, true, false, None, Some(b"10 y=2")),
+            emit_line(&labeled, 0, first(0), &style, Some(b"10 y=2")),
             b"10 y=2\n"
         );
 
         let whitespace = SourceBuffer::new(b"x = \"a  b\"  \n").unwrap();
         assert_eq!(
-            emit_line(&whitespace, 0, 0, &config, true, false, None, None),
+            emit_line(&whitespace, 0, first(0), &style, None),
             b"x = \"a  b\"\n"
         );
-        let mut reduced = config;
+        let mut reduced = config.clone();
         reduced.ws_remred = true;
         assert_eq!(
-            emit_line(&whitespace, 0, 0, &reduced, true, false, None, None),
+            emit_line(&whitespace, 0, first(0), &EmitStyle::new(&reduced), None),
             b"x = \"a  b\"\n"
         );
     }
@@ -414,19 +447,26 @@ mod tests {
     fn direct_emitter_preserves_mixed_terminators_and_ampersand_policy() {
         let source = SourceBuffer::new(b"x = a &\r\n  & b\ny = c\n").unwrap();
         let config = FormatConfig::default();
+        let style = EmitStyle::new(&config);
         assert_eq!(
-            emit_line(&source, 0, 0, &config, true, false, None, None),
+            emit_line(&source, 0, first(0), &style, None),
             b"x = a &\r\n"
         );
         assert_eq!(
-            emit_line(&source, 1, 3, &config, false, true, None, None),
+            emit_line(&source, 1, continued(3, None), &style, None),
             b"   & b\n"
         );
 
-        let mut indented_ampersand = config;
+        let mut indented_ampersand = config.clone();
         indented_ampersand.indent_ampersand = true;
         assert_eq!(
-            emit_line(&source, 1, 3, &indented_ampersand, false, true, None, None),
+            emit_line(
+                &source,
+                1,
+                continued(3, None),
+                &EmitStyle::new(&indented_ampersand),
+                None
+            ),
             b"      & b\n"
         );
     }

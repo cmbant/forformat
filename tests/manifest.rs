@@ -14,6 +14,10 @@ struct Case {
     stderr: String,
     status: i32,
     args: String,
+    /// Formatting mode this case pins.  Defaults to `indent-only`, so every
+    /// checked-in case stays byte-exact against findent 4.3.7 forever (I6)
+    /// even after full mode becomes the CLI default.
+    mode: String,
 }
 
 #[test]
@@ -39,11 +43,20 @@ fn checked_in_manifest_covers_success_and_rejection_paths() {
         };
         let argv = std::iter::once("findent".to_string())
             .chain(case.args.split_whitespace().map(str::to_owned));
+        let mode = match case.mode.as_str() {
+            "" | "indent-only" => findent::FormatMode::IndentOnly,
+            "normalize-only" => findent::FormatMode::NormalizeOnly,
+            "full" => findent::FormatMode::Full,
+            other => panic!("unknown manifest mode {other} in case {}", case.name),
+        };
         let (stdout, stderr, status) = match cli::parse(argv) {
-            Ok(cli::Command::Run(config)) => match format_source(&input, &config) {
-                Ok(result) => (result.bytes, String::new(), 0),
-                Err(error) => (Vec::new(), format_error(error), 1),
-            },
+            Ok(cli::Command::Run(mut config)) => {
+                config.mode = mode;
+                match format_source(&input, &config) {
+                    Ok(result) => (result.bytes, String::new(), 0),
+                    Err(error) => (Vec::new(), format_error(error), 1),
+                }
+            }
             Ok(cli::Command::Help) | Ok(cli::Command::Version) => (Vec::new(), String::new(), 0),
             Err(error) => (Vec::new(), format_error(error), 2),
         };
@@ -92,6 +105,7 @@ fn parse_manifest(path: &std::path::Path, source: &str) -> Vec<Case> {
             "stderr" => case.stderr = value,
             "status" => case.status = value.parse().expect("manifest status"),
             "args" => case.args = value,
+            "mode" => case.mode = value,
             other => panic!("unknown manifest key {other} in {}", path.display()),
         }
     }

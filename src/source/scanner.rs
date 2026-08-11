@@ -1,4 +1,12 @@
-use super::buffer::{comment_start, SourceBuffer};
+//! The classifier's minimal splitter.
+//!
+//! This is deliberately *not* the full-mode token stream: the recognizer chain
+//! in `classify::recognizers` encodes hundreds of findent 4.3.7 edge cases
+//! against exactly these token boundaries, so it keeps its own conservative
+//! lexer.  Rewriting transforms use [`crate::source::tokens`] instead.  Both
+//! share one protected-region walker, which is the duplication that mattered.
+
+use super::regions::{comment_start, LexState, RegionKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Token<'a> {
@@ -59,85 +67,40 @@ pub fn tokens<'a>(s: &'a [u8]) -> Vec<Token<'a>> {
     out
 }
 
+/// Split a joined logical line at semicolons that are real statement
+/// separators.  A trailing comment is never split and stays attached to the
+/// last statement, matching findent.
 pub fn split_statements(s: &[u8]) -> Vec<&[u8]> {
-    let mut out = Vec::new();
-    let mut start = 0;
-    let mut quote = 0u8;
-    let mut hollerith = 0usize;
-    let mut i = 0;
-    while i < s.len() {
-        let c = s[i];
-        if hollerith > 0 {
-            hollerith -= 1;
-            i += 1;
-            continue;
-        }
-        if quote != 0 {
-            if c == quote {
-                if s.get(i + 1) == Some(&quote) {
-                    i += 2;
-                    continue;
-                }
-                quote = 0;
-            }
-            i += 1;
-            continue;
-        }
-        if c == b'\'' || c == b'"' {
-            quote = c;
-            i += 1;
-            continue;
-        }
-        if c == b'!' {
-            break;
-        }
-        if c == b';' {
-            out.push(&s[start..i]);
-            start = i + 1;
-        }
-        if c.is_ascii_digit() && (i == 0 || (!s[i - 1].is_ascii_alphanumeric() && s[i - 1] != b'_'))
-        {
-            let mut j = i;
-            while j < s.len() && s[j].is_ascii_digit() {
-                j += 1;
-            }
-            if s.get(j).is_some_and(|x| *x == b'h' || *x == b'H') {
-                hollerith = std::str::from_utf8(&s[i..j])
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0);
-                i = j + 1;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    out.push(&s[start..]);
-    out
+    split_statement_ranges(s)
+        .into_iter()
+        .map(|range| &s[range])
+        .collect()
 }
 
-pub fn normalized_statement(buf: &SourceBuffer, lines: std::ops::Range<usize>) -> Vec<u8> {
-    let mut result = Vec::new();
-    for (n, i) in lines.enumerate() {
-        let line = &buf.lines[i];
-        let mut s = buf.code_bytes(line);
-        let mut j = 0;
-        while j < s.len() && (s[j] == b' ' || s[j] == b'\t') {
-            j += 1;
+/// The same split, reported as ranges so a caller can keep provenance.
+pub fn split_statement_ranges(s: &[u8]) -> Vec<std::ops::Range<usize>> {
+    let mut separators = Vec::new();
+    for region in LexState::default().regions(s) {
+        match region.kind {
+            RegionKind::Comment => break,
+            RegionKind::Code => {
+                for (offset, byte) in s[region.range.clone()].iter().enumerate() {
+                    if *byte == b';' {
+                        separators.push(region.range.start + offset);
+                    }
+                }
+            }
+            _ => {}
         }
-        s = &s[j..];
-        if n > 0 && s.first() == Some(&b'&') {
-            s = &s[1..];
-        }
-        while s.last().is_some_and(|x| x.is_ascii_whitespace()) {
-            s = &s[..s.len() - 1];
-        }
-        if s.last() == Some(&b'&') {
-            s = &s[..s.len() - 1];
-        }
-        result.extend_from_slice(s);
     }
-    result
+    let mut out = Vec::with_capacity(separators.len() + 1);
+    let mut start = 0;
+    for index in separators {
+        out.push(start..index);
+        start = index + 1;
+    }
+    out.push(start..s.len());
+    out
 }
 
 #[cfg(test)]

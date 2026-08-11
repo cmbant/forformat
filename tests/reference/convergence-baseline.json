@@ -1,0 +1,410 @@
+[
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "a846a98cf51a94ca",
+    "name": "tests/fixtures/advanced_constructs.f90",
+    "input_hash": "78163ced04ae7a52",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "2ef05505315a9cae",
+    "name": "tests/fixtures/align.f90",
+    "input_hash": "79e217364604666c",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "b9bd223edff6824a",
+    "name": "tests/fixtures/align_legacy_full.f90",
+    "input_hash": "5273d18164076880",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "e72eedb956efbbbe",
+    "name": "tests/fixtures/align_nested.f90",
+    "input_hash": "41a6d722b7b611a4",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "65d890e08d3abcb3",
+    "name": "tests/fixtures/benchmark.f90",
+    "input_hash": "5542ca980e4cf888",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "b30c61f028752985",
+    "name": "tests/fixtures/benchmark_continuation.f90",
+    "input_hash": "9e25fb78c0341194",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "61a125c0d3f40e13",
+    "name": "tests/fixtures/benchmark_preprocessor.f90",
+    "input_hash": "a9cb70bd2006dd66",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "2810444dcd4c7669",
+    "name": "tests/fixtures/cli_layout.f90",
+    "input_hash": "251668858292c85b",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "afca39ec0090d07c",
+    "name": "tests/fixtures/compat_regressions.f90",
+    "input_hash": "4fad7bfbed28c948",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "53ecb9b773d096c8",
+    "name": "tests/fixtures/construct_options.f90",
+    "input_hash": "b646f4a3c4bdef4d",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "1c482caeb90bc85c",
+    "name": "tests/fixtures/constructs.f90",
+    "input_hash": "46a59b9022f471e3",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "ac65ea1126185518",
+    "name": "tests/fixtures/core.f90",
+    "input_hash": "578f704063072c81",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "0e60aa12d1daf862",
+    "name": "tests/fixtures/cpp_continuation.f90",
+    "input_hash": "719a4b3c1c3aa4e6",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "9b3ed072812efc21",
+    "name": "tests/fixtures/cpp_continuation_indent.f90",
+    "input_hash": "f189b5f4992b237b",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "85256bf30f47732c",
+    "name": "tests/fixtures/cpp_nested.f90",
+    "input_hash": "f60c537ff269674a",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "a673e71f917c3675",
+    "name": "tests/fixtures/engine_options.f90",
+    "input_hash": "3c30fda503fb4770",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "d1a0567cf61e2e58",
+    "name": "tests/fixtures/fortran2023.f90",
+    "input_hash": "1c720833766320c3",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "9a7597c8e7169c76",
+    "name": "tests/fixtures/label_matrix.f90",
+    "input_hash": "9d7c10ed7d49a2fc",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "0ef288abb45da790",
+    "name": "tests/fixtures/labeled_cpp_do.f90",
+    "input_hash": "815fc912d1f612e9",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "d931a8110e374673",
+    "name": "tests/fixtures/legacy_controls.f90",
+    "input_hash": "866908ee2a1cb30a",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "c955a0d1f05a324c",
+    "name": "tests/fixtures/legacy_free_matrix.f90",
+    "input_hash": "ebd7ccacd89c18cd",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "a46852850bf39dfe",
+    "name": "tests/fixtures/legacy_recovery.f90",
+    "input_hash": "213a012f73aebded",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "bb131e088e7981d3",
+    "name": "tests/fixtures/lexical.f90",
+    "input_hash": "2d4b29d3bd8fc8c2",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "a90dfa7e5c6239a9",
+    "name": "tests/fixtures/malformed_end.f90",
+    "input_hash": "e1ceb7aaeea44465",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "3ecd0d9fdc96c653",
+    "name": "tests/fixtures/malformed_end_matrix.f90",
+    "input_hash": "c6b0685e08d0d511",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "07a58dc88d32a2f6",
+    "name": "tests/fixtures/openmp_continuation.f90",
+    "input_hash": "9f03fb852482957c",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "f4cb111dc64e5f71",
+    "name": "tests/fixtures/procedure_decl.f90",
+    "input_hash": "4f18b8aadb92fa9c",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "e88f6b88eedeab43",
+    "name": "tests/fixtures/procedure_matrix.f90",
+    "input_hash": "60521e6c3fcd5824",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "5484639261c5d622",
+    "name": "tests/fixtures/query.f90",
+    "input_hash": "3a86092849194837",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "8a490f945c013f29",
+    "name": "tests/fixtures/refactor.f90",
+    "input_hash": "b8201eeb0954b8d9",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "58cb22825cc16c9c",
+    "name": "tests/fixtures/structures.f90",
+    "input_hash": "e6b1b4155ce20a69",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "cfb616a69fb48c40",
+    "name": "tests/fixtures/ws_full.f90",
+    "input_hash": "502c7eeaf2a7e554",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "1064c123006cf7a6",
+    "name": "tests/fixtures/ws_remred.f90",
+    "input_hash": "ca6fabb6518d7368",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  },
+  {
+    "status": "composition",
+    "iterations": 2,
+    "strong_fixed_point": false,
+    "output_hash": "0214d3a3199fbaec",
+    "name": "tests/fixtures/ws_remred_literal.f90",
+    "input_hash": "4983eb1b7fd1290c",
+    "options": {
+      "wrap": true,
+      "defines": []
+    }
+  }
+]

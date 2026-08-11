@@ -1,5 +1,69 @@
+/// What the formatter is allowed to change.
+///
+/// `IndentOnly` is the findent 4.3.7 contract and stays byte-exact forever
+/// (I6).  `Full` adds normalization and wrapping.  `NormalizeOnly` runs the
+/// text passes without the structural layout, which is how a single
+/// normalization rule is compared against the frozen Python reference while the
+/// port is incomplete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FormatMode {
+    #[default]
+    IndentOnly,
+    NormalizeOnly,
+    Full,
+}
+
+impl FormatMode {
+    pub fn normalizes(self) -> bool {
+        matches!(self, FormatMode::NormalizeOnly | FormatMode::Full)
+    }
+
+    pub fn lays_out(self) -> bool {
+        matches!(self, FormatMode::IndentOnly | FormatMode::Full)
+    }
+}
+
+/// Line-length policy for the reflow engine.
+///
+/// `line_length` is a budget, not a guarantee: a statement with no safe break
+/// point is emitted long and reported by the corpus check rather than split
+/// unsafely (I5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrapConfig {
+    pub enabled: bool,
+    pub line_length: usize,
+}
+
+impl Default for WrapConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            line_length: 120,
+        }
+    }
+}
+
+/// A `-D NAME[=VALUE]` definition.  Macro names outrank every other case rule
+/// (I4), so this list is part of the case configuration, not just of any CPP
+/// evaluation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroDefine {
+    pub name: String,
+    pub value: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatConfig {
+    /// Selects which stages of the pipeline run.  Everything below this field
+    /// is either shared or specific to one stage.
+    pub mode: FormatMode,
+    /// Full-mode reflow policy.
+    pub wrap: WrapConfig,
+    /// Command-line macro definitions, in the order given.
+    pub defines: Vec<MacroDefine>,
+    /// Uppercase a lone `l` used as a name, a Python-side option retained for
+    /// compatibility with the reference formatter.
+    pub uppercase_single_l: bool,
     pub indent: usize,
     pub apply_indent: bool,
     pub start_indent: usize,
@@ -51,6 +115,12 @@ pub struct ConstructIndents {
 impl Default for FormatConfig {
     fn default() -> Self {
         Self {
+            // The port keeps findent's contract as the effective default; the
+            // flip to `Full` is one reviewable commit at cutover (Phase 12).
+            mode: FormatMode::IndentOnly,
+            wrap: WrapConfig::default(),
+            defines: Vec::new(),
+            uppercase_single_l: false,
             indent: 3,
             apply_indent: true,
             start_indent: 0,

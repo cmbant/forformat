@@ -2,6 +2,13 @@ use super::{Newline, PhysicalLine, PhysicalLineKind};
 use crate::error::FormatError;
 use std::ops::Range;
 
+/// The inline comment marker offset of one physical line.
+///
+/// findent decides this per physical line, from a clean lexical state, so this
+/// is the stateless entry point of the shared region walker rather than a
+/// second implementation of it.
+pub use super::regions::comment_start;
+
 #[derive(Debug, Clone)]
 pub struct SourceBuffer {
     pub bytes: Vec<u8>,
@@ -117,59 +124,6 @@ pub fn is_fix(s: &[u8]) -> bool {
         t[j..].len() >= b"findentfix:".len()
             && t[j..j + b"findentfix:".len()].eq_ignore_ascii_case(b"findentfix:")
     }
-}
-
-pub fn comment_start(s: &[u8]) -> Option<usize> {
-    let mut quote = 0u8;
-    let mut i = 0;
-    let mut hollerith = 0usize;
-    while i < s.len() {
-        let c = s[i];
-        if hollerith > 0 {
-            hollerith -= 1;
-            i += 1;
-            continue;
-        }
-        if quote != 0 {
-            if c == quote {
-                if s.get(i + 1) == Some(&quote) {
-                    i += 2;
-                    continue;
-                }
-                quote = 0;
-            }
-            i += 1;
-            continue;
-        }
-        if c == b'\'' || c == b'"' {
-            quote = c;
-            i += 1;
-            continue;
-        }
-        if c == b'!' {
-            return Some(i);
-        }
-        if c == b';' {
-            i += 1;
-            continue;
-        }
-        if c.is_ascii_digit() && (i == 0 || !s[i - 1].is_ascii_alphanumeric() && s[i - 1] != b'_') {
-            let mut j = i;
-            while j < s.len() && s[j].is_ascii_digit() {
-                j += 1;
-            }
-            if s.get(j).is_some_and(|x| *x == b'h' || *x == b'H') {
-                hollerith = std::str::from_utf8(&s[i..j])
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0);
-                i = j + 1;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    None
 }
 
 #[cfg(test)]
