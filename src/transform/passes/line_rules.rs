@@ -572,10 +572,8 @@ fn normalize_keyword_spacing_with_state(
                 // original `elseif(` token, so it never saw the new `if`.
                 if first.is_name(b"elseif") {
                     if let Some(paren) = tokens.get(first_statement_index(&tokens) + 1) {
-                        if paren.kind == TokenKind::LParen
-                            && !horizontal_gap(line, first.span.end, paren.span.start)
-                        {
-                            edits.insert(paren.span.start, b" ");
+                        if paren.kind == TokenKind::LParen {
+                            edits.replace(first.span.end..paren.span.start, b" ");
                         }
                     }
                 }
@@ -1924,10 +1922,12 @@ mod tests {
     use crate::{
         analysis::{analyze_file, ProjectContext, ScopeTree},
         config::FormatConfig,
+        format_source,
         transform::{
             document::Document,
             pipeline::{Changed, PassContext},
         },
+        FormatMode,
     };
 
     fn normalized(source: &[u8]) -> String {
@@ -1950,6 +1950,15 @@ mod tests {
             "the per-line chain must not change the line count"
         );
         String::from_utf8_lossy(&document.to_bytes()).into_owned()
+    }
+
+    fn full_pipeline(source: &[u8]) -> String {
+        let config = FormatConfig {
+            mode: FormatMode::Full,
+            apply_indent: false,
+            ..FormatConfig::default()
+        };
+        String::from_utf8(format_source(source, &config).unwrap().bytes).unwrap()
     }
 
     #[test]
@@ -2092,6 +2101,7 @@ mod tests {
     #[test]
     fn chunk_a_keyword_and_delimiter_rules_match_the_reference_shapes() {
         let source = b"ENDIF\n\
+ELSEIF  ( X )\n\
 BLOCKDATA\n\
 GO   TO 10\n\
 DOUBLE   PRECISION :: X\n\
@@ -2106,7 +2116,7 @@ WRITE( UNIT = 1 , FMT = 2 )'x'\n";
         let once = normalized(source);
         assert_eq!(
             once,
-            "end if\nblock data\ngoto 10\ndouble precision :: X\nif (X) then\nselect type is (X)\ndo while (X)\ncommon /blk/ x\nsubroutine s\nx = [1, 2]\nformat((/1, 2 /))\nwrite(unit=1, fmt=2) 'x'\n"
+            "end if\nelse if (X)\nblock data\ngoto 10\ndouble precision :: X\nif (X) then\nselect type is (X)\ndo while (X)\ncommon /blk/ x\nsubroutine s\nx = [1, 2]\nformat((/1, 2 /))\nwrite(unit=1, fmt=2) 'x'\n"
         );
         assert_eq!(normalized(once.as_bytes()), once);
     }
@@ -2136,6 +2146,33 @@ WRITE( UNIT = 1 , FMT = 2 )'x'\n";
         assert_eq!(
             normalized(b"SUBROUTINE s(Write)\nX = Write ( 1 )\nEND SUBROUTINE s\n"),
             "subroutine s(Write)\nX = Write (1)\nend subroutine s\n"
+        );
+    }
+
+    #[test]
+    fn dimension_and_write_output_spacing_matches_the_reference_shape() {
+        let source = b"integer, dimension (:) :: values\nwrite(*, *)'Warning...'\nwrite(unit, '(1I6,4E15.6)')il, value\nwrite(unit, '(1I6,4E15.6)')\nwrite(unit, '(1I6,4E15.6)') &\nwrite(unit, '(1I6,4E15.6)' ) ! no output item\nprint *, \"write(*)'literal'\"\n! write(*)'comment'\n";
+        assert_eq!(
+            normalized(source),
+            "integer, dimension(:) :: values\nwrite(*, *) 'Warning...'\nwrite(unit, '(1I6,4E15.6)') il, value\nwrite(unit, '(1I6,4E15.6)')\nwrite(unit, '(1I6,4E15.6)') &\nwrite(unit, '(1I6,4E15.6)' ) ! no output item\nprint *, \"write(*)'literal'\"\n! write(*)'comment'\n"
+        );
+    }
+
+    #[test]
+    fn parenthesized_statements_lowercase_unless_locally_shadowed() {
+        let source = b"WRITE (*, *) value\nREAD (unit, *) value\nOPEN (newunit=unit, file=name)\nBACKSPACE (unit)\nALLOCATED (value)\nC%Write (*, *) value\nsubroutine s\nprocedure :: Write\ncall WRITE()\nend subroutine s\n";
+        assert_eq!(
+            full_pipeline(source),
+            "write(*, *) value\nread(unit, *) value\nopen(newunit=unit, file=name)\nbackspace(unit)\nallocated(value)\nC%Write(*, *) value\nsubroutine s\nprocedure :: Write\ncall Write()\n\nend subroutine s\n"
+        );
+    }
+
+    #[test]
+    fn old_style_declarations_normalize_spacing_and_optional_order() {
+        let source = b"    real(dl)  x\n    real(dl)kh, PK\n    real(dp), optional, intent(out) :: sin_k\n    real(dp), intent(in), optional :: cos_k\n";
+        assert_eq!(
+            full_pipeline(source),
+            "    real(dl) x\n    real(dl) kh, PK\n    real(dp), intent(out), optional :: sin_k\n    real(dp), intent(in), optional :: cos_k\n"
         );
     }
 

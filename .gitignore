@@ -34,3 +34,9 @@ fortran/
 # Python bytecode from the frozen reference tooling
 __pycache__/
 *.pyc
+
+# Python packaging output. The wheel is built from a prebuilt release binary and
+# published as a release artifact, never committed.
+/dist/
+/build/
+*.egg-info/

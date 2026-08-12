@@ -35,22 +35,23 @@ CATEGORY = {
 HEADER = """# Traceability: Python behaviour to Rust tests
 
 One row per test in the frozen reference suite
-(`tools/reference/test_standardize_fortran.py`, 86 tests in 6 classes).  Gate B
+(`tools/reference/test_standardize_fortran.py`, 89 terminal rows in 6 classes).  Gate B
 of the port plan needs every row to carry a terminal status.
 
-Statuses: `todo`, `ported`, `covered by broader test`, `intentionally changed`
-(with a rationale and a fixture), `not applicable`.
+Statuses: `ported`, `covered by broader test`, `intentionally changed`
+(with a rationale and a fixture), or `excluded` (with a row-specific scope reason).
 
 Categories: lexical, case, scope/project-case, OpenMP, CPP/macro, comment,
 continuation, wrapping, blank-line/layout, CLI/file-I/O, semantic-compile.
 
-Golden cases belong in `tests/manifests/python_formatter.manifest`, using the
-existing manifest format and its `source_test` / `oracle` / `category` /
-`support` / `normalization` / `mode` metadata.  Do not invent a second
-mechanism.
+A `covered by broader test` row names the exact check and its regression signal.
+Rows excluded at the Python-helper boundary name that boundary individually.
+Golden cases belong in `tests/manifests/core.manifest`, using its existing
+metadata.
 
 Regenerate the row skeleton with `python3 tools/gen_traceability.py`; the last
-three columns are hand-maintained and preserved.
+three columns are hand-maintained and preserved. The added
+`python_external_macro` fixture is derived from the frozen `-D SIZE` assertion.
 
 | Python test | Category | Rust destination | Named Rust test | Status |
 |---|---|---|---|---|

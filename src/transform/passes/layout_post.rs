@@ -479,11 +479,140 @@ mod tests {
     }
 
     #[test]
+    fn declaration_alignment_preserves_the_minimum_separator() {
+        let source = b"real      :: first\ninteger   :: second\n\n! comment\n\nlogical   :: third\n\n\nreal   :: unaligned\n";
+        let output = apply_all(source);
+        assert!(output
+            .windows(b"real    :: first".len())
+            .any(|w| w == b"real    :: first"));
+        assert!(output
+            .windows(b"integer :: second".len())
+            .any(|w| w == b"integer :: second"));
+        assert!(output
+            .windows(b"logical :: third".len())
+            .any(|w| w == b"logical :: third"));
+        assert!(!output
+            .windows(b"real   :: first".len())
+            .any(|w| w == b"real   :: first"));
+    }
+
+    #[test]
+    fn declaration_alignment_reduces_procedure_generic_and_attribute_blocks() {
+        let source = b"procedure, private  :: WriteSizedArray1\nprocedure, private  :: WriteSizedArray2\ngeneric  :: LoadTxt => LoadTxt_2D, LoadTxt_1D\ninteger, intent(in)   :: md\nreal(GI), intent(in)    :: xd(nxd)\n";
+        let output = apply_all(source);
+        assert!(output
+            .windows(b"procedure, private :: WriteSizedArray1".len())
+            .any(|w| w == b"procedure, private :: WriteSizedArray1"));
+        assert!(output
+            .windows(b"generic :: LoadTxt =>".len())
+            .any(|w| w == b"generic :: LoadTxt =>"));
+        assert!(output
+            .windows(b"integer, intent(in)  :: md".len())
+            .any(|w| w == b"integer, intent(in)  :: md"));
+        assert!(output
+            .windows(b"real(GI), intent(in) :: xd(nxd)".len())
+            .any(|w| w == b"real(GI), intent(in) :: xd(nxd)"));
+    }
+
+    #[test]
+    fn declaration_alignment_compresses_through_comment_lines() {
+        let source = b"real(dl), intent(in)              :: ax\nreal(dl), intent(in)              :: bx\n!! of the final result\nreal(dl), intent(out)             :: xzero\ninteger, intent(out)              :: iflag\n";
+        let output = apply_all(source);
+        assert!(output
+            .windows(b"real(dl), intent(in)  :: ax".len())
+            .any(|w| w == b"real(dl), intent(in)  :: ax"));
+        assert!(output
+            .windows(b"real(dl), intent(out) :: xzero".len())
+            .any(|w| w == b"real(dl), intent(out) :: xzero"));
+        assert!(output
+            .windows(b"integer, intent(out)  :: iflag".len())
+            .any(|w| w == b"integer, intent(out)  :: iflag"));
+    }
+
+    #[test]
+    fn declaration_alignment_keeps_a_compressible_subblock_before_an_unaligned_line() {
+        let source = b"real(dl), intent(in)              :: ax\nreal(dl), intent(in)              :: bx\nreal(dl), intent(in), optional     :: fax\nreal(dl), parameter :: one = 1._dl\n";
+        let output = apply_all(source);
+        assert!(output
+            .windows(b"real(dl), intent(in)           :: ax".len())
+            .any(|w| w == b"real(dl), intent(in)           :: ax"));
+        assert!(output
+            .windows(b"real(dl), intent(in), optional :: fax".len())
+            .any(|w| w == b"real(dl), intent(in), optional :: fax"));
+        assert!(output
+            .windows(b"real(dl), parameter :: one".len())
+            .any(|w| w == b"real(dl), parameter :: one"));
+    }
+
+    #[test]
+    fn declaration_alignment_never_adds_padding_to_short_lines() {
+        let source = b"type(c_ptr) :: cptr\ntype(CAMBParams), pointer :: PType\nclass(TPythonInterfacedClass), pointer :: P\n\nclass(CAMBParams), target :: this\ntype(CAMBParams), pointer :: p\n";
+        let output = apply_all(source);
+        assert!(output
+            .windows(b"type(c_ptr) :: cptr".len())
+            .any(|w| w == b"type(c_ptr) :: cptr"));
+        assert!(output
+            .windows(b"type(CAMBParams), pointer :: PType".len())
+            .any(|w| w == b"type(CAMBParams), pointer :: PType"));
+        assert!(!output
+            .windows(b"type(c_ptr)     :: cptr".len())
+            .any(|w| w == b"type(c_ptr)     :: cptr"));
+    }
+
+    #[test]
     fn program_unit_spacing_handles_contains_types_interfaces_and_is_idempotent() {
         let source = b"module m\ntype :: t\ncontains\nprocedure :: p\nend type t\ncontains\nsubroutine s\nend subroutine s\nend module m\ninterface\nsubroutine x\nend subroutine x\nend interface\n";
         let once = apply_all(source);
         assert_eq!(apply_all(&once), once);
         assert!(once.windows(2).filter(|pair| *pair == b"\n\n").count() >= 2);
+    }
+
+    #[test]
+    fn module_interfaces_are_limited_to_one_blank_line() {
+        let source = b"module demo\n\n\ninterface\n\n\nend interface\n\n\ncontains\nsubroutine work\nend subroutine work\nend module demo\n";
+        let output = apply_all(source);
+        assert!(output
+            .windows(b"module demo\n\ninterface\n\nend interface\n\ncontains".len())
+            .any(|w| w == b"module demo\n\ninterface\n\nend interface\n\ncontains"));
+    }
+
+    #[test]
+    fn contains_boundaries_keep_exactly_one_blank_line() {
+        let source = b"module demo\ninteger :: value\n\n\n\ncontains\n\n\n\nsubroutine work\nend subroutine work\nend module demo\n";
+        let output = apply_all(source);
+        assert!(output
+            .windows(b"integer :: value\n\ncontains\n\nsubroutine work".len())
+            .any(|w| w == b"integer :: value\n\ncontains\n\nsubroutine work"));
+    }
+
+    #[test]
+    fn contains_after_select_type_keeps_the_following_blank_line() {
+        let source = b"function format_value(value) result(text)\nclass(*) :: value\nselect type (value)\ntype is (integer)\ntext = 'integer'\nend select\ncontains\nsubroutine error\nend subroutine error\nend function format_value\n";
+        let output = apply_all(source);
+        assert!(output
+            .windows(b"end select\n\ncontains\n\nsubroutine error".len())
+            .any(|w| w == b"end select\n\ncontains\n\nsubroutine error"));
+    }
+
+    #[test]
+    fn bare_program_unit_ends_have_the_same_separator_as_named_ends() {
+        let source = b"subroutine first\ninteger :: value\nvalue = 1\nend\nsubroutine second\ninteger :: value\nvalue = 2\nend\n";
+        let output = apply_all(source);
+        assert!(output
+            .windows(b"value = 1\n\nend\nsubroutine second".len())
+            .any(|w| w == b"value = 1\n\nend\nsubroutine second"));
+    }
+
+    #[test]
+    fn named_program_unit_end_reduces_the_following_blank_run() {
+        let source = b"subroutine a\nend subroutine a\n\n\n\nx=1\n";
+        let output = apply_all(source);
+        assert!(output
+            .windows(b"end subroutine a\n\n\nx=1".len())
+            .any(|w| w == b"end subroutine a\n\n\nx=1"));
+        assert!(!output
+            .windows(b"end subroutine a\n\n\n\n".len())
+            .any(|w| w == b"end subroutine a\n\n\n\n"));
     }
 
     #[test]

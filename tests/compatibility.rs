@@ -1,4 +1,7 @@
-use findent::{format_source, FormatConfig, FormatMode};
+use findent::{
+    analyze_project, format_source, format_source_with_context, FormatConfig, FormatMode,
+};
+use std::path::Path;
 
 #[test]
 fn core_fixture_is_idempotent() {
@@ -88,4 +91,48 @@ END SUBROUTINE S\n";
     .bytes;
     let output = String::from_utf8(output).unwrap();
     assert!(output.lines().any(|line| line.trim() == "x = DTAUDA(1.0)"));
+}
+
+#[test]
+fn external_macro_case_is_exact() {
+    let source = include_bytes!("fixtures/python_external_macro.f90");
+    let expected = include_bytes!("fixtures/python_external_macro.out");
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        defines: vec![findent::MacroDefine {
+            name: "SIZE".into(),
+            value: None,
+        }],
+        ..FormatConfig::default()
+    };
+    assert_eq!(format_source(source, &config).unwrap().bytes, expected);
+}
+
+#[test]
+fn type_bound_procedure_case_requires_resolved_owner() {
+    let type_source = include_bytes!("fixtures/type_bound_procedure_owner_type.f90");
+    let unresolved = include_bytes!("fixtures/type_bound_procedure_owner_unresolved.f90");
+    let unresolved_expected = include_bytes!("fixtures/type_bound_procedure_owner_unresolved.out");
+    let resolved = include_bytes!("fixtures/type_bound_procedure_owner_resolved.f90");
+    let resolved_expected = include_bytes!("fixtures/type_bound_procedure_owner_resolved.out");
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        ..FormatConfig::default()
+    };
+    let mut unresolved_project = analyze_project([
+        (Path::new("type.f90"), type_source.as_slice()),
+        (Path::new("use.f90"), unresolved.as_slice()),
+    ])
+    .unwrap();
+    unresolved_project.enable_target_local_component_resolution();
+    assert_eq!(
+        format_source_with_context(unresolved, &unresolved_project, &config)
+            .unwrap()
+            .bytes,
+        unresolved_expected
+    );
+    assert_eq!(
+        format_source(resolved, &config).unwrap().bytes,
+        resolved_expected
+    );
 }

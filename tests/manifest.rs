@@ -23,7 +23,7 @@ struct Case {
 fn checked_in_manifest_covers_success_and_rejection_paths() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/manifests/core.manifest");
     let cases = parse_manifest(&manifest, &fs::read_to_string(&manifest).unwrap());
-    assert_eq!(cases.len(), 53);
+    assert_eq!(cases.len(), 54);
     for case in cases {
         assert!(!case.source_test.is_empty(), "{} source test", case.name);
         assert!(!case.oracle.is_empty(), "{} oracle", case.name);

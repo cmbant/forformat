@@ -361,12 +361,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         let mut source = Vec::new();
         io::stdin().read_to_end(&mut source)?;
         let config = invocation.config;
-        let context = ProjectContext::empty();
-        let result = if config.mode == FormatMode::IndentOnly {
-            format_source(&source, &config)?
-        } else {
-            format_source_with_context(&source, &context, &config)?
-        };
+        let result = format_source(&source, &config)?;
         report_declines(&result.meta);
         write_all_stdout(&result.bytes)?;
         return Ok(0);

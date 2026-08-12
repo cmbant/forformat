@@ -54,6 +54,15 @@ and wrapping; its reviewed differences from the frozen reference are collected h
   two-line `constants.f90` continuation defect is retained as an adjudicated divergence.
 - The governing declaration wins over the reference's same-file ambiguity veto when a declaration
   is the active, unambiguous entity for the use site.
+- The patched reference also resolves old-style entities (`real(dl) kh, Pk`), typed local entities,
+  and top-level program-unit parameters in their own scope. These are reference defects, not new
+  Rust policy. The minimal reproductions and extracted mechanisms are in
+  `tools/reference/test_standardize_fortran.py`.
+
+  The three reproduced mechanisms are specific: the frozen flat type-bound map lets an unrelated
+  binding veto `values`; the old-style extractor records the type-specifier match instead of the
+  entity list, so local `Pk` is absent and another file's `PK` wins; and top-level program
+  parameters are omitted from file scope, so `BJL_RECURRENCE_MAX_L` loses to `bessels.f90`.
 - On the first project-formatting pass over the committed CAMB tree, four declaration-settled
   spellings correct the authored tree. The complete baseline is listed below; these changes are
   deliberate, idempotent, and the committed CAMB source remains untouched by the checker.
@@ -61,10 +70,17 @@ and wrapping; its reviewed differences from the frozen reference are collected h
   body is normalized; the sentinel body does not inherit project declaration casing.
 - `--ws_remred` on a valid literal leaves the literal bytes intact. The reference's heuristic can
   treat the quote after `error stop` as code and reduce spaces inside that literal.
+- Type-bound procedure casing is owner-sensitive. Rust keeps the member in `State%buildvalue()`
+  lowercase when `state` has no declared type, while applying the declared `State` binding to
+  `s%buildvalue()`; the reference's flat project-wide map changes both. The paired
+  `tests/fixtures/type_bound_procedure_owner_type.f90`,
+  `tests/fixtures/type_bound_procedure_owner_unresolved.f90`, and
+  `tests/fixtures/type_bound_procedure_owner_resolved.f90` fixtures pin both halves of this
+  deliberate divergence.
 
 These are full-format policy choices, not indentation compatibility claims. The array-constructor,
-comment, sentinel, kind-suffix, governing-declaration, and valid-literal cases are pinned by the
-corpus diagnostics or focused fixtures described below.
+comment, sentinel, kind-suffix, governing-declaration, valid-literal, and type-bound-procedure cases
+are pinned by the corpus diagnostics or focused fixtures described below.
 
 ### First-run project changes
 

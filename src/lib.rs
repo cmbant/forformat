@@ -36,17 +36,19 @@ pub struct FormatMeta {
     pub declines: Vec<(usize, format::wrapping::Decline)>,
 }
 
-/// Format an in-memory source buffer with no project context.
+/// Format an in-memory source buffer with an empty, command-line-defined
+/// project context.
 ///
-/// Equivalent to [`format_source_with_context`] with
-/// [`ProjectContext::empty`](analysis::ProjectContext::empty): the whole golden,
-/// property and fuzz suite calls this, and it stays valid after full mode
-/// arrives because a lone buffer simply declares no project.
+/// A lone buffer has no file/project declarations, but `-D` definitions still
+/// apply to it. This is also the context used by the isolated and stdin CLI
+/// routes, so all single-buffer entry points share the same macro behavior.
 pub fn format_source(source: &[u8], config: &FormatConfig) -> Result<FormatResult, FormatError> {
     if config.mode == config::FormatMode::IndentOnly {
         return format::engine::format(source, config);
     }
-    format_source_with_context(source, &analysis::ProjectContext::empty(), config)
+    let mut context = analysis::ProjectContext::empty();
+    context.define(&config.defines);
+    format_source_with_context(source, &context, config)
 }
 
 /// Format one source with the declarations of the whole project available.

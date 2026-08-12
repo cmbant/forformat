@@ -1,0 +1,7 @@
+program p
+   implicit none
+   integer :: x
+   x = SIZE
+   print *, SIZE
+
+end program p

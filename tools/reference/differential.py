@@ -36,9 +36,11 @@ FINDENT_ARGS = [
 ]
 
 
-def load_reference():
+def load_reference(path: Path | None = None):
+    path = path or (HERE / "standardize_fortran.py")
     spec = importlib.util.spec_from_file_location(
-        "frozen_standardize_fortran", HERE / "standardize_fortran.py"
+        "frozen_standardize_fortran" if path.name == "standardize_fortran.py" else "patched_standardize_fortran",
+        path,
     )
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module

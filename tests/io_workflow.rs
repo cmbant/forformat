@@ -173,6 +173,19 @@ fn stdin_and_file_routes_produce_identical_bytes_for_the_same_source() {
 }
 
 #[test]
+fn stdin_applies_command_line_defines_in_full_mode() {
+    let repo = temp_repo();
+    let source = b"program p\nimplicit none\ninteger :: x\nx=size\nprint *, size\nend program p\n";
+    let output = run_stdin(&repo, &["--full", "-D", "SIZE"], source);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.stdout,
+        b"program p\n   implicit none\n   integer :: x\n   x = SIZE\n   print *, SIZE\n\nend program p\n"
+    );
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
 fn isolated_keeps_local_component_resolution_like_stdin() {
     let repo = temp_repo();
     let source = b"module m

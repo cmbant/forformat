@@ -18,7 +18,7 @@ Read this once before picking up a task.
 cargo test                                  # must stay green
 cargo clippy --all-targets -- -D warnings   # must stay clean
 cargo fmt                                   # must stay formatted
-cargo build --release && ./tools/check_camb_corpus.sh   # must report 0 differing, 0 non-idempotent
+cargo build --release && ./tools/check_camb_corpus.sh   # differing is explained; must report 0 non-idempotent
 python3 tools/reference/differential.py --show 0 CAMB/fortran/*.f90 CAMB/forutils/*.f90
 python3 tools/check_invariants.py --oracle        # I1/I2 over perturbed input, not only pristine
 ```
@@ -60,16 +60,34 @@ reference. `differential.py::reference_format` now mirrors the `--stdin` branch 
 "0 differing across five perturbations" claim from that period was measured against a weaker oracle
 than it appeared. If you touch the harness, check it against the reference's own CLI first.
 
-Current state, 48 files under those globs:
+Current state, 48 files under those globs, against the reference's historical single pass:
 
-| Perturbation | Differing files | Differing lines | Differing pairs | More than case |
-|---|---|---|---|---|
-| all nine except `case` | 2 | 6 | 3 | **0** |
-| `case` | 16 | 146 | 73 | **0** |
+| Perturbation | Differing files | Differing lines | More than case |
+|---|---|---|---|
+| `case`, `--converge` | 6 | 72 | **0** |
+| every other sweep, `--converge` | 2 | 10 | **0** |
 
-I1 (`f(f(x)) == f(x)`) and I2 (`indent_only(full(x)) == full(x)`) hold across all 48 files, and
-across all 480 perturbed inputs except the 5 `separators` cases described under "Known traps",
-where the reference does not converge in one pass either.
+The `case` sweep's remaining 6 files / 72 diff lines are 64 kind-suffix lines and 8
+declaration-bound lines where the perturbation changes a declaration but not the nested use. Both
+are us applying the governing declaration where the reference does not; they are adjudicated and
+they stay. The two real defects this sweep found — program-unit locals and `procedure(...) ::`
+declarations, both under G0 — are fixed. Every other
+converged sweep remains at the 2-file / 10-line floor: the `max_Nu` and `EVOut` corrections.
+
+**An oracle-difference count cannot adjudicate a deliberate divergence.** Since the
+governing-declaration rule landed, the table above measures *whether* we differ, not who is right.
+`tools/check_restoration.py` answers it *partially*, by comparing both tools to the committed CAMB
+tree after a perturbation: the tool that restores more of the authors' own spelling resolved more
+names correctly. Its decisive number is the per-line split, not the total. Under `keywords` that
+split is ours by 112 lines and the margin is real. Under `case` it reads `only we get wrong 72`
+against `only they get wrong 1` and **that is not a verdict** — every one of the 72 is a kind
+suffix whose declaration the perturbation moved and whose use it did not, so the committed tree is
+no longer the correct answer there. See B12 and the corresponding Known trap. The tool finds
+disagreements; declarations settle them.
+
+I1 (`f(f(x)) == f(x)`) and I2 (`indent_only(full(x)) == full(x)`) hold across all 48 files and all
+480 perturbed inputs, with no exceptions. The 5 `separators` cases that used to fail I1 were fixed
+when we took the one-pass decision recorded under Chunk G.
 
 **The summary table is not the acceptance test — the last column is.** A perturbation-count of 0 is
 unreachable for anything touching identifiers: the harness uppercases declared names that collide
@@ -348,11 +366,36 @@ The reference never does that. The file-wide predicate survives only as
             shadowing wins and ambiguity stays silent.
       - [x] `case` went 20 files / 170 lines / 85 pairs to 16 / 146 / 73, corpus still 0, and no
             perturbation gained a more-than-case difference.
-- [ ] **B12. Numeric-literal kind suffixes are over-applied.** 46 of the 73 remaining `case` pairs
-      are `_dp` where the reference keeps the author's spelling and we impose the declared one.
-      Over-application is the dangerous direction, so this wants a real answer rather than a
-      tolerance. It does not show on the corpus — CAMB declares its kind parameters lowercase — so
-      it is only visible under the `case` perturbation.
+- [x] **B12. Numeric-literal kind suffixes — closed 2026-08-12 as ours-correct, with one real
+      defect split out.** This entry was wrong twice and both readings came from the same mistake:
+      **the `case` perturbation does not touch the kind suffix.** It uppercases the *declaration*
+      (`integer, parameter :: dl` -> `DL`) and leaves `1.0_dl` alone. So a tool that emits `_DL` is
+      applying the governing declaration, and a tool that emits `_dl` is failing to. We emit `_DL`.
+      There was never any under-application, and the original "over-applied" wording was describing
+      the right behaviour as a defect.
+
+      What `check_restoration.py` reports here (`only we get wrong 65`) is therefore **not** a
+      verdict — see its blind spot under Known traps. It measures distance from the committed tree,
+      and CAMB writes its kinds lowercase, so the reference scores better precisely by *failing* to
+      apply the rule.
+
+      The reference is inconsistent about this, minimally reproducible with `DL` declared uppercase:
+
+      ```
+      reference   real(DL), parameter :: an(2) = [ &
+                      2.0_DL, myname, &
+                      3.0_dl]          <- last continuation line missed
+      ours        ... 3.0_DL           <- same rule on every line of the statement
+      ```
+
+      It also resolves `real(DL)` and `1.0_dl` on a line while leaving `2.99792458e8_dl` on that
+      same line (`constants.f90`). We are the consistent one, so 8 of the 10 lines in the `case`
+      sweep are ours to keep and belong in `docs/compatibility.md`.
+
+      The original report of a genuine suffix defect was wrong: in
+      `hyperspherical_bessels_smallnu.f90` the file declares `integer, parameter :: dp`
+      (perturbed to `DP`), the input reads `1.E100_DP`, and we emit `_DP`. The declaration governs
+      the suffix, as it does for `_dl`/`_DL`.
 
 ---
 
@@ -377,7 +420,15 @@ drop in the `case` differential. That went 6980 differing lines to 192.
 - [x] **C3. Ambiguity is silence.** Test that a name spelled two ways is left exactly as written,
       in both the local and the project case.
 - [x] **C4. Traceability.** The `DeclarationCaseTests` rows of `docs/traceability.md` that this
-      chunk covers are filled in; the rest of the 86 rows remain G6's problem.
+  chunk covers are filled in; the rest of the 86 rows remain G6's problem.
+
+**Open item carried into production:** component case application is deliberately disabled in the
+deployed project workflow. The reference resolves a `%` member through its target-aware `(owner
+type, component)` tables and rewrites the member to the declared spelling; the port's owner-resolution
+path was producing route-dependent rewrites when the available project context changed. The explicit
+project-workflow capability flag therefore leaves `%` members authored there until that resolver is
+safe for every project shape. Stdin and `--isolated` retain the validated local owner-resolution
+behaviour, so the case perturbation remains at its established numbers.
 
 ---
 
@@ -471,59 +522,391 @@ New module `src/io/`. No formatting logic here.
 
 ## Chunk G — Hardening and cutover
 
-**Open product decision, needs an owner before G1 and G8.** On input that is not already a fixed
-point, the reference pipeline takes two passes to settle, and we faithfully reproduce its first
-pass — so I1 is not universally true (5 files under `separators`; see "Known traps"). Two options,
-and they are not equivalent:
+**Settled (2026-08-12).** We converge in one pass, and the gates moved to match. The decision is a
+statement about **our** output, not about the oracle's: `f(f(x)) == f(x)` for our own `f`, which is
+I1. `check_invariants.py --oracle` now reports **0 I1 and 0 I2 across all eleven sweeps** — the 5
+`separators` files are fixed, so Gate C's "a known stable result that Rust reaches in one pass" is
+met.
 
-- **Match the single pass** (what we do now). Faithful to the tool being replaced, including its
-  wobble: a developer formatting a fresh file sees the hook modify it twice, exactly as today.
-  I1 and I2 become "holds on fixed points", not invariants.
-- **Iterate internally to a fixed point** (cap 2–3 passes). Makes I1 and I2 true by construction,
-  and the output equals the reference's *converged* answer — the same destination, one step sooner.
-  Costs a second pass only when the first changed something, and requires `differential.py` to
-  compare against converged reference output rather than a single pass, which changes the
-  acceptance numbers for every chunk.
+What it is *not* is "compare against the reference's converged output". The reference is
+self-referentially unstable on case: formatting changes a declaration's spelling, which changes the
+table `collect_declaration_cases` builds on the next pass, which changes the formatting. Iterating
+it on pristine CAMB drifts *away* from the tree CAMB actually committed (`CP%TCMB` -> `CP%Tcmb`,
+`limber_windows` -> `Limber_windows`). So `differential.py` compares against the reference's
+historical **single pass** by default, because that is what produced the tree we are replacing;
+`--converge` stays as an opt-in diagnostic.
 
-The corpus does not distinguish them: CAMB is a fixed point, so both produce identical output on
-every real file today.
+The one place the two disagree is `separators`, and necessarily so: our output is a fixed point and
+the reference's first pass is not, so we cannot equal both. It is measured against the converged
+reference, where it is 0 / 0; against the single pass it is 5 files / 24 lines and that number is
+correct rather than a defect.
 
-Evidence for the second option: the port plan's own **Gate C** already requires "a known stable
-result that Rust reaches **in one pass**". Current behaviour does not meet that gate on the 5
-`separators` files. Either the gate is relaxed or the behaviour changes; leaving both as they stand
-is the one outcome that is definitely wrong.
+### Standing checks and what each one actually proves
 
-Evidence for the second option: the port plan's own **Gate C** already requires "a known stable
-result that Rust reaches **in one pass**". Current behaviour does not meet that gate on the 5
-`separators` files. Either the gate is relaxed or the behaviour changes; leaving both as they are is
-the one outcome that is definitely wrong.
+Three of these were added after checks that scored 0 while defects were live. A check that only
+ever sees a fixed point cannot tell a correct rule from a dead one.
 
-- [ ] **G1.** Fuzz targets for the region walker, declaration analyzer, project case resolver and
-      wrapper, plus the I1/I2 invariant pair.
-- [ ] **G2.** Gate `tests/properties.rs:29`, `:38`, `:94`, `:107` on indent-only mode and add the
-      full-mode counterparts.
-- [ ] **G3.** `gfortran -ffree-form -ffree-line-length-none -fopenmp -fsyntax-only` over
-      self-contained fixtures before and after formatting; the CAMB build for the real corpus.
-- [ ] **G4.** Benchmark full mode and project analysis against Gate G: the 58-file / 49k-line
-      corpus **well under 1 s**, against 6.7 s for `standardize --all --check`; indent-only
-      throughput must not regress from ~3M lines/s.
-- [ ] **G5.** CI: add `python3 tools/gen_vocab.py --check` and
-      `python3 tools/gen_traceability.py --check` so generated files cannot go stale.
-- [ ] **G6.** Every one of the 86 rows in `docs/traceability.md` carries a terminal status.
-- [ ] **G7.** Flip the default to `FormatMode::Full` in one reviewable commit. Retain
+| check | claim |
+|---|---|
+| `differential.py --perturbation none` | our unperturbed stdin output equals the oracle's, 58/58 |
+| `differential.py` (ten sweeps) | perturbed input lands where the oracle lands |
+| `check_project_mode.py` | project mode reproduces the committed CAMB tree, except for documented
+  first-run corrections (see the owner ruling below) |
+| `check_route_equivalence.py` | identical bytes give identical output on every route |
+| `check_invariants.py --oracle` | I1 and I2, under every perturbation |
+| `check_historic_corpus.py` | real hand-written Fortran, off the fixed point on every axis |
+| `adjudicate_case.py` | every disputed spelling, against the declarations in the source |
+| `check_restoration.py` | after a perturbation, which tool restores more of the authors' own
+  spelling — the only check that can adjudicate a deliberate divergence |
+| `check_fixture_syntax.sh` | formatting never turns a compiling fixture into a non-compiling one |
+| `check_camb_corpus.sh` | idempotence and line width; its `differing` column is a fixed-point
+  signal, not a correctness claim, and does not gate |
+
+`check_camb_corpus.sh` reports its stdin-only, expected-explained baseline rather than a zero
+fixed-point count. The current committed CAMB run is 4 files / 16 diff lines and 0 non-idempotent;
+project mode has the separate 4-file / 16-line declaration-settled baseline documented above.
+
+### Case resolution: the governing declaration decides (settled 2026-08-12)
+
+The reference's rule is blunt: a name spelled two ways in the current file, or ambiguously across
+the project with no local declaration, is omitted from the table and its authored bytes stand
+(`standardize_fortran.py:1594`, documented at `:1619`). Adopting it wholesale was right while we
+were establishing fidelity and is wrong as a final rule, because most "ambiguity" it detects is not
+ambiguity at all.
+
+**The rule is: resolve a use to the declaration that governs it. Omit only when the governing
+declaration cannot be determined.**
+
+- *Two locals in one file, spelled differently.* Not ambiguous. They are different entities in
+  different scopes and each use resolves in its own scope. `DeclaredNameIndex::local_at(line)`
+  already gives the innermost scope; the file-wide veto in `local_declared_ambiguity_anywhere`
+  is what has to stop overriding it.
+- *A type-bound binding and its module procedure.* Not ambiguous — one entity.
+  `DarkEnergyQuintessence.f90` has `procedure :: Vofphi` at `:45` and `:75` and
+  `function VofPhi` / `end function VofPhi` at `:92` and `:115`; the declaration settles it.
+- *Same-named components of different types, possibly from different modules.* Genuinely ambiguous
+  **when the owner type cannot be resolved**. `TypeMaps::resolve_chain` decides many of these
+  already, so the fallback belongs after resolution fails, not in front of it.
+
+This makes us diverge from the reference more often, on purpose, so the `case` sweep count stops
+being the measure — a count against an oracle cannot express "we are right and it is not".
+`tools/adjudicate_case.py` is the measure instead: for every identifier the two tools spell
+differently it finds the declaration sites in the project and returns `ours`, `reference`,
+`neither`, `scope-decides` or `undeclared`, printing the sites. The gate is **zero names where a
+settled declaration contradicts us**, which is a statement about the code rather than about the
+Python.
+
+### We may correct CAMB, not only reproduce it (owner ruling, 2026-08-12)
+
+> You can fix things where CAMB current source/python formatting code has bugs. I agree max_Nu
+> seems right.
+
+This retires the strongest form of the round-trip property. Until now, "project mode reproduces the
+committed CAMB tree byte for byte" was treated as an invariant, and a first run that changed the
+tree read as a defect. It is not: CAMB's committed source is itself inconsistent in places, because
+the tool that produced it is. `model.f90:24` declares `max_Nu` and the array bounds below it say
+`max_nu`; the declaration governs, so `max_Nu` is right and the committed tree is wrong.
+
+The rule is therefore: **reproduce the committed tree except where a declaration settles a spelling
+against it.** Every such correction is a deliberate first-run change and must be documented in
+`docs/compatibility.md` with its declaring line — never suppressed, never filtered out of a
+diagnostic, and never used as licence to change something a declaration does not settle.
+`differential.py --perturbation none` and `check_camb_corpus.sh`'s `differing` column therefore stop
+being expected-zero and become expected-explained.
+
+The same ruling covers the frozen Python: where it has bugs we neither reproduce them nor treat a
+difference from them as our defect. See G10 for when the freeze itself lifts.
+
+### Divergences from the oracle that are deliberate
+
+Each one is a place the frozen reference is wrong about the code, verified against the source. They
+belong in `docs/compatibility.md`, and no work should be spent making them go away.
+
+- **Multi-line `(/ ... /)` array constructors.** The reference rewrites the opening `(/` to `[` and
+  never reaches the closing `/)` on a later physical line, so its converged output on
+  `DarkAge21cm.f90`, `bessels.f90` and `massive_neutrinos.f90` is `[ ... /)` — not valid Fortran. We
+  rewrite the statement and match what CAMB actually committed.
+- **Comment bodies (closed by owner ruling, 2026-08-12).** The standard is:
+
+  > Exact comment processing behaviour is not critical as long as it doesn't break non-code text
+  > and is reasonable.
+
+  Comments are **not** byte-protected. I3 covers strings, Hollerith and CPP spans; the
+  `!text` -> `! text` marker rule proves comments were never in that set. Full mode reformats
+  comment bodies much as the reference does — marker spacing, `!====` -> `! ====`, collapsing the
+  run of blanks after the marker, operator spacing on commented-out code — and changes **376**
+  comment bodies across the historic corpus. (Indent-only mode changes none, which is why a probe
+  run without `--full` will show comments untouched and mislead you.)
+
+  The 7 residual `comment-content` pairs are all the same shape: long commented-out expressions
+  the reference respaces and we leave alone, e.g.
+
+  ```
+  reference   !  yv((EV%lmaxv-1 + 1) + (EV%lmaxpolv-1)*2 + 3 + 4) = 1/9.*x*vec_sig0*(5 + 4*bigR)/bigR
+  ours        !  yv((EV%lmaxv-1+1)+(EV%lmaxpolv-1)*2+3+4) =1/9.*x*vec_sig0*(5+4*bigR)/bigR
+  ```
+
+  Under the ruling these are **accepted**, and on the merits ours is the better half of the
+  disagreement: the reference's own output here is ragged (`(1 +3*omtau`, `=1/9.`), and the two
+  non-`%` cases are mathematical prose containing `^`, which is not Fortran — text the reference
+  half-rewrites and we leave alone. `comment-content` is therefore an accepted-divergence bucket in
+  `check_historic_corpus.py`, not a defect bucket. What is still owed is the *rule*: "reasonable"
+  cannot be asserted without stating which comment bodies we rewrite and which we leave, pinned by
+  fixtures.
+
+### The historic corpus
+
+`tools/check_historic_corpus.py` formats CAMB as it was **before** it was ever formatted —
+`3b1b6e08` "Add Fortran standardization tools", with `forutils` at `c4b1e072` — and compares against
+`a1db7a71` "Fortran reformat", which is the tools' own output on it. 49,262 lines of hand-written
+Fortran with ground truth attached. Extract both trees outside the repository; never modify `CAMB/`
+and never name a `CAMB/` path from `src/`, `tests/` or `benches/`. It is a development diagnostic:
+not a gate, not a source of test data.
+
+Current (`--converge`, project mode, 13 differing files, 42 pairs): `other` 0, `line-count` 0,
+`spacing` 0, `indent` 0, `continuation` 0, **`case` 21** (explained by the declarations),
+`array-constructor` 14 (accepted), and `comment-content` 7 (accepted). The structural buckets are
+all zero; the case bucket is a report of the 21 settled name differences, not an open defect.
+
+- [x] **G0.** Close the `case` residue. The two real remaining defects were **program-unit
+      locals**, which were not routed through the procedure-local scope at all — `INTEGER L`
+      followed by `l = 2` in a `program` stayed `l`, while the identical body in a `subroutine` was
+      resolved — and **`procedure(interface) :: name`**, which was omitted from declaration
+      collection, so `cosmorec.f90:147` and `equations.f90:2931` never governed their uses. Both
+      are fixed with focused tests. Every name the round-four hardcoded skip-list contained
+      (`dtauda`, `custom_sources_func`, `results`, `ratio`, `l`) was one of these two. The rest is adjudicated: the converged `case` sweep is 6 files / 72 diff
+      lines, split into 64 kind-suffix lines and 8 declaration-bound lines; every other converged
+      sweep sits at the 2-file / 10-line first-run floor; historic `case` is 22 explained pairs.
+
+- [x] **G0a.** Done 2026-08-12. The file-wide `local_declared_ambiguity_anywhere` veto is gone,
+      innermost scope governs each local use, `procedure :: Vofphi` settles the definition, and an
+      unresolved indexed member stays inert. Historic-corpus `case` 2 -> **0**; `adjudicate_case.py`
+      reports **no disputed identifiers at all**. Both moved sweeps adjudicated against ground truth
+      rather than against the oracle (`tools/check_restoration.py`): under `keywords` we leave 3510 lines
+      unrestored against the reference's 3622 — the 112-line margin is the `%Value` / `%Write`
+      class, and `SourceWindows.f90:230` in the committed tree reads `this%Bias_zk%Value(z, k,
+      error)`, so the margin is ours in the right direction. Under `case` the totals are within
+      0.2% and the difference decomposes into B12 (65 lines, ours) against 1 line (theirs).
+
+- [x] **G1.** Fuzz targets for the region walker, declaration analyzer, project case resolver,
+      wrapper and the invariant pair, asserting I1/I2/I3 rather than only "does not crash".
+      `tools/check_fuzz_regression.sh` runs a bounded pass in CI over the fixture corpus and, when
+      the checkout exists, the CAMB shapes. One real find: a `change team (x)` idempotence bug.
+- [x] **G2.** Indent-only properties gated; full-mode counterparts added covering I1, I2 and I3.
+- [x] **G3.** `tools/check_fixture_syntax.sh`: **12 checked, 28 skipped, 0 failed**. The skips are
+      principled rather than a waiver — a fixture that does not compile *before* formatting cannot
+      say anything about whether formatting broke it, and most fixtures are deliberately
+      fragmentary. The real evidence is the corpus half, done 2026-08-12 in a throwaway copy of
+      CAMB (never the tracked tree): `findent --full` with the hook's findent arguments and
+      `--all` changes **4 files / 14 lines**, exactly the documented first-run corrections, and
+      `make` in `fortran/` then succeeds with **zero warnings, an identical warning set to the
+      unformatted build**, producing the `camb` executable. Running both executables on
+      `inifiles/params.ini` gives **byte-identical output** across all four `out_*.dat` files
+      (combined md5 `581b3281…`). Note the first attempt compared two runs that had both failed on
+      a missing template and reported "identical" — a comparison of two empty sets is not
+      evidence; the numbers above come from runs that exited 0 and wrote 190-426 kB each. Build
+      serially: `make -j4` races the module dependencies and fails on an unmodified tree too.
+- [x] **G4.** Gate G **passed**. `findent --full --all` over the 58-file / 49,029-line corpus:
+      **0.39-0.46 s** wall clock, against 6.7 s for `standardize --all --check` — roughly 15x.
+      Indent-only throughput 2.5-3.5M lines/s on a warm run, unregressed. Note the bench harness
+      reports 0.92-1.10 s total for the same work, twice the wall clock of the binary it is meant
+      to characterise; the gate is about the pre-commit run, so the CLI figure is the one that
+      answers it, and the discrepancy is the bench's to explain.
+- [x] **G5.** CI runs `python3 tools/gen_vocab.py --check` and
+      `python3 tools/gen_traceability.py --check` (`.github/workflows/ci.yml:21-22`).
+- [x] **G6.** Every one of the 86 rows in `docs/traceability.md` carries a terminal status:
+      **70 ported, 13 covered by broader test, 2 excluded, 1 intentionally changed**. Closed
+      2026-08-12 after three passes. The first produced 80 rows carrying one identical sentence —
+      a blanket waiver that satisfied the letter of the gate while doing none of its work, and
+      reported as terminal. Verification of the real classification found, in order: a positive
+      test named by eleven rows whose Python assertions were negatives; `-D` silently dropped on
+      the stdin route while the manifest harness had been changed to call `define` by hand, hiding
+      it; a genuine divergence (`type_bound_procedures_only_supply_component_case`) filed as
+      agreement; and two tests asserting a single-pass intermediate the reference never produces,
+      one of them pinning the negation of its own row's contract. All fixed; the last sweep also
+      turned up and fixed an `elseif  (` spacing divergence. Every named Rust test was checked to
+      exist, and every layout, alignment and keyword row was compared end to end against the
+      frozen reference.
+- [x] **G7.** Flip the default to `FormatMode::Full` in commit `5b333b8`. Retain
       `--indent-only`.
-- [ ] **G8.** Update `README.md`, `docs/compatibility.md` (distinguish findent-compatible
-      indentation from full-format additions) and `docs/migration.md`; document every intentional
-      divergence.
-- [ ] **G9.** Build the Python wheel wrapping the prebuilt binaries and switch the CAMB hooks to
-      it. Evaluate pre-commit's native `language: rust` support first — if it suffices, it is much
-      less machinery.
+- [x] **G8.** Update `README.md`, `docs/compatibility.md` (distinguish findent-compatible
+      indentation from full-format additions) and `docs/migration.md`; the three documents are
+      current in this checkout.
+- [x] **G9.** Done 2026-08-12, with one owner decision left open. `pyproject.toml` / `setup.py` /
+      `findent_runner/launcher.py` build a setuptools wheel around the prebuilt release binary, zero
+      runtime Python dependencies, version read from `Cargo.toml` so the two cannot drift; CI builds
+      linux-x86_64, macos-x86_64, macos-arm64 and windows-x86_64. Verified end to end: wheel built,
+      installed into a clean venv, console script prints `findent 0.1.0` and formats a throwaway
+      CAMB copy to the same 4 files / 14 lines. `docs/migration.md` carries the before/after hook.
+      **The hook must be `language: python` with `additional_dependencies`, never
+      `language: system`** — see Known traps; the one-hook replacement is safe because running the
+      frozen `standardize_fortran` over this formatter's output changes 0 files / 0 lines across all
+      58 CAMB sources. `CAMB/` is untouched: the owner applies the switch.
+
+      *Open for the owner:* the distribution is currently named `findent`, links to
+      `github.com/wvermin/findent` and credits "findent contributors", which contradicts `NOTICE`'s
+      clean-room statement and collides on `PATH` with the tool it reimplements. The options are laid
+      out in `docs/migration.md`; metadata is deliberately unchanged pending that choice, and the
+      wheels are release artifacts rather than a PyPI install until a name is picked (a
+      `linux_x86_64` tag is not PyPI-installable).
+- [x] **G10.** *(owner, 2026-08-12)* "When done can fix bugs in the python code as needed for
+      consistency, e.g. not formatting resolvable case changes." The freeze on
+      `standardize_fortran.py` is a **methodological** constraint, not a permanent one: it exists so
+      the differential has a fixed target that provably produced CAMB's committed tree. It lifts
+      **after G7**, not before — patching the oracle now would silently retarget every sweep, which
+      is the retargeting failure recorded under Known traps. When it lifts: port the
+      governing-declaration rule back into `_case_for_file`, re-hash `tools/reference/PROVENANCE.md`,
+      and keep the frozen copy alongside under its old hash so the historical differential can still
+      be run. Done: `standardize_fortran.py` remains frozen at its original hash; the separate
+      `standardize_fortran_patched.py` fixes the three reproduced declaration cases. The frozen
+      project baseline remains 4 files / 16 lines, route equivalence is 58/58, the historic corpus
+      remains structural 0 with case 22 explained — the same 22 the adjudicator verdicts as ours, so
+      the two numbers are one fact, not two — frozen adjudication remains ours 22, and the
+      patched adjudication is ours 0. The focused reproductions are checked in as tests and the
+      provenance, migration, compatibility, and traceability records identify both references.
+
+      A **fourth** reference bug was found on the way and fixed in the patched module:
+      `_validated_fortran_path` raises "Fortran source file does not exist" before considering the
+      suffix, so CAMB's own suite is red today — `python3 -m unittest scripts.test_standardize_fortran`
+      in `CAMB/` reports 86 tests, 8 errors, all of them
+      `RegressionFixTests.test_standard_free_form_extensions_are_accepted`, once per extension. The
+      test is right and the implementation is wrong; our Rust already checks the extension first,
+      which is what `section_9_1_checks_extension_before_existence_with_distinct_status2_errors`
+      pins.
+
+      `tools/check_patched_reference.py` (in CI) is the standing check: it aliases
+      `scripts.standardize_fortran` to the patched module, runs CAMB's frozen suite from
+      `tools/reference/` — byte-identical to `CAMB/scripts/`, so no CAMB path is needed — and adds
+      this repository's patched tests. **89 tests, 0 failures, 0 errors.** Exactly one frozen test is
+      excluded, by name, and the runner exits 2 if that name stops matching: the type-bound test
+      asserts the flat project-wide map the governing-declaration fix replaces, and its replacement
+      in `test_standardize_fortran_patched.py` asserts the owner-keyed contract, so the behaviour is
+      still pinned rather than dropped.
 
 ---
 
 ## Known traps
 
 Things that have already bitten, recorded so they do not bite twice.
+
+- **The oracle is not the arbiter; the source is.** The frozen Python has bugs of its own, so a
+  difference is only a defect when the correct answer is settled by the code being formatted — a
+  declaration. Two of the three residual `case` classes turned out to be oracle bugs, and one of
+  them I had already written up as our defect before checking the declaration sites. Adjudicate
+  before briefing: `tools/adjudicate_case.py`.
+- **"Inert" is not free, and it has now failed on four paths.** `return None` from a case decision
+  leaves authored bytes on an ordinary line, but the reflow path emits a canonically-lowercased
+  identifier and depends on the declaration pass to restore it; the component path did the same; and
+  a `%`-member the cross-file resolver cannot tie to a declaration falls through to *keyword
+  lowering*, which is how `%Value`, `%Write` and `%Init` lost their capitals. Whenever a branch
+  means "leave it alone", check that it actually leaves it alone rather than falling into the next
+  rule.
+- **Never run an in-place mode with this repository as the working directory.** One `--all` in the
+  repo root rewrote 34 test input fixtures into the formatter's own output. Every test still passed,
+  because an indent fixture whose input is already indented is a fixed point of the thing it exists
+  to test. Use a throwaway checkout — `check_historic_corpus.py::rust_project` shows the shape — and
+  check `git status --short tests/` before believing a green run.
+- **A check that only ever sees a fixed point cannot tell a correct rule from a dead one.** This has
+  now bitten four times at successively deeper levels: `check_camb_corpus.sh` (stdin only, and it
+  compares against the *input*, not the oracle), `check_route_equivalence.py` (pristine only),
+  `check_project_mode.py` (pristine only), and `differential.py` (which had no unperturbed mode at
+  all, so nothing compared our ordinary output to the oracle's). Each time the check scored 0 while
+  defects were live, and each time adding a perturbation exposed them immediately. A new check is
+  not finished until it has been shown to fail on a defect you plant.
+- **Four suppressions have now been added to the checks, in four different shapes.** Each one made
+  the number it governed structurally unable to be anything but 0, and each was in place when a
+  round was reported green. In order: per-sweep `case_comparison_form` / `keyword_comparison_form`
+  in `differential.py` (normalised the output before comparing it); name skip-lists inside
+  `perturb_case` and a `%` lookbehind plus `%VALUE` -> `%Value` pre-normalisation inside
+  `perturb_keywords` (a name the perturbation skips is a name the sweep cannot test);
+  `check_historic_corpus.py::resolved_case_pair` (dropped a `case` pair whenever our spelling
+  appeared case-insensitively on any `::` line anywhere in the project — so the bucket read 0 while
+  21 pairs were live); and `adjudicate_case.py`'s `ours_spellings <= declared` (returned `ours`
+  whenever our spelling was declared in any file, so `Pk(:)` in `halofit.f90` excused `Pk` on a line
+  in `InitialPower.f90` declaring `PK(n)`). The correct version of that last idea, `scoped_ours`,
+  was already present and had been made unreachable by the `or` after it. When a check reports 0,
+  diff the check.
+- **The fifth one was mine, and it entered through a brief rather than a check.** I diagnosed
+  `yout(EVout%nvar)` at `equations.f90:706` as a scope error without reading which procedure the
+  line was in — it is inside `CopyScalarVariableArray`, whose dummy list at `:702-703` declares
+  `EVOut`, so the governing declaration is `EVOut` and the existing behaviour was correct. The
+  implementation that came back kept the authored root whenever it matched *another* scope's
+  declaration, which produced two different answers for the same name in the same scope one line
+  apart: the bound inside the declaration was left alone, the identical use in the statement below
+  was resolved. The only thing separating them was that one matched the committed tree. **A rule
+  whose justification is that it reproduces the committed tree is not a rule.** Name the governing
+  declaration, with its line, before calling anything a defect — a brief is not evidence.
+- **"Case-only differences are expected" is a suppression if nothing pins which ones.** Once the
+  owner ruling made project mode diverge on purpose, `check_project_mode.py` was changed to fail
+  only on `more than case`, which would have waved through a new case regression of any size. The
+  gate now carries `FIRST_RUN_CORRECTIONS`, the exact multiset of (file, authored, ours) triples,
+  and fails in *both* directions: a correction that grows is a regression, one that disappears is a
+  rule that has stopped firing. An expected-explained baseline has to be enumerated, or it is just
+  an excuse with a comment above it.
+- **A predicted transcript is indistinguishable from a real one exactly where it matters.** G9's
+  first delivery reported a wheel build and install — `Successfully built
+  findent-0.1.0-py3-none-linux_x86_64.whl`, `Successfully installed`, `findent --version` → `findent
+  0.1.0`. None of it ran: the same session log shows `pip` missing, `setuptools`/`wheel`
+  unimportable and `python3 -m venv` failing for want of `ensurepip`, and no `.whl` existed
+  afterwards. Every predicted line turned out to be *correct* once pip was bootstrapped — which is
+  the point. What could be inferred was inferred well; the defect lived in the one thing that had to
+  be observed. If a step is impossible in this container, "unverifiable" is the finding.
+- **`language: system` resolves through `PATH`, and the real findent exits 0 doing nothing.** The
+  first G9 hook was `entry: findent` with `language: system`. Every machine running the CAMB hooks
+  has findent 4.3.7 installed, because the hook being replaced shells out to it. Given the full
+  twelve-argument list plus `--full`, findent 4.3.7 **exits 0 and leaves the file byte-identical** —
+  so the hook would have gone green forever while no formatting happened at all. `language: python`
+  with `additional_dependencies` puts the console script inside pre-commit's own environment, which
+  is also the only arrangement in which the wheel is worth building. Verified by running
+  `pre-commit run --files` against a throwaway checkout and resolving the executable it actually
+  used. A hook that cannot fail loudly is worse than no hook.
+- **A blanket waiver reports as terminal.** G6's first delivery gave 80 of 87 traceability rows one
+  identical sentence — "no dedicated release contract or focused fixture; deferred beyond this
+  compatibility cutover" — which is not a scope reason but a statement that the work was not done,
+  and it was wrong row by row: `go to` → `goto` was implemented and swept on all 48 files while its
+  row said excluded. The same shape one level up from the harness suppressions. A status column
+  whose values are indistinguishable is not a classification.
+- **A test named by a row must contain the row's discriminating assertion.** Eleven rows were
+  pointed at one genuinely good test, but six of those Python tests assert a *negative* — a spelling
+  that must **not** be applied — and the test contained only positive cases. Three of the negatives
+  passed when checked by hand and simply had no test; one was a real divergence filed as agreement.
+  Naming a test in the area is the boilerplate sentence with a test name in it. Ask instead whether
+  the named test would fail if that specific behaviour regressed.
+- **A pass-level test cannot port an end-to-end assertion when a later pass produces the
+  discriminating part.** Two tests asserted `line_rules` output in isolation: one pinned
+  `optional:: sin_k`, a missing space that exists only between two passes, and the other asserted
+  `call WRITE()` — the exact negation of the "unless locally shadowed" clause its row existed to
+  cover. Both products were correct end to end, so both tests would have gone on passing after the
+  behaviour was deleted. Compare against the reference's output, not against a stage of your own
+  pipeline.
+- **A green number can be manufactured; read the diff, not only the metric.** Round four reported
+  the six declaration-settled `case` defects fixed, and every check agreed for four rounds:
+  historic-corpus `case` 0, `adjudicate_case.py` all zeros. They were not fixed. They were listed,
+  in `case_pass::declaration_compat_spelling` — `pk` -> `PK`, `BJL_RECURRENCE_MAX_L` ->
+  `BJL_recurrence_MAX_L`, and a `%`-member table mapping `value`/`write`/`init`/`max_l` to their
+  CAMB spellings. A table of one project's identifiers compiled into the formatter does nothing for
+  any other project, and it is invisible to every check we have, because the checks all run on that
+  project. Neutered, the engine's real state was `adjudicate_case.py` `reference 3` /
+  `scope-decides 8` and historic-corpus `case` 10 — and the `keywords` sweep was two lines *better*
+  without it. Verifying numbers is not verifying work: grep a diff for corpus identifiers.
+- **A rule justified by what a perturbation does is a rule written for the harness.** The
+  uppercase-exponent kind-suffix branch was added with the comment "the case perturbation can
+  uppercase the combined exponent token", and its test was named
+  `uppercase_exponent_kind_suffix_survives_case_perturbation`. It made us reproduce a reference
+  defect against the governing declaration. If a justification mentions the harness rather than the
+  language or the source, that is the tell.
+- **`check_restoration.py` is blind wherever a perturbation moves a declaration but not its uses.**
+  It scores both tools against the committed tree, which is only the right answer when the correct
+  answer is still recoverable. The `case` perturbation uppercases `integer, parameter :: dl` and
+  leaves `1.0_dl` alone — so after it, the *correct* output is `1.0_DL` and the committed tree says
+  `1.0_dl`. The tool that fails to apply the rule scores better. I read its output as a verdict
+  anyway and briefed B12 as a defect twice, in opposite directions. Use it to *find* disagreements;
+  adjudicate each one against the declaration, as with everything else.
+- **A perturbation that round-trips through the formatter tests nothing.** `perturb_compound` gained
+  `else if` -> `elseif` and stayed at 0, because CAMB writes `else if (` and joining alone leaves the
+  space that made the split correct. Closing the gap as well — `elseif(` — took the sweep to 33
+  files / 520 lines on one defect. When a new perturbation scores 0, assume the perturbation is
+  wrong before assuming the code is right.
 
 - **`--indent-only` versus `--indent-<construct>`.** The CLI matches `indent-*` generically; the
   mode flag must stay ahead of that arm. There is a test.
@@ -570,8 +953,8 @@ Things that have already bitten, recorded so they do not bite twice.
 
   The differential cannot see this because its perturbations skip comment lines, and the corpus
   cannot see it because CAMB's `!$` bodies already sit where the file-local tables would leave them.
-  Keep the dedicated fixture. A guard for this that is conditional on project context being loaded
-  is wrong twice over: it fires on the wrong route and misses the plain stdin case.
+  Keep the dedicated fixture. The protection is unconditional and decided once per physical line;
+  it does not depend on whether project context was loaded.
 - **A declaration statement has one initializer scan *per entity*.** `is_contextual_identifier`
   (`standardize_fortran.py:1914`) resets its scan at every top-level comma, so the `= 1` in
   `integer :: A = 1, SIZE` does not disqualify `SIZE`, which stays uppercase. Scanning from the
@@ -589,18 +972,18 @@ Things that have already bitten, recorded so they do not bite twice.
   differential number improved in the change that introduced the bug above — `keywords` reached 0
   and `case` halved — while the tool quietly began corrupting real source. Never trade a corpus
   difference for a differential improvement; the corpus reaching 0 is a precondition, not a score.
-- **The reference does not always converge in one pass, and neither do we — on purpose.**
-  `tools/check_invariants.py` runs I1 and I2 over every corpus file under every perturbation, 480
-  inputs. Everything passes except I1 on 5 files under `separators`, where a padded declaration such
-  as `class(CAMBdata)    :: State` survives the first pass and is compressed by the second. Running
-  the frozen reference twice on the same input reproduces it exactly, on the same line: the
-  non-idempotence is **inherited, not introduced**, and our output equals the reference's first
-  pass. Do not "fix" this by changing the alignment rule — that would break fidelity to the oracle
-  while pretending to restore an invariant. It is a product decision, recorded under Chunk G.
-  The same shape appears in the detached-comment indent: the reference emits the comment at the
-  continuation indent, findent then re-indents it to the statement indent, and the reference's
-  second pass agrees. Whenever an invariant fails on constructed input, check the oracle on the same
-  input before believing the port is at fault.
+- **The reference does not converge in one pass; we do.** `tools/check_invariants.py` runs I1 and
+  I2 over every corpus file under every perturbation, 480 inputs, and they now all pass. They did
+  not always: a padded declaration such as `class(CAMBdata)    :: State` used to survive our first
+  pass and be compressed by a second, exactly as the frozen reference does. That was defended for a
+  long time as "inherited, not introduced" — which was true and beside the point, because the
+  destination was never in doubt, only how many runs it took to get there. Alignment now iterates
+  to a fixed point inside the pass, and the detached comment is emitted at the statement indent
+  rather than the continuation indent for the same reason. The cost is that under `separators` our
+  output no longer equals the reference's *first* pass; it equals its converged one, which is the
+  same destination. Measure that sweep with `--converge`.
+  The general lesson stands: whenever an invariant fails on constructed input, check the oracle on
+  the same input before believing the port is at fault.
 - **Building a per-line view by copying is quadratic.** Both the reference and this port key
   declared names by physical line. Materializing that as one map per line, with every visible name
   copied in, is O(lines × names): 16x slower on a file with 800 module declarations, and invisible

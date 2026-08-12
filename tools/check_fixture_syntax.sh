@@ -27,7 +27,7 @@ for source in "$FIXTURES"/*.f90; do
     after_log="$WORK/$name.after.log"
 
     if ! gfortran -ffree-form -ffree-line-length-none -fopenmp -fsyntax-only \
-        "$source" > /dev/null 2> "$before_log"; then
+        -J"$WORK" "$source" > /dev/null 2> "$before_log"; then
         skipped=$((skipped + 1))
         echo "SKIP $source"
         continue
@@ -39,7 +39,7 @@ for source in "$FIXTURES"/*.f90; do
         continue
     fi
     if ! gfortran -ffree-form -ffree-line-length-none -fopenmp -fsyntax-only \
-        "$after" > /dev/null 2> "$after_log"; then
+        -J"$WORK" "$after" > /dev/null 2> "$after_log"; then
         echo "FAIL formatted syntax $source"
         sed 's/^/  /' "$after_log"
         failed=$((failed + 1))

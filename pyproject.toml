@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "findent"
+dynamic = ["version"]
+description = "A standalone free-form Fortran formatter"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "BSD-3-Clause"
+authors = [{ name = "findent contributors" }]
+dependencies = []
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+[project.scripts]
+findent = "findent_runner.launcher:main"
+
+[project.urls]
+Homepage = "https://github.com/wvermin/findent"
+
+[tool.setuptools]
+packages = ["findent_runner"]
+
+[tool.setuptools.package-data]
+findent_runner = ["bin/*"]

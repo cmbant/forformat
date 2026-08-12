@@ -894,6 +894,7 @@ mod tests {
     use crate::{
         analysis::{analyze_file, analyze_project, ScopeTree},
         config::{FormatConfig, FormatMode},
+        format_source_with_context,
         transform::{
             document::Document,
             pipeline::{Changed, PassContext},
@@ -955,6 +956,106 @@ mod tests {
             declared(document, context).unwrap()
         });
         assert_eq!(twice, once);
+    }
+
+    #[test]
+    fn declared_names_do_not_leak_from_type_components() {
+        let source = b"module C\ntype Foo\ninteger :: SIZE\nend type Foo\ncontains\nsubroutine report(x)\nreal, intent(in) :: x(:)\nprint *, SIZE(x)\nend subroutine report\nend module C\n";
+        let output = crate::format_source(
+            source,
+            &FormatConfig {
+                mode: FormatMode::Full,
+                ..FormatConfig::default()
+            },
+        )
+        .unwrap()
+        .bytes;
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("print *, size(x)"));
+        assert!(!output.contains("print *, SIZE(x)"));
+    }
+
+    #[test]
+    fn interface_dummies_are_not_module_variables() {
+        let source = b"module M\ninterface\nsubroutine ext(ArgCase)\ninteger :: ArgCase\nend subroutine ext\nend interface\ncontains\nsubroutine s\nprint *, argcase\nend subroutine s\nend module M\n";
+        let project = analyze_project([(Path::new("interface.f90"), source.as_slice())]).unwrap();
+        assert_eq!(
+            run_pass(source, &project, |document, context| {
+                declared(document, context).unwrap()
+            }),
+            source
+        );
+    }
+
+    #[test]
+    fn local_case_does_not_apply_to_derived_type_components() {
+        let sources = [
+            (
+                Path::new("global.f90"),
+                b"type :: ComponentCase\nend type ComponentCase\n".as_slice(),
+            ),
+            (
+                Path::new("components.f90"),
+                b"subroutine Work\nreal :: WINDOW\nWINDOW = RedWin%componentcase%Window_f_a(a, winamp)\nend subroutine work\n".as_slice(),
+            ),
+        ];
+        let project = analyze_project(sources).unwrap();
+        let source = b"subroutine Work\nreal :: WINDOW\nWINDOW = RedWin%componentcase%Window_f_a(a, winamp)\nend subroutine work\n";
+        assert_eq!(
+            run_pass(source, &project, |document, context| {
+                declared(document, context).unwrap()
+            }),
+            b"subroutine Work\nreal :: WINDOW\nWINDOW = RedWin%ComponentCase%Window_f_a(a, winamp)\nend subroutine Work\n"
+        );
+    }
+
+    #[test]
+    fn module_variables_are_case_matched_without_leaking_local_shadowing() {
+        let config = b"module config\ninteger :: FeedbackLevel\ntype :: State\nreal :: transfer_times\nreal :: H0\nend type State\nend module config\n";
+        let source = b"module Uses\nuse config\ncontains\nsubroutine Work(Feedbacklevel, H0)\ninteger :: Feedbacklevel\nreal :: H0\ntype(State) :: obj\nprint *, feedbacklevel\nprint *, obj%transfer_times\nend subroutine work\nend module Uses\n";
+        let project = analyze_project([
+            (Path::new("config.f90"), config.as_slice()),
+            (Path::new("uses.f90"), source.as_slice()),
+        ])
+        .unwrap();
+        let output = format_source_with_context(
+            source,
+            &project,
+            &FormatConfig {
+                mode: FormatMode::Full,
+                ..FormatConfig::default()
+            },
+        )
+        .unwrap()
+        .bytes;
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("print *, Feedbacklevel"));
+        assert!(!output.contains("print *, FeedbackLevel"));
+        assert!(output.contains("obj%transfer_times"));
+    }
+
+    #[test]
+    fn declaration_entities_are_not_replaced_by_global_symbol_case() {
+        let source = b"module M\ninteger :: ERROR\ntype :: T\ncontains\nprocedure :: Error\nend type T\nend module M\n";
+        let project = analyze_project([(Path::new("declaration.f90"), source.as_slice())]).unwrap();
+        assert_eq!(
+            run_pass(source, &project, |document, context| {
+                declared(document, context).unwrap()
+            }),
+            source
+        );
+    }
+
+    #[test]
+    fn local_type_components_after_module_contains_do_not_leak() {
+        let source = b"module m\ncontains\nsubroutine s\ntype :: Local\ninteger :: WeirdCase\nend type Local\nend subroutine s\nend module m\nprogram p\nx = weirdcase\nend program p\n";
+        let project = analyze_project([(Path::new("local_type.f90"), source.as_slice())]).unwrap();
+        assert_eq!(
+            run_pass(source, &project, |document, context| {
+                declared(document, context).unwrap()
+            }),
+            source
+        );
     }
 
     #[test]

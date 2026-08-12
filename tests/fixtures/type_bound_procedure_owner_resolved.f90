@@ -1,0 +1,11 @@
+module use_module
+type :: State
+contains
+procedure :: BuildValue
+end type State
+contains
+subroutine use_state
+type(State) :: s
+call s%buildvalue()
+end subroutine use_state
+end module use_module
