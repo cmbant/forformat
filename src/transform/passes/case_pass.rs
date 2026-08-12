@@ -246,6 +246,13 @@ fn classify_spelling(
     }
 
     if preceded_by_percent(tokens, index) {
+        // The current project type map is broader than the reference's
+        // target-aware component tables. An unresolved member is safer than
+        // imposing a spelling from an unrelated source (I4); single-file
+        // contexts retain the fully tested local component behavior.
+        if cx.project.sources.len() > 1 {
+            return None;
+        }
         let resolver = cx.resolver();
         let procedure = cx
             .scopes
@@ -260,9 +267,8 @@ fn classify_spelling(
         let Some(_owner_type) = owner_type else {
             // The typed component table cannot safely reproduce the
             // reference's (type, component) key when the use-site chain is
-            // unresolved.
-            // I4 therefore requires silence until B8 supplies enough type
-            // information to classify this occurrence.
+            // unresolved. The reference still permits its ordinary symbol
+            // fallback for the member token, so retain that behavior.
             return None;
         };
         if let Some(spelling) = resolver.spelling(NameSpace::TypeProcedure, token.text) {
@@ -272,6 +278,13 @@ fn classify_spelling(
             return Some(spelling.to_vec());
         }
         return file_symbol_spelling(declared_names, cx, token.text);
+    }
+
+    // A `!$` conditional-compilation line is Fortran code in the reference,
+    // but its body must retain authored identifier case. Project-wide USE
+    // evidence is not declaration evidence for this line.
+    if !cx.project.sources.is_empty() && is_conditional_sentinel(cx, line) {
+        return None;
     }
 
     // The B9 procedure map contains spellings, not merely membership.  A
@@ -471,7 +484,7 @@ fn is_declaration_entity(tokens: &[Token<'_>], index: usize) -> bool {
         .map(|(position, _)| position)
         .next_back()
     else {
-        return false;
+        return old_style_declaration_entity(tokens, index);
     };
     let mut initializer = false;
     let mut array_depth = 0usize;
@@ -494,6 +507,81 @@ fn is_declaration_entity(tokens: &[Token<'_>], index: usize) -> bool {
         }
     }
     !initializer
+}
+
+fn old_style_declaration_entity(tokens: &[Token<'_>], index: usize) -> bool {
+    let Some(first_index) = tokens
+        .iter()
+        .position(|token| token.kind != TokenKind::Number)
+    else {
+        return false;
+    };
+    let first = &tokens[first_index];
+    let is_type = matches!(
+        first.text.to_ascii_lowercase().as_slice(),
+        b"integer" | b"real" | b"complex" | b"logical" | b"character" | b"type" | b"class"
+    ) || first.is_name(b"double")
+        && tokens
+            .get(first_index + 1)
+            .is_some_and(|token| token.is_name(b"precision"));
+    if !is_type || index <= first_index {
+        return false;
+    }
+    if tokens
+        .iter()
+        .skip(first_index + 1)
+        .take(index.saturating_sub(first_index + 1))
+        .any(|token| token.kind == TokenKind::Name && token.is_name(b"function"))
+    {
+        return false;
+    }
+    if tokens[..index]
+        .iter()
+        .any(|token| token.depth == 0 && (token.text == b"=" || token.text == b"=>"))
+    {
+        return false;
+    }
+    let mut start = first_index + 1;
+    if first.is_name(b"double") {
+        start += 1;
+    }
+    if tokens
+        .get(start)
+        .is_some_and(|token| token.kind == TokenKind::LParen)
+    {
+        let depth = tokens[start].depth;
+        let Some(close) = tokens
+            .iter()
+            .enumerate()
+            .skip(start + 1)
+            .find(|(_, token)| token.kind == TokenKind::RParen && token.depth == depth)
+            .map(|(position, _)| position)
+        else {
+            return false;
+        };
+        start = close + 1;
+    }
+    index >= start
+        && tokens[index].kind == TokenKind::Name
+        && tokens[index].depth == 0
+        && !tokens[start..index].iter().any(|token| {
+            token.kind == TokenKind::Name && token.depth == 0 && token.text != b"intent"
+        })
+}
+
+fn is_conditional_sentinel(cx: &PassContext, line: usize) -> bool {
+    let Some(physical) = cx.analysis.buffer.lines.get(line) else {
+        return false;
+    };
+    let bytes = cx.analysis.buffer.line_bytes(physical);
+    let trimmed = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .map_or(&[][..], |start| &bytes[start..]);
+    trimmed.starts_with(b"!$")
+        && !trimmed
+            .get(2..)
+            .is_some_and(|body| body.first().is_some_and(u8::is_ascii_alphabetic))
 }
 
 fn numeric_kind_suffix(tokens: &[Token<'_>], index: usize) -> bool {

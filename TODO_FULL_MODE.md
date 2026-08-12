@@ -4,7 +4,7 @@ Work queue for the combined formatter described in `FORTRAN_COMBINED_RUST_PORT_P
 `TODO.md` remains the queue for indent-only findent 4.3.7 compatibility; this file owns
 normalization, project casing, wrapping and the file/project workflow.
 
-Last updated 2026-08-11, after Chunks A, B, C and D landed and were differentially validated.
+Last updated 2026-08-11, after Chunks A, B, C, D and E landed and were differentially validated.
 
 ---
 
@@ -20,6 +20,7 @@ cargo clippy --all-targets -- -D warnings   # must stay clean
 cargo fmt                                   # must stay formatted
 cargo build --release && ./tools/check_camb_corpus.sh   # must report 0 differing, 0 non-idempotent
 python3 tools/reference/differential.py --show 0 CAMB/fortran/*.f90 CAMB/forutils/*.f90
+python3 tools/check_invariants.py --oracle        # I1/I2 over perturbed input, not only pristine
 ```
 
 **The corpus check alone cannot tell you your rule works.** CAMB is already a joint fixed point of
@@ -39,6 +40,15 @@ only code bytes, never string, comment, Hollerith or CPP bytes — and compares 
 | `mixed` | all of the above — where rule *interactions* surface |
 | `keywords` | keyword/intrinsic lowering, holding declared names fixed |
 | `case` | every identifier uppercased — dominated by project case application |
+| `separators` | whitespace around every depth-0 `::` — declaration alignment |
+| `blanks` | every blank line deleted — program-unit spacing must re-insert |
+| `blankruns` | three-blank-line runs injected — spacing and blank-line capping |
+
+The last three are whole-text perturbations (`TEXT_PERTURBATIONS`), added because Chunk E was
+invisible to every other check: CAMB is already a fixed point of the post-layout passes, so the
+corpus scored 0 with all three stubbed out, and nothing else disturbs `::` alignment or blank-line
+structure. Stubbed, they measured 47 files / 11427 lines, 48 / 1323 and 48 / 9263. **They touch no
+identifier, so unlike `case` and `keywords` their target is a literal 0, not "0 more-than-case".**
 
 Judge per-line rules with `keywords`, not `case`: `case` also rewrites declared names, so its
 differences are mostly missing declaration extractors rather than missing per-line rules.
@@ -54,10 +64,12 @@ Current state, 48 files under those globs:
 
 | Perturbation | Differing files | Differing lines | Differing pairs | More than case |
 |---|---|---|---|---|
-| `spacing`, `operators`, `compound`, `exponent`, `mixed`, `keywords` | 2 | 6 | 3 | **0** |
+| all nine except `case` | 2 | 6 | 3 | **0** |
 | `case` | 16 | 146 | 73 | **0** |
 
-I1 (`f(f(x)) == f(x)`) and I2 (`indent_only(full(x)) == full(x)`) both hold across all 48 files.
+I1 (`f(f(x)) == f(x)`) and I2 (`indent_only(full(x)) == full(x)`) hold across all 48 files, and
+across all 480 perturbed inputs except the 5 `separators` cases described under "Known traps",
+where the reference does not converge in one pass either.
 
 **The summary table is not the acceptance test — the last column is.** A perturbation-count of 0 is
 unreachable for anything touching identifiers: the harness uppercases declared names that collide
@@ -72,7 +84,7 @@ case*, because that means a lowering, spacing or structural rule is wrong:
 # plus, for `keywords`: a.rstrip().endswith("&")   # only unperturbed continuation heads
 ```
 
-Right now that check reports **0 more-than-case differences on all seven perturbations**. Re-run it
+Right now that check reports **0 more-than-case differences on all ten perturbations**. Re-run it
 after any change to the case, declaration or line-rule engines; treat a non-zero result as a stop.
 
 The 3 pairs common to every perturbation are deliberate: an unresolved `%` chain leaves the
@@ -117,6 +129,7 @@ component alone rather than guessing (see "Known traps").
 | Case resolution (I4) | `src/analysis/names.rs` |
 | Project context | `src/analysis/project.rs` |
 | Perturbation differential | `tools/reference/differential.py` |
+| I1/I2 over perturbed input | `tools/check_invariants.py` |
 
 **Reading the oracle.** The frozen Python is at `tools/reference/standardize_fortran.py`. Every
 pass stub names the exact function to port in its doc comment. To see what the reference does with
@@ -406,14 +419,30 @@ preserved. Any future change here needs the same treatment — the green checks 
 
 ---
 
-## Chunk E — Post-layout passes
+## Chunk E — Post-layout passes — **complete**
 
 `src/transform/passes/layout_post.rs`. **Nothing here may lengthen a line.**
 
-- [ ] **E1. `declaration_separator_alignment`** — compresses, never pads.
-- [ ] **E2. `program_unit_spacing`.**
-- [ ] **E3. `limit_blank_lines`.**
-- [ ] **E4. Assert the contract**: a test that no post-layout pass increases any line's length.
+Landed 2026-08-11. Validated by the three perturbations added for it, which went from 47 files /
+11427 lines, 48 / 1323 and 48 / 9263 against the stubs to **0 differing files** each. That is a
+literal 0: these perturbations touch no identifier, so there is no case-only residue to hide in.
+
+- [x] **E1. `declaration_separator_alignment`** — compresses, never pads.
+- [x] **E2. `program_unit_spacing`.**
+- [x] **E3. `limit_blank_lines`.**
+- [x] **E4. Assert the contract**: a test that no post-layout pass increases any line's length.
+
+Three defects in `format/full.rs` were found during this chunk's review and fixed — none of them
+reachable from the corpus or from any perturbation, because all three need a physical line past the
+wrap budget. They were caught by direct oracle comparison on constructed input:
+
+- The detached inline comment was emitted at column 0 rather than at the indentation the reference
+  gives it. This one was **pre-existing**, on the wrapping path D5 shipped, and the Chunk D review
+  missed it by checking *that* the comment was detached and not *where it landed*.
+- A continued group whose joined body fits the budget was emitted still-split, silently declining
+  D4. It can only arise when the physical line is over-long because of its comment.
+- `copy_group_without_final_comment` stripped every comment in the group, safe only by an unstated
+  caller-side invariant — a latent I3 comment-deletion bug.
 
 ---
 
@@ -421,26 +450,53 @@ preserved. Any future change here needs the same treatment — the green checks 
 
 New module `src/io/`. No formatting logic here.
 
-- [ ] **F1.** Repository root discovery and tracked-source discovery over
++ [x] **F1.** Repository root discovery and tracked-source discovery over
       `vocab::SOURCE_EXTENSIONS` plus uppercase spellings.
-- [ ] **F2.** Nested `git` invocations must clear `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR` and
++ [x] **F2.** Nested `git` invocations must clear `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR` and
       `GIT_INDEX_FILE` — this is `_git_env` (`standardize_fortran.py:37`) and it is easy to omit;
       without it the tool misbehaves as a git hook.
-- [ ] **F3.** `validate_extension(path)` as a **pure** function, separate from opening the file.
++ [x] **F3.** `validate_extension(path)` as a **pure** function, separate from opening the file.
       This is the §9.1 divergence: the reference validates extension then existence, and its own
       test expects a valid extension on a non-existent path to be accepted. Both failures exit 2,
       with distinct messages.
-- [ ] **F4.** Positional paths, `--all`, `--stdout`, `--isolated`, and mode validation (reject
++ [x] **F4.** Positional paths, `--all`, `--stdout`, `--isolated`, and mode validation (reject
       `-lastindent`/`-lastusable` combined with path-update, check or diff modes).
-- [ ] **F5.** Atomic in-place write preserving mode bits and resolving symlinks to their target.
-- [ ] **F6.** `--check` and unified `--diff` with repository-relative paths; exit statuses 0/1/2.
-- [ ] **F7.** Project sources read and analyzed **once per invocation** (Gate G).
-- [ ] **F8.** Decide and document the `forutils/` asymmetry (§9.3): pre-commit excludes it from
++ [x] **F5.** Atomic in-place write preserving mode bits and resolving symlinks to their target.
++ [x] **F6.** `--check` and unified `--diff` with repository-relative paths; exit statuses 0/1/2.
++ [x] **F7.** Project sources read and analyzed **once per invocation** (Gate G).
++ [x] **F8.** Decide and document the `forutils/` asymmetry (§9.3): pre-commit excludes it from
       rewriting, `standardize --all` rewrites it, both read it for case resolution.
 
 ---
 
 ## Chunk G — Hardening and cutover
+
+**Open product decision, needs an owner before G1 and G8.** On input that is not already a fixed
+point, the reference pipeline takes two passes to settle, and we faithfully reproduce its first
+pass — so I1 is not universally true (5 files under `separators`; see "Known traps"). Two options,
+and they are not equivalent:
+
+- **Match the single pass** (what we do now). Faithful to the tool being replaced, including its
+  wobble: a developer formatting a fresh file sees the hook modify it twice, exactly as today.
+  I1 and I2 become "holds on fixed points", not invariants.
+- **Iterate internally to a fixed point** (cap 2–3 passes). Makes I1 and I2 true by construction,
+  and the output equals the reference's *converged* answer — the same destination, one step sooner.
+  Costs a second pass only when the first changed something, and requires `differential.py` to
+  compare against converged reference output rather than a single pass, which changes the
+  acceptance numbers for every chunk.
+
+The corpus does not distinguish them: CAMB is a fixed point, so both produce identical output on
+every real file today.
+
+Evidence for the second option: the port plan's own **Gate C** already requires "a known stable
+result that Rust reaches **in one pass**". Current behaviour does not meet that gate on the 5
+`separators` files. Either the gate is relaxed or the behaviour changes; leaving both as they stand
+is the one outcome that is definitely wrong.
+
+Evidence for the second option: the port plan's own **Gate C** already requires "a known stable
+result that Rust reaches **in one pass**". Current behaviour does not meet that gate on the 5
+`separators` files. Either the gate is relaxed or the behaviour changes; leaving both as they are is
+the one outcome that is definitely wrong.
 
 - [ ] **G1.** Fuzz targets for the region walker, declaration analyzer, project case resolver and
       wrapper, plus the I1/I2 invariant pair.
@@ -502,9 +558,20 @@ Things that have already bitten, recorded so they do not bite twice.
   `cargo clean -p findent` before believing it.
 - **`--ws_remred` on a valid literal** (§9.2) is an intentional divergence from findent 4.3.7, which
   collapses spaces inside `error stop '...  ...'`. Rust preserves the literal. Do not "fix" it.
-- **`!$` clause bodies are outside the corpus differential.** The line-rule pass normalizes a
-  non-`OMP` `!$` sentinel body as Fortran code, but CAMB has no such lines and the differential
-  perturbations skip comment lines. Keep dedicated tests for this protected-byte exception.
+- **The reference never case-rewrites a `!$` sentinel body.** CAMB has 22 non-`OMP` `!$` lines
+  (`MathUtils`, `cmbmain`, `halofit`, `lensing`, `results`, `MpiUtils`), so the earlier claim here
+  that it has none was simply wrong. The line-rule pass normalizes such a body as Fortran code for
+  *layout*, but the reference applies **no** case table inside it — with or without project tables:
+
+  ```
+  integer :: MyVar          !$ myvar = 1   stays lowercase
+  ...                       myvar   = 2    becomes MyVar
+  ```
+
+  The differential cannot see this because its perturbations skip comment lines, and the corpus
+  cannot see it because CAMB's `!$` bodies already sit where the file-local tables would leave them.
+  Keep the dedicated fixture. A guard for this that is conditional on project context being loaded
+  is wrong twice over: it fires on the wrong route and misses the plain stdin case.
 - **A declaration statement has one initializer scan *per entity*.** `is_contextual_identifier`
   (`standardize_fortran.py:1914`) resets its scan at every top-level comma, so the `= 1` in
   `integer :: A = 1, SIZE` does not disqualify `SIZE`, which stays uppercase. Scanning from the
@@ -522,6 +589,18 @@ Things that have already bitten, recorded so they do not bite twice.
   differential number improved in the change that introduced the bug above — `keywords` reached 0
   and `case` halved — while the tool quietly began corrupting real source. Never trade a corpus
   difference for a differential improvement; the corpus reaching 0 is a precondition, not a score.
+- **The reference does not always converge in one pass, and neither do we — on purpose.**
+  `tools/check_invariants.py` runs I1 and I2 over every corpus file under every perturbation, 480
+  inputs. Everything passes except I1 on 5 files under `separators`, where a padded declaration such
+  as `class(CAMBdata)    :: State` survives the first pass and is compressed by the second. Running
+  the frozen reference twice on the same input reproduces it exactly, on the same line: the
+  non-idempotence is **inherited, not introduced**, and our output equals the reference's first
+  pass. Do not "fix" this by changing the alignment rule — that would break fidelity to the oracle
+  while pretending to restore an invariant. It is a product decision, recorded under Chunk G.
+  The same shape appears in the detached-comment indent: the reference emits the comment at the
+  continuation indent, findent then re-indents it to the statement indent, and the reference's
+  second pass agrees. Whenever an invariant fails on constructed input, check the oracle on the same
+  input before believing the port is at fault.
 - **Building a per-line view by copying is quadratic.** Both the reference and this port key
   declared names by physical line. Materializing that as one map per line, with every visible name
   copied in, is O(lines × names): 16x slower on a file with 800 module declarations, and invisible

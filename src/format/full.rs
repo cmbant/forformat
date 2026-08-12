@@ -34,6 +34,9 @@ use crate::{
     FormatMeta, FormatResult,
 };
 
+type DetachedComment = (usize, usize);
+type ReflowResult = (Vec<(usize, Decline)>, Vec<DetachedComment>);
+
 /// Format one buffer with project context.
 pub fn format_with_context(
     source: &[u8],
@@ -57,13 +60,16 @@ pub fn format_with_context(
     }
 
     if config.wrap.enabled {
-        let declined = reflow_with_context(&mut document, project, &local, config)?;
+        let (declined, detached_comments) =
+            reflow_with_context_inner(&mut document, project, &local, config)?;
         // Every long line the wrapper refuses is explainable; the corpus check
         // consumes this to separate "unwrappable by design" from a wrapper bug.
         let laid_out = engine::format(&document.to_lf_bytes(), config)?;
         let mut output = Document::from_bytes(&laid_out.bytes);
         output.newline = document.newline;
         output.trailing_newline = document.trailing_newline;
+        restore_detached_comment_indentation(&mut output, &detached_comments);
+        restore_overindented_comment_lines(&document, &mut output, config.wrap.line_length);
         pipeline::post_layout(&mut output, config)?;
         return Ok(FormatResult {
             bytes: output.to_bytes(),
@@ -110,6 +116,15 @@ pub fn reflow_with_context(
     local: &crate::analysis::FileFacts,
     config: &FormatConfig,
 ) -> Result<Vec<(usize, Decline)>, FormatError> {
+    Ok(reflow_with_context_inner(document, project, local, config)?.0)
+}
+
+fn reflow_with_context_inner(
+    document: &mut Document,
+    project: &ProjectContext,
+    local: &crate::analysis::FileFacts,
+    config: &FormatConfig,
+) -> Result<ReflowResult, FormatError> {
     let analysis = document.analyze()?;
     let scopes = ScopeTree::build(&analysis);
     let declared_names = scoped_declared_names(&analysis, &scopes);
@@ -128,6 +143,7 @@ pub fn reflow_with_context(
 
     let mut lines: Vec<Vec<u8>> = Vec::with_capacity(document.lines.len());
     let mut declined = Vec::new();
+    let mut detached_comments = Vec::new();
     for (group, plan) in analysis.groups.iter().zip(&plans) {
         if let Some(directive) = join_openmp_directive(document, group) {
             let long = directive.len() > config.wrap.line_length
@@ -184,15 +200,6 @@ pub fn reflow_with_context(
             );
             body = trim(&body).to_vec();
         }
-        if first_indent + body.len() <= config.wrap.line_length {
-            copy_group(document, group, &mut lines);
-            continue;
-        }
-        let detached = detach_final_inline_comment(document, group);
-        if detached.is_none() {
-            copy_group(document, group, &mut lines);
-            continue;
-        }
         let layout = ContinuationLayout {
             first_indent,
             continuation: first_indent.saturating_add(if config.indent_continuation {
@@ -201,9 +208,38 @@ pub fn reflow_with_context(
                 0
             }),
         };
+        let comment_indent = if group.lines.len() == 1 {
+            layout.first_indent
+        } else {
+            layout.continuation
+        };
+        let detached = detach_final_inline_comment(document, group, comment_indent);
+        if first_indent + body.len() <= config.wrap.line_length {
+            match detached {
+                Some(Some(comment)) => {
+                    detached_comments.push((lines.len(), comment_indent));
+                    lines.extend(comment);
+                    if group.lines.len() > 1 {
+                        emit_joined_body(&mut lines, &body, first_indent);
+                    } else {
+                        copy_group_without_final_comment(document, group, &mut lines);
+                    }
+                }
+                Some(None) if group.lines.len() > 1 => {
+                    emit_joined_body(&mut lines, &body, first_indent);
+                }
+                _ => copy_group(document, group, &mut lines),
+            }
+            continue;
+        }
+        if detached.is_none() {
+            copy_group(document, group, &mut lines);
+            continue;
+        }
         match wrapping::wrap_body_with_alignment(&body, layout, config.wrap.line_length, align) {
             Ok(wrapped) => {
                 if let Some(comment) = detached.flatten() {
+                    detached_comments.push((lines.len(), comment_indent));
                     lines.extend(comment);
                 }
                 lines.extend(wrapped)
@@ -216,7 +252,7 @@ pub fn reflow_with_context(
         }
     }
     document.set_lines(lines);
-    Ok(declined)
+    Ok((declined, detached_comments))
 }
 
 /// Return the final inline comment, if there is exactly one and it is on the
@@ -225,6 +261,7 @@ pub fn reflow_with_context(
 fn detach_final_inline_comment(
     document: &Document,
     group: &LogicalGroup,
+    comment_indent: usize,
 ) -> Option<Option<Vec<Vec<u8>>>> {
     let mut comments = Vec::new();
     for index in group.lines.clone() {
@@ -240,13 +277,57 @@ fn detach_final_inline_comment(
     }
     let (index, start) = comments[0];
     let line = &document.lines[index];
-    let mut comment = line[..start]
-        .iter()
-        .take_while(|byte| byte.is_ascii_whitespace())
-        .copied()
-        .collect::<Vec<_>>();
+    let mut comment = vec![b' '; comment_indent];
     comment.extend_from_slice(line[start..].trim_ascii_start());
     Some(Some(vec![comment]))
+}
+
+fn emit_joined_body(lines: &mut Vec<Vec<u8>>, body: &[u8], first_indent: usize) {
+    let mut line = vec![b' '; first_indent];
+    line.extend_from_slice(body);
+    lines.push(line);
+}
+
+fn restore_detached_comment_indentation(document: &mut Document, comments: &[DetachedComment]) {
+    for &(index, indent) in comments {
+        let Some(line) = document.lines.get_mut(index) else {
+            continue;
+        };
+        let content = line.trim_ascii_start().to_vec();
+        *line = vec![b' '; indent];
+        line.extend_from_slice(&content);
+    }
+}
+
+fn restore_overindented_comment_lines(
+    source: &Document,
+    output: &mut Document,
+    line_length: usize,
+) {
+    for (source_line, output_line) in source.lines.iter().zip(&mut output.lines) {
+        let source_indent = leading_horizontal_width(source_line);
+        let source_content = source_line.trim_ascii_start();
+        if source_indent == 0
+            || source_line.len() <= line_length
+            || !source_content.starts_with(b"!")
+        {
+            continue;
+        }
+        let output_content = output_line.trim_ascii_start().to_vec();
+        if !output_content.starts_with(b"!") {
+            continue;
+        }
+        if source_indent > leading_horizontal_width(output_line) {
+            *output_line = vec![b' '; source_indent];
+            output_line.extend_from_slice(&output_content);
+        }
+    }
+}
+
+fn leading_horizontal_width(line: &[u8]) -> usize {
+    line.iter()
+        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+        .count()
 }
 
 fn join_openmp_directive(document: &Document, group: &LogicalGroup) -> Option<Vec<u8>> {
@@ -335,6 +416,28 @@ fn copy_group(document: &Document, group: &LogicalGroup, lines: &mut Vec<Vec<u8>
     }
 }
 
+fn copy_group_without_final_comment(
+    document: &Document,
+    group: &LogicalGroup,
+    lines: &mut Vec<Vec<u8>>,
+) {
+    let final_line = group.lines.end.saturating_sub(1);
+    for index in group.lines.clone() {
+        let Some(line) = document.lines.get(index) else {
+            continue;
+        };
+        if index == final_line {
+            if let Some(comment) = crate::source::regions::comment_start(line) {
+                lines.push(line[..comment].trim_ascii_end().to_vec());
+                continue;
+            }
+        }
+        {
+            lines.push(line.clone());
+        }
+    }
+}
+
 /// Reflow is declined when the group interleaves anything that cannot sit
 /// between a continuation marker and the text it continues (I5).
 fn eligible(buffer: &SourceBuffer, group: &LogicalGroup) -> bool {
@@ -366,6 +469,8 @@ mod tests {
         analysis::ProjectContext,
         config::{FormatConfig, FormatMode},
         format_source,
+        source::LogicalGroup,
+        transform::document::Document,
     };
 
     fn full(config_setup: impl FnOnce(&mut FormatConfig), source: &[u8]) -> Vec<u8> {
@@ -377,6 +482,83 @@ mod tests {
         format_with_context(source, &ProjectContext::empty(), &config)
             .unwrap()
             .bytes
+    }
+
+    fn profile_full(source: &[u8]) -> Vec<u8> {
+        full(
+            |config| {
+                config.indent = 4;
+                config.start_indent = 4;
+                config.contains_indent = 0;
+                config.openmp = false;
+                config.contains_restart = true;
+                config.indent_continuation = true;
+                config.continuation_indent = 4;
+                config.indent_ampersand = true;
+                config.construct_indents.set_all(4);
+                config.construct_indents.module = 0;
+                config.construct_indents.procedure = 0;
+                config.construct_indents.interface = 0;
+            },
+            source,
+        )
+    }
+
+    #[test]
+    fn detached_comment_uses_the_single_line_layout_indent() {
+        let source = br#"module m
+implicit none
+contains
+subroutine s(a)
+real :: a
+call some_procedure_with_a_long_name(argument_number_1, argument_number_2, argument_number_3, argument_number_4, argument_number_5, argument_number_6, argument_number_7, argument_number_8, argument_number_9, argument_number_10, argument_number_11) ! short note
+end subroutine s
+end module m
+"#;
+        let once = profile_full(source);
+        let twice = profile_full(&once);
+        assert_eq!(once, twice);
+        assert!(String::from_utf8_lossy(&once).contains("    ! short note\n"));
+    }
+
+    #[test]
+    fn a_fitting_joined_group_is_emitted_as_one_statement() {
+        let source = br#"module m
+implicit none
+contains
+subroutine s(a)
+real :: a
+a = 1 ! this trailing comment is deliberately long this trailing comment is deliberately long this trailing comment is deliberately long this trailing comment is deliberately long
+call f(a, &
+a) ! this trailing comment is deliberately long this trailing comment is deliberately long this trailing comment is deliberately long this trailing comment is deliberately long
+b = 2 ! short
+end subroutine s
+end module m
+"#;
+        let once = profile_full(source);
+        let twice = profile_full(&once);
+        assert_eq!(once, twice);
+        let output = String::from_utf8_lossy(&once);
+        assert!(output.contains("        ! this trailing comment"));
+        assert!(output.contains("    call f(a, a)\n"));
+        assert!(!output.contains("call f(a, &\n"));
+    }
+
+    #[test]
+    fn only_the_final_line_comment_is_stripped() {
+        let document = Document::from_bytes(b"  code ! keep\n  code ! strip\n");
+        let group = LogicalGroup {
+            lines: 0..2,
+            statements: Vec::new(),
+            pieces: Vec::new(),
+        };
+        let mut once = Vec::new();
+        super::copy_group_without_final_comment(&document, &group, &mut once);
+        let transformed = Document::from_bytes(b"  code ! keep\n  code\n");
+        let mut twice = Vec::new();
+        super::copy_group_without_final_comment(&transformed, &group, &mut twice);
+        assert_eq!(once, [b"  code ! keep".to_vec(), b"  code".to_vec()]);
+        assert_eq!(twice, once);
     }
 
     #[test]
@@ -419,7 +601,7 @@ mod tests {
         assert!(crlf.windows(2).any(|pair| pair == b"\r\n"));
         assert_eq!(
             String::from_utf8_lossy(&crlf),
-            "program p\r\n   X = 1\r\nend program p\r\n"
+            "program p\r\n   X = 1\r\n\r\nend program p\r\n"
         );
     }
 

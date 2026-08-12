@@ -260,13 +260,13 @@ pub fn remove_terminal_procedure_returns(
     Ok(Changed::Structure)
 }
 
-fn is_preprocessor_line(line: &[u8]) -> bool {
+pub(crate) fn is_preprocessor_line(line: &[u8]) -> bool {
     line.iter()
         .position(|byte| !matches!(byte, b' ' | b'\t'))
         .is_some_and(|index| line[index] == b'#' || line[index..].starts_with(b"??"))
 }
 
-fn cpp_line_continues(line: &[u8]) -> bool {
+pub(crate) fn cpp_line_continues(line: &[u8]) -> bool {
     let mut end = line.len();
     while end > 0 && line[end - 1].is_ascii_whitespace() {
         end -= 1;

@@ -112,6 +112,83 @@ def perturb_mixed(code: str) -> str:
     return code
 
 
+def perturb_separators(code: str) -> str:
+    """Mangle the whitespace around a declaration `::`.
+
+    None of the perturbations above disturbs separator alignment, and CAMB is
+    already a fixed point of the alignment pass, so without this one the pass is
+    invisible to *both* standing checks — it scores identically whether it works
+    or does nothing.  Only depth-0 `::` is touched, so an array stride triplet
+    such as `a(1::2)` is left alone.
+    """
+    out: list[str] = []
+    wide = len(code) % 2 == 0
+    depth = index = 0
+    while index < len(code):
+        character = code[index]
+        if character in "([":
+            depth += 1
+        elif character in ")]":
+            depth -= 1
+        if depth == 0 and code.startswith("::", index):
+            while out and out[-1] in " \t":
+                out.pop()
+            out.append("     ::   " if wide else "::")
+            index += 2
+            while index < len(code) and code[index] in " \t":
+                index += 1
+            continue
+        out.append(character)
+        index += 1
+    return "".join(out)
+
+
+# --- whole-text perturbations -----------------------------------------------
+#
+# Blank-line structure is a property of the file, not of a line, so these bypass
+# the per-line `code_spans` machinery.  They may only add or remove
+# whitespace-only lines: no protected byte is ever touched.
+
+def _cpp_continues(line: str) -> bool:
+    return line.rstrip("\r\n").rstrip().endswith("\\")
+
+
+def perturb_blanks(text: str) -> str:
+    """Delete every blank line, forcing the reference to re-insert the ones its
+    program-unit spacing rule requires."""
+    lines = text.splitlines(keepends=True)
+    kept: list[str] = []
+    for index, line in enumerate(lines):
+        if not line.strip() and not (index and _cpp_continues(lines[index - 1])):
+            continue
+        kept.append(line)
+    return "".join(kept)
+
+
+def perturb_blankruns(text: str) -> str:
+    """Insert a three-blank-line run periodically, which `limit_blank_lines` must
+    cap at two and program-unit spacing must collapse at a unit boundary."""
+    lines = text.splitlines(keepends=True)
+    out: list[str] = []
+    statements = 0
+    for index, line in enumerate(lines):
+        out.append(line)
+        stripped = line.strip()
+        if not stripped:
+            continue
+        statements += 1
+        following = lines[index + 1] if index + 1 < len(lines) else ""
+        unsafe = (
+            stripped.endswith("&")
+            or following.lstrip().startswith("&")
+            or _cpp_continues(line)
+            or stripped.startswith("#")
+        )
+        if statements % 9 == 0 and not unsafe and following:
+            out.extend(["\n"] * 3)
+    return "".join(out)
+
+
 PERTURBATIONS = {
     "spacing": perturb_spacing,
     "case": perturb_case,
@@ -120,7 +197,15 @@ PERTURBATIONS = {
     "compound": perturb_compound,
     "exponent": perturb_exponent,
     "mixed": perturb_mixed,
+    "separators": perturb_separators,
 }
+
+TEXT_PERTURBATIONS = {
+    "blanks": perturb_blanks,
+    "blankruns": perturb_blankruns,
+}
+
+ALL_PERTURBATIONS = sorted({*PERTURBATIONS, *TEXT_PERTURBATIONS})
 
 
 # --- protected-span aware application ---------------------------------------
@@ -149,6 +234,8 @@ def code_spans(line: str) -> list[tuple[int, int]]:
 
 
 def apply(text: str, name: str, stride: int) -> str:
+    if name in TEXT_PERTURBATIONS:
+        return TEXT_PERTURBATIONS[name](text)
     transform = PERTURBATIONS[name]
     out = []
     for number, line in enumerate(text.splitlines()):
@@ -205,20 +292,20 @@ def main() -> int:
     parser.add_argument("files", nargs="*", type=Path)
     parser.add_argument("--binary", default=str(ROOT / "target/release/findent"))
     parser.add_argument("--findent", default="findent", help="findent 4.3.7 binary")
-    parser.add_argument("--perturbation", action="append", choices=sorted(PERTURBATIONS))
+    parser.add_argument("--perturbation", action="append", choices=ALL_PERTURBATIONS)
     parser.add_argument("--stride", type=int, default=1, help="perturb every Nth line")
     parser.add_argument("--show", type=int, default=3, help="differing lines to print per file")
     parser.add_argument("--list-perturbations", action="store_true")
     args = parser.parse_args()
 
     if args.list_perturbations:
-        print("\n".join(sorted(PERTURBATIONS)))
+        print("\n".join(ALL_PERTURBATIONS))
         return 0
 
     module = load_reference()
     global VOCABULARY
     VOCABULARY = frozenset(module.FORTRAN_STANDARD_WORDS) | frozenset(module.INTRINSIC_NAMES)
-    names = args.perturbation or sorted(PERTURBATIONS)
+    names = args.perturbation or ALL_PERTURBATIONS
     totals = {name: [0, 0, 0] for name in names}  # files, differing files, differing lines
 
     for name in names:

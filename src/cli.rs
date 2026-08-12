@@ -2,13 +2,28 @@ use crate::{
     config::{FormatConfig, FormatMode, MacroDefine},
     error::FormatError,
 };
+use std::path::PathBuf;
 
 pub const VERSION: &str = "findent 0.1.0";
 
 pub enum Command {
-    Run(Box<FormatConfig>),
+    Run(Box<Invocation>),
     Help,
     Version,
+}
+
+/// Parsed command-line state. Formatting remains configured by
+/// [`FormatConfig`]; file/project policy lives here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invocation {
+    pub config: FormatConfig,
+    pub paths: Vec<PathBuf>,
+    pub all: bool,
+    pub stdin: bool,
+    pub stdout: bool,
+    pub isolated: bool,
+    pub check: bool,
+    pub diff: bool,
 }
 
 pub fn parse<I>(args: I) -> Result<Command, FormatError>
@@ -22,13 +37,24 @@ where
     let mut help = false;
     let mut version = false;
     let mut options_ended = false;
+    let mut paths = Vec::new();
+    let mut all = false;
+    let mut stdin = false;
+    let mut stdout = false;
+    let mut isolated = false;
+    let mut check = false;
+    let mut diff = false;
     while let Some(arg) = a.next() {
         if arg == "--" {
             options_ended = true;
             continue;
         }
         if options_ended {
-            return Err(FormatError::InvalidOption(arg));
+            if arg.starts_with('-') {
+                return Err(FormatError::InvalidOption(arg));
+            }
+            paths.push(PathBuf::from(arg));
+            continue;
         }
         if arg == "-h" || arg == "--help" {
             help = true;
@@ -138,6 +164,12 @@ where
                 }
                 "last-indent" => c.last_indent = true,
                 "last-usable" => c.last_usable = true,
+                "all" => all = true,
+                "stdin" => stdin = true,
+                "stdout" => stdout = true,
+                "isolated" => isolated = true,
+                "check" => check = true,
+                "diff" => diff = true,
                 // Mode selection.  `indent-only` must be matched before the
                 // generic `indent-*` construct arm below, which would otherwise
                 // read it as a construct name.
@@ -321,14 +353,62 @@ where
             }
             continue;
         }
-        return Err(FormatError::InvalidOption(arg));
+        if arg.starts_with('-') {
+            return Err(FormatError::InvalidOption(arg));
+        }
+        paths.push(PathBuf::from(arg));
+    }
+    if stdin && (all || !paths.is_empty() || stdout || isolated || check || diff) {
+        return Err(FormatError::InvalidOption(
+            "--stdin cannot be combined with paths, --all, --stdout, --check, --diff, or --isolated".into(),
+        ));
+    }
+    if stdout && (paths.len() != 1 || all || check || diff) {
+        return Err(FormatError::InvalidOption(
+            "--stdout requires exactly one path and cannot be combined with --all, --check, or --diff".into(),
+        ));
+    }
+    if all && !paths.is_empty() {
+        return Err(FormatError::InvalidOption(
+            "--all cannot be combined with paths".into(),
+        ));
+    }
+    if isolated && (all || paths.is_empty()) {
+        return Err(FormatError::InvalidOption(
+            "--isolated requires one or more explicit paths".into(),
+        ));
+    }
+    if diff && paths.is_empty() && !all {
+        return Err(FormatError::InvalidOption(
+            "--diff requires paths or --all".into(),
+        ));
+    }
+    if check && paths.is_empty() && !all {
+        return Err(FormatError::InvalidOption(
+            "--check requires paths or --all".into(),
+        ));
+    }
+    if (c.last_indent || c.last_usable) && (all || !paths.is_empty() || check || diff) {
+        return Err(FormatError::InvalidOption(
+            "-lastindent/-lastusable cannot be combined with path-update, --check, or --diff"
+                .into(),
+        ));
     }
     if help {
         Ok(Command::Help)
     } else if version {
         Ok(Command::Version)
     } else {
-        Ok(Command::Run(Box::new(c)))
+        Ok(Command::Run(Box::new(Invocation {
+            config: c,
+            paths,
+            all,
+            stdin,
+            stdout,
+            isolated,
+            check,
+            diff,
+        })))
     }
 }
 
@@ -433,6 +513,13 @@ Free-form Fortran formatter.\n\
   -Rr, -RR, --refactor-end[=upcase]  complete END definition statements\n\
   --ws-remred[=<n>]                  reduce redundant whitespace\n\
   -lastindent, -lastusable           print query result instead of source\n\
+  <paths>, --all                      format explicit files or all tracked sources\n\
+  --stdin                             read source from stdin (default without paths)\n\
+  --stdout                            write one file's result to stdout\n\
+  --isolated                          do not scan repository sources for case resolution\n\
+  --check                             exit 1 if selected files would change\n\
+  --diff                              print unified diffs and exit 1 if changed\n\
+  Query modes cannot be combined with path-update, --check, or --diff.\n\
   --indent-only                      findent-compatible indentation only (default)\n\
   --full                             full formatting: normalization and wrapping\n\
   --normalize-only                   normalization without structural layout\n\
@@ -453,7 +540,7 @@ mod tests {
         let mut argv = vec!["findent".to_string()];
         argv.extend(args.iter().map(|arg| (*arg).to_string()));
         match parse(argv).unwrap() {
-            Command::Run(config) => *config,
+            Command::Run(invocation) => invocation.config,
             _ => panic!("expected a formatting command"),
         }
     }
@@ -705,5 +792,35 @@ mod tests {
             parse(["findent".to_string(), "--include-left=maybe".to_string()].into_iter()),
             Err(crate::error::FormatError::InvalidOption(_))
         ));
+    }
+
+    #[test]
+    fn file_workflow_flags_and_query_mode_validation_are_explicit() {
+        use crate::config::FormatMode;
+        let parsed = parse(
+            ["findent", "--full", "--all"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap();
+        match parsed {
+            Command::Run(invocation) => {
+                assert!(invocation.all);
+                assert_eq!(invocation.config.mode, FormatMode::Full);
+            }
+            _ => panic!("expected run"),
+        }
+        assert!(parse(
+            ["findent", "-lastindent", "--check", "x.f90"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .is_err());
+        assert!(parse(
+            ["findent", "--stdout", "x.f90", "y.f90"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .is_err());
     }
 }

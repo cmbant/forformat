@@ -50,9 +50,9 @@ fn checked_in_manifest_covers_success_and_rejection_paths() {
             other => panic!("unknown manifest mode {other} in case {}", case.name),
         };
         let (stdout, stderr, status) = match cli::parse(argv) {
-            Ok(cli::Command::Run(mut config)) => {
-                config.mode = mode;
-                match format_source(&input, &config) {
+            Ok(cli::Command::Run(mut invocation)) => {
+                invocation.config.mode = mode;
+                match format_source(&input, &invocation.config) {
                     Ok(result) => (result.bytes, String::new(), 0),
                     Err(error) => (Vec::new(), format_error(error), 1),
                 }

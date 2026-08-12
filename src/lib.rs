@@ -11,6 +11,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod format;
+pub mod io;
 pub mod source;
 pub mod transform;
 
