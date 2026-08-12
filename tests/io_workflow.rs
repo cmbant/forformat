@@ -74,10 +74,10 @@ fn all_discovers_uppercase_extensions_and_ignores_hook_git_environment() {
     fs::write(repo.join("source.F90"), b"program p\nx=1\nend program p\n").unwrap();
     fs::write(repo.join("ignored.txt"), b"x\n").unwrap();
     git_add(&repo);
-    let output = run_with_bogus_git_env(&repo, &["--all", "--check"]);
+    let output = run_with_bogus_git_env(&repo, &["--indent-only", "--all", "--check"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stdout).contains("source.F90"));
-    let output = run_with_bogus_git_env(&repo, &["--all"]);
+    let output = run_with_bogus_git_env(&repo, &["--indent-only", "--all"]);
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         fs::read(repo.join("source.F90")).unwrap(),
@@ -105,19 +105,19 @@ fn check_diff_and_query_mode_have_real_process_statuses() {
     let repo = temp_repo();
     fs::write(repo.join("source.f90"), b"program p\nx=1\nend program p\n").unwrap();
     git_add(&repo);
-    let diff = run(&repo, &["--diff", "source.f90"]);
+    let diff = run(&repo, &["--indent-only", "--diff", "source.f90"]);
     assert_eq!(diff.status.code(), Some(1));
     let text = String::from_utf8_lossy(&diff.stdout);
     assert!(text.contains("--- a/source.f90"));
     assert!(text.contains("+++ b/source.f90"));
-    let check = run(&repo, &["--check", "source.f90"]);
+    let check = run(&repo, &["--indent-only", "--check", "source.f90"]);
     assert_eq!(check.status.code(), Some(1));
-    let stdout = run(&repo, &["--stdout", "source.f90"]);
+    let stdout = run(&repo, &["--indent-only", "--stdout", "source.f90"]);
     assert_eq!(stdout.status.code(), Some(0));
     assert_eq!(stdout.stdout, b"program p\n   x=1\nend program p\n");
-    let update = run(&repo, &["source.f90"]);
+    let update = run(&repo, &["--indent-only", "source.f90"]);
     assert_eq!(update.status.code(), Some(0));
-    let clean = run(&repo, &["--check", "source.f90"]);
+    let clean = run(&repo, &["--indent-only", "--check", "source.f90"]);
     assert_eq!(clean.status.code(), Some(0));
     let query = run(&repo, &["-lastindent", "--check", "source.f90"]);
     assert_eq!(query.status.code(), Some(2));
@@ -173,6 +173,44 @@ fn stdin_and_file_routes_produce_identical_bytes_for_the_same_source() {
 }
 
 #[test]
+fn isolated_keeps_local_component_resolution_like_stdin() {
+    let repo = temp_repo();
+    let source = b"module m
+type :: Parent
+real :: INTEGRATE_TOL
+procedure :: ParentRun
+end type Parent
+contains
+subroutine work(this)
+class(Parent) :: THIS
+this%integrate_tol = 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 14 + 15 + 16 + 17 + 18 + 19 + 20 + 21 + 22 + 23 + 24 + 25 + 26 + 27 + 28 + 29 + 30
+call this%parentrun()
+end subroutine work
+end module m
+";
+    fs::write(repo.join("source.f90"), source).unwrap();
+    let args = ["--full", "--indent=4", "--start-indent=4"];
+    let stdin = run_stdin(&repo, &args, source);
+    let file = run(
+        &repo,
+        &[
+            "--full",
+            "--stdout",
+            "--isolated",
+            "--indent=4",
+            "--start-indent=4",
+            "source.f90",
+        ],
+    );
+    assert_eq!(stdin.status.code(), Some(0));
+    assert_eq!(file.status.code(), Some(0));
+    assert_eq!(stdin.stdout, file.stdout);
+    assert!(String::from_utf8_lossy(&file.stdout).contains("THIS%INTEGRATE_TOL"));
+    assert!(String::from_utf8_lossy(&file.stdout).contains("call THIS%ParentRun"));
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
 fn a_local_declaration_outranks_conflicting_project_spelling() {
     let repo = temp_repo();
     fs::write(
@@ -202,7 +240,7 @@ fn in_place_update_preserves_symlink_and_target_mode() {
     fs::write(&target, b"program p\nx=1\nend program p\n").unwrap();
     fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).unwrap();
     symlink("target.f90", &link).unwrap();
-    let output = run(&repo, &["link.f90"]);
+    let output = run(&repo, &["--indent-only", "link.f90"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(fs::symlink_metadata(&link)
         .unwrap()

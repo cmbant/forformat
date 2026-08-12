@@ -77,52 +77,68 @@ pub fn normalize_openmp_continuation_sentinels(
     let mut updated = document.lines.clone();
     for line in &mut updated {
         let mut current = line.clone();
-        let Some((sentinel_end, body_start, _omp_style)) = openmp_prefix(&current) else {
+        let Some((sentinel_end, body_start, omp_style)) = openmp_prefix(&current) else {
             continuation = false;
             continue;
         };
+        // `!$` conditional-compilation lines and `!$OMP` directives share a
+        // lexical prefix but not a formatting language.  The former keeps its
+        // authored body bytes; only the latter gets directive normalization.
+        if !omp_style {
+            let body = &current[body_start..];
+            let leading_ampersand = body
+                .iter()
+                .position(|byte| !byte.is_ascii_whitespace())
+                .is_some_and(|start| body[start] == b'&');
+            if leading_ampersand || continuation {
+                let mut start = body_start;
+                while start < current.len() && current[start].is_ascii_whitespace() {
+                    start += 1;
+                }
+                if current.get(start) == Some(&b'&') {
+                    start += 1;
+                    while start < current.len() && current[start].is_ascii_whitespace() {
+                        start += 1;
+                    }
+                    let mut rebuilt = current[..sentinel_end].to_vec();
+                    rebuilt.push(b' ');
+                    rebuilt.extend_from_slice(&current[start..]);
+                    if rebuilt != current {
+                        current = rebuilt;
+                        changed = changed.or(Changed::Text);
+                    }
+                }
+            }
+            continuation = openmp_body(&current).is_some_and(ends_with_continuation);
+            *line = current;
+            continue;
+        }
         let body = &current[body_start..];
         let is_continuation = body
             .iter()
             .position(|byte| !byte.is_ascii_whitespace())
             .is_some_and(|start| body[start] == b'&');
         let should_repeat = is_continuation || continuation;
-        if should_repeat {
-            let mut rebuilt = current[..sentinel_end].to_vec();
-            rebuilt.push(b' ');
-            let mut start = body_start;
+        let mut start = body_start;
+        if should_repeat && current.get(start) == Some(&b'&') {
+            start += 1;
             while start < current.len() && current[start].is_ascii_whitespace() {
                 start += 1;
             }
-            if current.get(start) == Some(&b'&') {
-                start += 1;
-                while start < current.len() && current[start].is_ascii_whitespace() {
-                    start += 1;
-                }
-            }
-            rebuilt.extend_from_slice(&current[start..]);
-            if rebuilt != current {
-                current = rebuilt;
-                changed = changed.or(Changed::Text);
-            }
+        }
+        let normalized_body = normalize_openmp_body(&current[start..], cx);
+        let indent_end = current
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(0);
+        let mut rebuilt = current[..indent_end].to_vec();
+        rebuilt.extend_from_slice(b"!$OMP ");
+        rebuilt.extend_from_slice(&normalized_body);
+        if rebuilt != current {
+            current = rebuilt;
+            changed = changed.or(Changed::Text);
         }
         continuation = openmp_body(&current).is_some_and(ends_with_continuation);
-        // `cx` carries the macro table used by the OpenMP vocabulary pass.  It
-        // is deliberately applied after sentinel repair so every physical
-        // directive line has the same protected prefix.
-        if let Some((_, body_start, omp_style)) = openmp_prefix(&current) {
-            let body = if omp_style || starts_with_omp(&current[body_start..]) {
-                uppercase_openmp_body(&current[body_start..], cx)
-            } else {
-                current[body_start..].to_vec()
-            };
-            if body != current[body_start..] {
-                let mut rebuilt = current[..body_start].to_vec();
-                rebuilt.extend_from_slice(&body);
-                current = rebuilt;
-                changed = changed.or(Changed::Text);
-            }
-        }
         *line = current;
     }
     if changed != Changed::No {
@@ -240,15 +256,6 @@ fn openmp_body(line: &[u8]) -> Option<&[u8]> {
     openmp_prefix(line).map(|(_, start, _)| &line[start..])
 }
 
-fn starts_with_omp(body: &[u8]) -> bool {
-    let body = body.trim_ascii_start();
-    body.get(..3)
-        .is_some_and(|word| word.eq_ignore_ascii_case(b"omp"))
-        && body
-            .get(3)
-            .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
-}
-
 fn uppercase_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
     const KEYWORDS: &[&[u8]] = &[
         b"omp",
@@ -360,6 +367,59 @@ fn uppercase_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
         }
     }
     result
+}
+
+fn normalize_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
+    let upper = uppercase_openmp_body(body, cx);
+    let spaced = crate::transform::passes::line_rules::normalize_delimiter_spacing(&upper, cx);
+    normalize_openmp_clause_separators(&spaced)
+}
+
+/// Match the reference's narrow OpenMP clause rule: `DEFAULT(X) PRIVATE(Y)`
+/// becomes `DEFAULT(X), PRIVATE(Y)`, while adjacent tokens without whitespace
+/// remain authored.  This runs only on `!$OMP` bodies, never on `!$` lines.
+fn normalize_openmp_clause_separators(body: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(body.len() + 8);
+    let mut index = 0;
+    while index < body.len() {
+        if body[index] == b'!' {
+            output.extend_from_slice(&body[index..]);
+            break;
+        }
+        if body[index] == b')' {
+            let whitespace_start = index + 1;
+            let mut whitespace_end = whitespace_start;
+            while whitespace_end < body.len() && body[whitespace_end].is_ascii_whitespace() {
+                whitespace_end += 1;
+            }
+            let mut token_end = whitespace_end;
+            if token_end < body.len()
+                && (body[token_end].is_ascii_alphabetic() || body[token_end] == b'_')
+            {
+                token_end += 1;
+                while token_end < body.len()
+                    && (body[token_end].is_ascii_alphanumeric() || body[token_end] == b'_')
+                {
+                    token_end += 1;
+                }
+                let mut opening = token_end;
+                while opening < body.len() && body[opening].is_ascii_whitespace() {
+                    opening += 1;
+                }
+                if opening < body.len()
+                    && body[opening] == b'('
+                    && whitespace_end > whitespace_start
+                {
+                    output.extend_from_slice(b"), ");
+                    index = whitespace_end;
+                    continue;
+                }
+            }
+        }
+        output.push(body[index]);
+        index += 1;
+    }
+    output
 }
 
 #[cfg(test)]

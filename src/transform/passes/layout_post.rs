@@ -27,72 +27,79 @@ pub fn declaration_separator_alignment(
     config: &FormatConfig,
 ) -> Result<(), FormatError> {
     let _ = config;
-    let mut cpp_lines = Vec::with_capacity(document.lines.len());
-    let mut cpp_continuation = false;
-    for line in &document.lines {
-        let cpp_line = cpp_continuation || is_preprocessor_line(line);
-        cpp_lines.push(cpp_line);
-        cpp_continuation = cpp_line && cpp_line_continues(line);
-    }
-
-    let separators = document
-        .lines
-        .iter()
-        .zip(&cpp_lines)
-        .map(|(line, cpp)| {
-            if *cpp {
-                None
-            } else {
-                declaration_separator_info(line)
-            }
-        })
-        .collect::<Vec<_>>();
-    let original = document.lines.clone();
-    let mut updated = original.clone();
-    let mut index = 0;
-    while index < original.len() {
-        if separators[index].is_none() {
-            index += 1;
-            continue;
+    let mut lines = document.lines.clone();
+    loop {
+        let mut cpp_lines = Vec::with_capacity(lines.len());
+        let mut cpp_continuation = false;
+        for line in &lines {
+            let cpp_line = cpp_continuation || is_preprocessor_line(line);
+            cpp_lines.push(cpp_line);
+            cpp_continuation = cpp_line && cpp_line_continues(line);
         }
 
-        let mut block_indices = Vec::new();
+        let separators = lines
+            .iter()
+            .zip(&cpp_lines)
+            .map(|(line, cpp)| {
+                if *cpp {
+                    None
+                } else {
+                    declaration_separator_info(line)
+                }
+            })
+            .collect::<Vec<_>>();
+        let original = lines.clone();
+        let mut updated = original.clone();
+        let mut index = 0;
         while index < original.len() {
-            if separators[index].is_some() {
-                block_indices.push(index);
+            if separators[index].is_none() {
                 index += 1;
                 continue;
             }
-            if !cpp_lines[index] && original[index].trim_ascii_start().starts_with(b"!") {
-                index += 1;
-                continue;
+
+            let mut block_indices = Vec::new();
+            while index < original.len() {
+                if separators[index].is_some() {
+                    block_indices.push(index);
+                    index += 1;
+                    continue;
+                }
+                if !cpp_lines[index] && original[index].trim_ascii_start().starts_with(b"!") {
+                    index += 1;
+                    continue;
+                }
+                break;
             }
+
+            let mut block = Vec::new();
+            let mut separator_column = 0;
+            for line_index in block_indices {
+                let separator = separators[line_index]
+                    .expect("separator index collected only for declaration lines");
+                let minimum_column = separator.0 - separator.1 + 1;
+                let proposed_column = separator_column.max(minimum_column);
+                if !block.is_empty()
+                    && (separator.0 < proposed_column
+                        || block
+                            .iter()
+                            .any(|(_, (column, _, _))| *column < proposed_column))
+                {
+                    normalize_declaration_block(&original, &mut updated, &block);
+                    block.clear();
+                    separator_column = 0;
+                }
+                let proposed_column = separator_column.max(minimum_column);
+                block.push((line_index, separator));
+                separator_column = proposed_column;
+            }
+            normalize_declaration_block(&original, &mut updated, &block);
+        }
+        if updated == lines {
             break;
         }
-
-        let mut block = Vec::new();
-        let mut separator_column = 0;
-        for line_index in block_indices {
-            let separator = separators[line_index]
-                .expect("separator index collected only for declaration lines");
-            let minimum_column = separator.0 - separator.1 + 1;
-            let mut proposed_column = separator_column.max(minimum_column);
-            if !block.is_empty()
-                && (separator.0 < proposed_column
-                    || block
-                        .iter()
-                        .any(|(_, (column, _, _))| *column < proposed_column))
-            {
-                normalize_declaration_block(&original, &mut updated, &block);
-                block.clear();
-                proposed_column = minimum_column;
-            }
-            block.push((line_index, separator));
-            separator_column = proposed_column;
-        }
-        normalize_declaration_block(&original, &mut updated, &block);
+        lines = updated;
     }
-    document.set_lines(updated);
+    document.set_lines(lines);
     Ok(())
 }
 

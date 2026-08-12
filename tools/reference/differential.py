@@ -64,6 +64,8 @@ def perturb_case(code: str) -> str:
     differences are dominated by whatever the declaration engine cannot see yet.
     Use `keywords` to isolate the per-line rules.
     """
+    # Every identifier, with no exceptions.  An exception list here is a list of
+    # names the sweep can no longer test, and it is invisible in the totals.
     return re.sub(r"\b[A-Za-z_][A-Za-z0-9_]*\b", lambda m: m.group(0).upper(), code)
 
 
@@ -76,6 +78,9 @@ def perturb_keywords(code: str) -> str:
     Declared names keep their spelling, so a difference here is a per-line
     lowering bug rather than a missing declaration extractor.
     """
+    # No `%` exclusion and no pre-normalization of member spelling.  Members
+    # whose names collide with keywords are exactly what this sweep exists to
+    # test, and excusing them turns a resolution failure into a silent 0.
     return re.sub(
         r"\b[A-Za-z_][A-Za-z0-9_]*\b",
         lambda m: m.group(0).upper() if m.group(0).lower() in VOCABULARY else m.group(0),
@@ -94,10 +99,13 @@ def perturb_operators(code: str) -> str:
 
 
 def perturb_compound(code: str) -> str:
+    # Join compound keywords, including the no-space shape that exercises both
+    # halves of the `elseif(` normalization rule.
     for separated, joined in (("end if", "endif"), ("end do", "enddo"),
-                              ("end select", "endselect"), ("go to", "goto")):
+                              ("end select", "endselect"), ("go to", "goto"),
+                              ("else where", "elsewhere")):
         code = re.sub(rf"\b{separated}\b", joined, code, flags=re.IGNORECASE)
-    return code
+    return re.sub(r"\belse\s*if\s*\(", "elseif(", code, flags=re.IGNORECASE)
 
 
 def perturb_exponent(code: str) -> str:
@@ -207,6 +215,13 @@ TEXT_PERTURBATIONS = {
 
 ALL_PERTURBATIONS = sorted({*PERTURBATIONS, *TEXT_PERTURBATIONS})
 
+# Opt-in only, so it never joins a default sweep and changes anyone's totals.
+# Without it nothing compares our *unperturbed* output against the oracle:
+# `check_camb_corpus.sh` compares against the input file rather than the oracle,
+# which is a fixed-point claim and not the same statement at all.
+PERTURBATIONS["none"] = lambda code: code
+SELECTABLE_PERTURBATIONS = sorted({*ALL_PERTURBATIONS, "none"})
+
 
 # --- protected-span aware application ---------------------------------------
 
@@ -255,7 +270,7 @@ def apply(text: str, name: str, stride: int) -> str:
     return "\n".join(out) + ("\n" if text.endswith("\n") else "")
 
 
-def reference_format(module, text: str) -> str:
+def reference_format(module, text: str, findent: str = "findent", converge: bool = False) -> str:
     """Run the reference the way its own CLI does.
 
     `format_text` takes the declaration case tables as *arguments*; calling it
@@ -266,18 +281,27 @@ def reference_format(module, text: str) -> str:
     """
     from pathlib import Path as _Path
 
-    cases = module.collect_declaration_cases({_Path("<stdin>"): text})[_Path("<stdin>")]
-    return module.format_text(
-        text,
-        module_cases=cases.module_cases,
-        symbol_cases=cases.symbol_cases,
-        procedure_cases=cases.procedure_cases,
-        scope_cases=cases.scope_cases,
-        type_procedure_cases=cases.type_procedure_cases,
-        type_component_cases=cases.type_component_cases,
-        variable_type_cases=cases.variable_type_cases,
-        type_component_type_cases=cases.type_component_type_cases,
-    )
+    current = text
+    for _ in range(10 if converge else 1):
+        cases = module.collect_declaration_cases({_Path("<stdin>"): current})[_Path("<stdin>")]
+        after = module.format_text(
+            current,
+            module_cases=cases.module_cases,
+            symbol_cases=cases.symbol_cases,
+            procedure_cases=cases.procedure_cases,
+            scope_cases=cases.scope_cases,
+            type_procedure_cases=cases.type_procedure_cases,
+            type_component_cases=cases.type_component_cases,
+            variable_type_cases=cases.variable_type_cases,
+            type_component_type_cases=cases.type_component_type_cases,
+        )
+        if not converge or after == current:
+            return after
+        # The reference composition is P(x) = R(x) followed by the Python
+        # formatter.  `text` has already gone through R once in main(), so
+        # feed the next iteration through findent before applying Python.
+        current = run([findent, *FINDENT_ARGS], after)
+    return current
 
 
 def run(command: list[str], text: str) -> str:
@@ -292,7 +316,11 @@ def main() -> int:
     parser.add_argument("files", nargs="*", type=Path)
     parser.add_argument("--binary", default=str(ROOT / "target/release/findent"))
     parser.add_argument("--findent", default="findent", help="findent 4.3.7 binary")
-    parser.add_argument("--perturbation", action="append", choices=ALL_PERTURBATIONS)
+    parser.add_argument("--converge", action="store_true", default=False,
+                        help="iterate the reference to its converged answer (diagnostic)")
+    parser.add_argument("--single-pass", action="store_false", dest="converge",
+                        help="compare against the reference's historical first pass (default)")
+    parser.add_argument("--perturbation", action="append", choices=SELECTABLE_PERTURBATIONS)
     parser.add_argument("--stride", type=int, default=1, help="perturb every Nth line")
     parser.add_argument("--show", type=int, default=3, help="differing lines to print per file")
     parser.add_argument("--list-perturbations", action="store_true")
@@ -313,12 +341,23 @@ def main() -> int:
             text = path.read_text(errors="surrogateescape")
             perturbed = apply(text, name, args.stride)
             try:
-                expected = reference_format(module, run([args.findent, *FINDENT_ARGS], perturbed))
+                expected = reference_format(
+                    module,
+                    run([args.findent, *FINDENT_ARGS], perturbed),
+                    args.findent,
+                    args.converge,
+                )
                 actual = run([args.binary, "--full", *FINDENT_ARGS], perturbed)
             except RuntimeError as error:
                 print(f"  ERROR {name} {path}: {error}", file=sys.stderr)
                 continue
             totals[name][0] += 1
+            # No per-sweep "comparison form" here.  Normalizing the output
+            # before comparing it makes a sweep structurally unable to report
+            # the very class of difference it exists to find: folding kind
+            # suffixes hid B12, and folding `%member` spelling hid the whole
+            # member-resolution category from the keyword sweep.  A known
+            # defect is reported, not normalized away.
             if expected == actual:
                 continue
             differing = [

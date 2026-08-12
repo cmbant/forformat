@@ -32,6 +32,21 @@ use std::collections::{HashMap, HashSet};
 pub struct FileFacts {
     /// Spellings this file declares, per name space.
     pub cases: CaseTables,
+    /// The reference's file-wide symbol declarations, excluding procedure
+    /// locals.  This is distinct from `cases.symbols`, which is also used by
+    /// the scope pass and therefore contains local declaration evidence.
+    pub file_symbols: CaseMap,
+    /// Generic bindings are tracked separately because the reference's
+    /// type-procedure case table contains explicit PROCEDURE bindings, not
+    /// GENERIC aliases.
+    pub generic_type_procedures: CaseMap,
+    /// Generic bindings keyed by owner type. These are project evidence for
+    /// uses in other files; the target file's own generic spelling is resolved
+    /// from its local declaration namespace.
+    pub generic_bound_type_procedures: super::names::ComponentCaseMap,
+    /// Derived-type definitions only (not TYPE(...) use sites). The reference
+    /// also exposes these through its ordinary symbol declaration table.
+    pub declared_types: CaseMap,
     /// Macro names defined by `#define` in this file.
     pub macros: CaseMap,
     /// The declared type of each name, used to resolve `a%b%c` chains.
@@ -161,6 +176,12 @@ impl DeclaredNameIndex {
 impl FileFacts {
     pub fn merge(&mut self, other: &FileFacts) {
         self.cases.merge(&other.cases);
+        self.file_symbols.merge(&other.file_symbols);
+        self.generic_type_procedures
+            .merge(&other.generic_type_procedures);
+        self.generic_bound_type_procedures
+            .merge(&other.generic_bound_type_procedures);
+        self.declared_types.merge(&other.declared_types);
         self.macros.merge(&other.macros);
         self.types.merge(&other.types);
     }
@@ -386,6 +407,21 @@ impl TypeMaps {
         }
         Some(current)
     }
+
+    /// Whether any procedure-local declaration in this file owns `root`.
+    /// This is used only to prevent a project-wide variable type from
+    /// replacing an unresolved target-local root when the active scope could
+    /// not be identified (for example after a recovered statement header).
+    pub fn has_procedure_local_root(&self, root: &[u8]) -> bool {
+        let root = root.to_ascii_lowercase();
+        self.procedure_local_types
+            .values()
+            .any(|types| types.contains_key(&root))
+            || self
+                .procedure_local_type_ambiguities
+                .values()
+                .any(|names| names.contains(&root))
+    }
 }
 
 fn insert_agreed_type(
@@ -468,7 +504,12 @@ fn merge_component_type_map(
 /// Extract every declaration fact from one analyzed file.
 pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
     let mut facts = FileFacts::default();
-    scope_names(scopes, &mut facts.cases);
+    scope_names(
+        scopes,
+        &mut facts.cases,
+        &mut facts.file_symbols,
+        &mut facts.declared_types,
+    );
     for (index, group) in analysis.groups.iter().enumerate() {
         let first = &analysis.buffer.lines[group.lines.start];
         if first.kind == PhysicalLineKind::Preprocessor {
@@ -489,9 +530,14 @@ pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
         });
         let procedure = scopes
             .program_unit_of_line(group.lines.start)
-            .filter(|scope| scope.kind == ScopeKind::Procedure)
+            .filter(|scope| is_procedure_scope(scope.kind))
             .and_then(|scope| scope.name.as_deref())
             .map(|name| name.to_ascii_lowercase());
+        let module_specification = scopes
+            .ancestors(scopes.index_of_line(group.lines.start))
+            .into_iter()
+            .find(|scope| scopes.scopes[*scope].kind == ScopeKind::Module)
+            .is_some_and(|scope| scopes.scopes[scope].is_specification(group.lines.start));
         // Interface bodies are procedure signatures, not module variables.
         // The reference nevertheless sends their headers and declarations
         // through extract_procedure_cases, so keep their dummies and RESULT
@@ -506,6 +552,7 @@ pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
                 &statement.text,
                 owner.as_deref(),
                 procedure.as_deref(),
+                module_specification,
                 &mut facts,
             );
             if let Some(alias) = select_type_alias(&statement.text) {
@@ -563,16 +610,26 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
         }
     }
 
-    // Only variables in a module specification part contribute to the
-    // file-declared set.  The derived-type and interface checks are separate
-    // because both can occur before the module's own CONTAINS.
+    // Variables in a module or program specification part contribute to the
+    // file-declared set. Program units need the same protection: a program
+    // local such as `ratio` must not be replaced by a project component with
+    // the same normalized name.
     for group in &analysis.groups {
         let line = group.lines.start;
-        let Some(module_index) = enclosing_scope_of_kind(scopes, line, ScopeKind::Module) else {
+        let Some(owner_index) = scopes
+            .ancestors(scopes.index_of_line(line))
+            .into_iter()
+            .find(|scope| {
+                matches!(
+                    scopes.scopes[*scope].kind,
+                    ScopeKind::Module | ScopeKind::Program
+                )
+            })
+        else {
             continue;
         };
-        let module = &scopes.scopes[module_index];
-        if !module.is_specification(line)
+        let owner = &scopes.scopes[owner_index];
+        if !owner.is_specification(line)
             || scopes.in_interface(line)
             || scopes
                 .ancestors(scopes.index_of_line(line))
@@ -583,7 +640,29 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
         }
         for statement in &group.statements {
             for name in declared_variable_names(&statement.text) {
-                file_by_scope[module_index].insert(&name);
+                file_by_scope[owner_index].insert(&name);
+            }
+        }
+    }
+
+    // Type-bound names are declarations too.  They must suppress keyword
+    // lowering on their declaration line, while remaining in their own
+    // type-procedure namespace for the case pass.
+    for group in &analysis.groups {
+        let line = group.lines.start;
+        let Some(owner_index) = scopes
+            .ancestors(scopes.index_of_line(line))
+            .into_iter()
+            .find(|scope| scopes.scopes[*scope].kind == ScopeKind::DerivedType)
+        else {
+            continue;
+        };
+        if scopes.in_interface(line) {
+            continue;
+        }
+        for statement in &group.statements {
+            for name in declared_binding_names(&statement.text) {
+                file_by_scope[owner_index].insert(&name);
             }
         }
     }
@@ -599,7 +678,7 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
     // that is what `active_procedure_at` does in the reference.
     let mut locals_by_scope = vec![CaseMap::default(); scopes.scopes.len()];
     for (index, scope) in scopes.scopes.iter().enumerate() {
-        if scope.kind != ScopeKind::Procedure {
+        if !is_procedure_scope(scope.kind) {
             continue;
         }
         let mut header_names = Vec::new();
@@ -643,7 +722,7 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
             ancestors
                 .iter()
                 .copied()
-                .find(|index| scopes.scopes[*index].kind == ScopeKind::Procedure)
+                .find(|index| is_procedure_scope(scopes.scopes[*index].kind))
         })
         .collect();
 
@@ -673,15 +752,12 @@ fn is_scoped_declared_owner(kind: ScopeKind) -> bool {
     )
 }
 
-fn scope_contains(scope: &super::scope::Scope, line: usize) -> bool {
-    scope.lines.start <= line && line < scope.lines.end
+fn is_procedure_scope(kind: ScopeKind) -> bool {
+    matches!(kind, ScopeKind::Program | ScopeKind::Procedure)
 }
 
-fn enclosing_scope_of_kind(scopes: &ScopeTree, line: usize, kind: ScopeKind) -> Option<usize> {
-    scopes
-        .ancestors(scopes.index_of_line(line))
-        .into_iter()
-        .find(|index| scopes.scopes[*index].kind == kind)
+fn scope_contains(scope: &super::scope::Scope, line: usize) -> bool {
+    scope.lines.start <= line && line < scope.lines.end
 }
 
 /// The subset of declaration extraction used by the reference's
@@ -714,10 +790,33 @@ fn declared_variable_names(text: &[u8]) -> Vec<Vec<u8>> {
     }
     if matches!(
         first.text.to_ascii_lowercase().as_slice(),
+        b"generic" | b"final"
+    ) {
+        return Vec::new();
+    }
+    declaration_entity_names(&tokens, separator + 1)
+}
+
+fn declared_binding_names(text: &[u8]) -> Vec<Vec<u8>> {
+    let tokens = tokenize(text, &mut LexState::default());
+    let Some(first) = tokens
+        .iter()
+        .position(|token| token.kind != TokenKind::Number)
+    else {
+        return Vec::new();
+    };
+    if !matches!(
+        tokens[first].text.to_ascii_lowercase().as_slice(),
         b"procedure" | b"generic" | b"final"
     ) {
         return Vec::new();
     }
+    let Some(separator) = tokens
+        .iter()
+        .position(|token| token.depth == 0 && token.text == b"::")
+    else {
+        return Vec::new();
+    };
     declaration_entity_names(&tokens, separator + 1)
 }
 
@@ -885,6 +984,7 @@ fn entity_declaration(
     text: &[u8],
     owner: Option<&[u8]>,
     procedure: Option<&[u8]>,
+    module_specification: bool,
     facts: &mut FileFacts,
 ) {
     let tokens = tokenize(text, &mut LexState::default());
@@ -912,7 +1012,14 @@ fn entity_declaration(
         .iter()
         .position(|t| t.depth == 0 && t.kind == TokenKind::Operator && t.text == b"::")
     else {
-        old_style_declaration(&tokens, first_index, owner, procedure, facts);
+        old_style_declaration(
+            &tokens,
+            first_index,
+            owner,
+            procedure,
+            module_specification,
+            facts,
+        );
         return;
     };
 
@@ -941,23 +1048,50 @@ fn entity_declaration(
                 expect_name = false;
                 if bound_procedure {
                     facts.cases.type_procedures.insert(token.text);
+                    if !first.is(b"generic") {
+                        if let Some(owner) = owner {
+                            facts.cases.bound_type_procedures.insert(owner, token.text);
+                        }
+                    }
+                    if first.is(b"generic") {
+                        facts.generic_type_procedures.insert(token.text);
+                        if let Some(owner) = owner {
+                            facts
+                                .generic_bound_type_procedures
+                                .insert(owner, token.text);
+                        }
+                    }
                     continue;
                 }
                 match (owner, &declared_type) {
                     (Some(owner), declared) => {
                         facts.cases.components.insert(owner, token.text);
+                        // The reference's module-variable summary also feeds
+                        // ordinary symbol cases with components declared in a
+                        // module specification part.  Keep that evidence in
+                        // the symbol table as well as the typed component
+                        // table; disagreement there must make a project-wide
+                        // spelling ambiguous rather than selecting a winner.
+                        facts.cases.symbols.insert(token.text);
+                        if module_specification {
+                            facts.file_symbols.insert(token.text);
+                        }
                         if let Some(declared) = declared {
                             facts.types.insert_component(owner, token.text, declared);
                         }
                     }
                     (None, declared) => {
                         facts.cases.symbols.insert(token.text);
+                        if module_specification && procedure.is_none() {
+                            facts.file_symbols.insert(token.text);
+                        }
                         if let Some(declared) = declared {
-                            facts.types.insert_variable(token.text, declared);
                             if let Some(procedure) = procedure {
                                 facts
                                     .types
                                     .insert_procedure_local(procedure, token.text, declared);
+                            } else {
+                                facts.types.insert_variable(token.text, declared);
                             }
                         }
                     }
@@ -975,6 +1109,7 @@ fn old_style_declaration(
     first_index: usize,
     owner: Option<&[u8]>,
     procedure: Option<&[u8]>,
+    module_specification: bool,
     facts: &mut FileFacts,
 ) {
     let first = &tokens[first_index];
@@ -1035,6 +1170,10 @@ fn old_style_declaration(
             expect_name = false;
             if let Some(owner) = owner {
                 facts.cases.components.insert(owner, token.text);
+                facts.cases.symbols.insert(token.text);
+                if module_specification {
+                    facts.file_symbols.insert(token.text);
+                }
                 if let Some(declared_type) = &declared_type {
                     facts
                         .types
@@ -1042,12 +1181,16 @@ fn old_style_declaration(
                 }
             } else {
                 facts.cases.symbols.insert(token.text);
+                if module_specification && procedure.is_none() {
+                    facts.file_symbols.insert(token.text);
+                }
                 if let Some(declared_type) = &declared_type {
-                    facts.types.insert_variable(token.text, declared_type);
                     if let Some(procedure) = procedure {
                         facts
                             .types
                             .insert_procedure_local(procedure, token.text, declared_type);
+                    } else {
+                        facts.types.insert_variable(token.text, declared_type);
                     }
                 }
             }
@@ -1127,15 +1270,32 @@ fn old_style_type_name<'a>(tokens: &'a [Token<'a>], first_index: usize) -> Optio
 
 /// Names that the scope structure itself carries: module, submodule, program,
 /// procedure and derived-type names, each in its own name space.
-fn scope_names(scopes: &ScopeTree, cases: &mut CaseTables) {
+fn scope_names(
+    scopes: &ScopeTree,
+    cases: &mut CaseTables,
+    file_symbols: &mut CaseMap,
+    declared_types: &mut CaseMap,
+) {
     for scope in &scopes.scopes {
         let Some(name) = scope.name.as_deref() else {
             continue;
         };
         match scope.kind {
             ScopeKind::Module | ScopeKind::Submodule => cases.modules.insert(name),
-            ScopeKind::Program | ScopeKind::Procedure => cases.symbols.insert(name),
-            ScopeKind::DerivedType => cases.types.insert(name),
+            ScopeKind::Program | ScopeKind::Procedure => {
+                cases.symbols.insert(name);
+                file_symbols.insert(name);
+            }
+            // The reference's declaration summary feeds derived-type names
+            // into its ordinary symbol table as well as the type-specific
+            // table. Type(...) use sites therefore obey the same
+            // current-file-over-project rule as other declared symbols.
+            ScopeKind::DerivedType => {
+                cases.types.insert(name);
+                cases.symbols.insert(name);
+                file_symbols.insert(name);
+                declared_types.insert(name);
+            }
             ScopeKind::File | ScopeKind::Interface => {}
         }
     }
@@ -1273,6 +1433,16 @@ fn selector_type(text: &[u8], types: &TypeMaps, procedure: Option<&[u8]>) -> Opt
         links.push(link.text);
         index += 2;
     }
+    // The reference does not infer a SELECT TYPE alias through an indexed
+    // component (`P%SourceWindows(i)%Window`).  Keeping that alias untyped is
+    // important: a later member such as `RedWin%RedShift` must retain its
+    // authored spelling when no exact owner is known.
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.kind == TokenKind::LParen)
+    {
+        return None;
+    }
     types.resolve_chain_with_locals(procedure, root.text, &links)
 }
 
@@ -1347,6 +1517,32 @@ mod tests {
             assert!(names.local_contains(0, name));
             assert!(names.local_contains(1, name));
         }
+    }
+
+    #[test]
+    fn program_units_use_the_procedure_local_case_scope() {
+        let names = scoped(
+            b"program tester\nimplicit none\ninteger L\nreal RATIO\nl = 2\nratio = 0.1\nend program tester\n",
+        );
+        assert_eq!(
+            names.local_at(4).and_then(|locals| locals.get(b"l")),
+            Some(b"L".as_slice())
+        );
+        assert_eq!(
+            names.local_at(5).and_then(|locals| locals.get(b"ratio")),
+            Some(b"RATIO".as_slice())
+        );
+    }
+
+    #[test]
+    fn procedure_pointer_declarations_are_procedure_locals() {
+        let names = scoped(
+            b"subroutine s(x)\nimplicit none\nprocedure(state_function) :: DTAUDA\nx = dtauda(1.0)\nend subroutine s\n",
+        );
+        assert_eq!(
+            names.local_at(3).and_then(|locals| locals.get(b"dtauda")),
+            Some(b"DTAUDA".as_slice())
+        );
     }
 
     #[test]

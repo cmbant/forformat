@@ -19,12 +19,22 @@ pub struct ProjectContext {
     /// Merged spellings.  A name spelled differently in two files is ambiguous
     /// project-wide and is left alone (I4).
     pub cases: CaseTables,
+    /// File-wide symbol declarations, excluding procedure locals.
+    pub file_symbols: CaseMap,
+    /// Generic aliases excluded from the reference type-procedure table.
+    pub generic_type_procedures: CaseMap,
+    /// Generic type-bound names keyed by their owner type.
+    pub generic_bound_type_procedures: super::names::ComponentCaseMap,
+    /// Derived-type definitions, kept separate from TYPE(...) use-site facts.
+    pub declared_types: CaseMap,
     /// Macro names from every `#define` in the project, plus any `-D` names.
     pub macros: CaseMap,
     /// Merged type maps for `%` chain resolution.
     pub types: super::declarations::TypeMaps,
     /// The files that contributed, in the order analyzed.
     pub sources: Vec<PathBuf>,
+    /// Restrict component ownership to declarations proven in the target file.
+    pub target_local_component_resolution: bool,
 }
 
 impl ProjectContext {
@@ -45,6 +55,12 @@ impl ProjectContext {
     /// parallel can merge the results deterministically by sorting first.
     pub fn absorb(&mut self, path: &Path, facts: &FileFacts) {
         self.cases.merge(&facts.cases);
+        self.file_symbols.merge(&facts.file_symbols);
+        self.generic_type_procedures
+            .merge(&facts.generic_type_procedures);
+        self.generic_bound_type_procedures
+            .merge(&facts.generic_bound_type_procedures);
+        self.declared_types.merge(&facts.declared_types);
         self.macros.merge(&facts.macros);
         self.types.merge(&facts.types);
         self.sources.push(path.to_path_buf());
@@ -56,6 +72,10 @@ impl ProjectContext {
         for define in defines {
             self.macros.insert(define.name.as_bytes());
         }
+    }
+
+    pub fn enable_target_local_component_resolution(&mut self) {
+        self.target_local_component_resolution = true;
     }
 
     /// Bind this context to one file's own declarations, producing the object
@@ -116,7 +136,10 @@ mod tests {
             resolver.spelling(NameSpace::Module, b"precision"),
             Some(b"Precision".as_slice())
         );
-        assert_eq!(project.sources.len(), 2);
+        assert_eq!(
+            project.sources,
+            vec![Path::new("precision.f90"), Path::new("user.f90")]
+        );
     }
 
     #[test]

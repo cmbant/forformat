@@ -1,7 +1,9 @@
 # Migrating from findent 4.3.7
 
-The Rust binary keeps the stdin/stdout workflow and free-form structural indentation. Use
-`findent -ifree < source.f90 > formatted.f90`; `-ifree`, `-ofree`, and `-osame` are accepted as
+The Rust binary keeps the stdin/stdout workflow and free-form structural indentation. The default
+is now `FormatMode::Full`: it retains findent-compatible indentation and adds lexical normalization
+and wrapping. Use `--indent-only` for the findent-compatible indentation contract, or spell
+`--full` explicitly when adopting the additions. `-ifree`, `-ofree`, and `-osame` remain accepted as
 free-form compatibility no-ops.
 
 | Legacy option family | Rust behavior |
@@ -17,7 +19,14 @@ free-form compatibility no-ops.
 | `-ifixed`, `-ofixed`, `-iauto`, `--continuation` | rejected with status 2 |
 | `--relabel`, `--deps`, editor wrappers, `--safe`, `--selfrep` | not implemented |
 
-Rust intentionally does not read `FINDENT_FLAGS` and rejects unknown options. By default it matches
-the legacy formatter's removal of trailing spaces/tabs while preserving other source spelling and
-non-trailing body bytes. Use `--ws_remred` or `--ws_remred=1` for broader redundant-whitespace reduction; `=0`
-disables it. The formatter does not accept filenames; pipe source through stdin and capture stdout.
+Rust intentionally does not read `FINDENT_FLAGS` and rejects unknown options. `--indent-only`
+matches the legacy formatter's removal of trailing spaces/tabs while preserving other source
+spelling and non-trailing body bytes. Full mode additionally normalizes keywords, separators,
+comments, array constructors, declaration-driven names and kind suffixes, and can wrap statements.
+Use `--ws_remred` or `--ws_remred=1` for broader redundant-whitespace reduction; `=0` disables it.
+The formatter does not accept filenames on stdin; pipe source through stdin and capture stdout.
+
+Full mode's intentional divergences are centralized in [docs/compatibility.md](compatibility.md):
+array constructors, conservative comment bodies, kind suffixes on continuation lines, the governing
+declaration rule versus the reference ambiguity veto, `!$` sentinel spacing, and preservation of a
+valid literal under `--ws_remred`.

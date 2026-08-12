@@ -6,6 +6,7 @@
 *.profraw
 *.mod
 /coverage/
+/fuzz/target/
 
 *.f90*
 # Checked-in Fortran snippets under tests are compatibility data, not build

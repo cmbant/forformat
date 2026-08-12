@@ -57,6 +57,12 @@ def main() -> int:
     parser.add_argument("--camb", type=Path, default=ROOT / "CAMB")
     parser.add_argument("--binary", default=str(ROOT / "target/release/findent"))
     parser.add_argument("--show", type=int, default=3)
+    parser.add_argument(
+        "--perturbation",
+        choices=D.ALL_PERTURBATIONS,
+        help="move the input off the fixed point first; without this the sweep only "
+        "exercises rules that CAMB already satisfies, which is most of them",
+    )
     args = parser.parse_args()
 
     files = corpus_files(args.camb)
@@ -73,8 +79,13 @@ def main() -> int:
         for path in files:
             # A lone file in a bare directory: same bytes, no project context.
             scratch = workspace / path.name
-            shutil.copyfile(path, scratch)
-            source = path.read_bytes()
+            if args.perturbation:
+                text = path.read_text(errors="surrogateescape")
+                source = D.apply(text, args.perturbation, 1).encode(errors="surrogateescape")
+                scratch.write_bytes(source)
+            else:
+                shutil.copyfile(path, scratch)
+                source = path.read_bytes()
 
             piped = subprocess.run(
                 [args.binary, *common], input=source, capture_output=True

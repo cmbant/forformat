@@ -102,7 +102,14 @@ pub fn format_to_owned<W: std::io::Write>(
 #[cfg(test)]
 mod tests {
     use super::{classify::classify, format_source, FormatConfig};
-    use crate::classify::StatementKind;
+    use crate::{classify::StatementKind, FormatMode};
+
+    fn indent_only_config() -> FormatConfig {
+        FormatConfig {
+            mode: FormatMode::IndentOnly,
+            ..FormatConfig::default()
+        }
+    }
 
     #[test]
     fn formats_nested_constructs() {
@@ -110,9 +117,7 @@ mod tests {
         let expected =
             b"program p\n   if (a) then\n      x=1\n   else\n      y=2\n   end if\nend program\n";
         assert_eq!(
-            format_source(input, &FormatConfig::default())
-                .unwrap()
-                .bytes,
+            format_source(input, &indent_only_config()).unwrap().bytes,
             expected
         );
     }
@@ -120,31 +125,29 @@ mod tests {
     #[test]
     fn preserves_non_utf8_and_newlines() {
         let input = b"program p\r\n! caf\xe9\r\nx=1";
-        let output = format_source(input, &FormatConfig::default())
-            .unwrap()
-            .bytes;
+        let output = format_source(input, &indent_only_config()).unwrap().bytes;
         assert_eq!(output, b"program p\r\n! caf\xe9\r\n   x=1\r\n");
     }
 
     #[test]
     fn missing_final_terminator_matches_previous_line() {
-        let lf = format_source(b"program p\nx=1", &FormatConfig::default())
+        let lf = format_source(b"program p\nx=1", &indent_only_config())
             .unwrap()
             .bytes;
         assert!(lf.ends_with(b"\n"));
         assert!(!lf.ends_with(b"\r\n"));
 
-        let crlf = format_source(b"program p\r\nx=1", &FormatConfig::default())
+        let crlf = format_source(b"program p\r\nx=1", &indent_only_config())
             .unwrap()
             .bytes;
         assert!(crlf.ends_with(b"\r\n"));
 
-        let mixed = format_source(b"program p\r\nx=1\ny=2", &FormatConfig::default())
+        let mixed = format_source(b"program p\r\nx=1\ny=2", &indent_only_config())
             .unwrap()
             .bytes;
         assert!(mixed.ends_with(b"\n"));
 
-        let mixed_crlf = format_source(b"program p\nx=1\r\ny=2", &FormatConfig::default())
+        let mixed_crlf = format_source(b"program p\nx=1\r\ny=2", &indent_only_config())
             .unwrap()
             .bytes;
         assert!(mixed_crlf.ends_with(b"\r\n"));
@@ -155,9 +158,7 @@ mod tests {
         let input = b"program p\ninteger :: if, do, type\ntype(C) :: pointer_value\nif = 1\ndo = 2\nif (if > 0) then\ndo = do + 1\nend if\nend program\n";
         let expected = b"program p\n   integer :: if, do, type\n   type(C) :: pointer_value\n   if = 1\n   do = 2\n   if (if > 0) then\n      do = do + 1\n   end if\nend program\n";
         assert_eq!(
-            format_source(input, &FormatConfig::default())
-                .unwrap()
-                .bytes,
+            format_source(input, &indent_only_config()).unwrap().bytes,
             expected
         );
     }
@@ -168,9 +169,7 @@ mod tests {
             b"program p\n10abc continue\nif (x) then\n10def continue\nend if\nend program\n";
         let expected = b"program p\n   10abc continue\n   if (x) then\n      10def continue\n   end if\nend program\n";
         assert_eq!(
-            format_source(input, &FormatConfig::default())
-                .unwrap()
-                .bytes,
+            format_source(input, &indent_only_config()).unwrap().bytes,
             expected
         );
     }
@@ -180,9 +179,7 @@ mod tests {
         let input = b"program p\nif(a)then;x=1;y=2;end if\nend program\n";
         let expected = b"program p\n   if(a)then;x=1;y=2;end if\nend program\n";
         assert_eq!(
-            format_source(input, &FormatConfig::default())
-                .unwrap()
-                .bytes,
+            format_source(input, &indent_only_config()).unwrap().bytes,
             expected
         );
     }
@@ -190,7 +187,7 @@ mod tests {
     #[test]
     fn malformed_bytes_are_total() {
         let input: Vec<u8> = (0..=255).chain(*b"\n)(\n").collect();
-        assert!(format_source(&input, &FormatConfig::default()).is_ok());
+        assert!(format_source(&input, &indent_only_config()).is_ok());
     }
 
     #[test]
@@ -202,9 +199,7 @@ mod tests {
         let expected =
             b"program p\n   loop1 : do , i=1,2\n      continue\n   enddo loop1\nend program\n";
         assert_eq!(
-            format_source(input, &FormatConfig::default())
-                .unwrap()
-                .bytes,
+            format_source(input, &indent_only_config()).unwrap().bytes,
             expected
         );
     }
@@ -214,18 +209,14 @@ mod tests {
         let input = b"program p\nif (x) then\nx=1\nendif\ny=2\nendprogram\n";
         let expected = b"program p\n   if (x) then\n      x=1\n   endif\n   y=2\nendprogram\n";
         assert_eq!(
-            format_source(input, &FormatConfig::default())
-                .unwrap()
-                .bytes,
+            format_source(input, &indent_only_config()).unwrap().bytes,
             expected
         );
 
         let input = b"program p\n!  findentfix: do\ny=2\nenddo\nend\n";
         let expected = b"program p\n!  findentfix: do\n      y=2\n   enddo\nend\n";
         assert_eq!(
-            format_source(input, &FormatConfig::default())
-                .unwrap()
-                .bytes,
+            format_source(input, &indent_only_config()).unwrap().bytes,
             expected
         );
     }
@@ -235,9 +226,7 @@ mod tests {
         let input = b"program p\n#if defined(X)\nif (a) then\n#else\nif (b) then\n#endif\nx=1\nend if\nend program\n";
         let expected = b"program p\n#if defined(X)\n   if (a) then\n#else\n   if (b) then\n#endif\n      x=1\n   end if\nend program\n";
         assert_eq!(
-            format_source(input, &FormatConfig::default())
-                .unwrap()
-                .bytes,
+            format_source(input, &indent_only_config()).unwrap().bytes,
             expected
         );
     }
@@ -246,12 +235,12 @@ mod tests {
     fn empty_queries_have_stable_results() {
         let indent = FormatConfig {
             last_indent: true,
-            ..FormatConfig::default()
+            ..indent_only_config()
         };
         assert_eq!(format_source(b"", &indent).unwrap().bytes, b"0\n");
         let usable = FormatConfig {
             last_usable: true,
-            ..FormatConfig::default()
+            ..indent_only_config()
         };
         assert_eq!(format_source(b"", &usable).unwrap().bytes, b"1\n");
     }
@@ -261,20 +250,20 @@ mod tests {
         let input = b"program p\nx=1\n";
         let indent = FormatConfig {
             last_indent: true,
-            ..FormatConfig::default()
+            ..indent_only_config()
         };
         assert_eq!(format_source(input, &indent).unwrap().bytes, b"3\n");
 
         let usable = FormatConfig {
             last_usable: true,
-            ..FormatConfig::default()
+            ..indent_only_config()
         };
         assert_eq!(format_source(input, &usable).unwrap().bytes, b"2\n");
 
         let both = FormatConfig {
             last_indent: true,
             last_usable: true,
-            ..FormatConfig::default()
+            ..indent_only_config()
         };
         assert_eq!(format_source(input, &both).unwrap().bytes, b"2\n");
     }
@@ -284,9 +273,7 @@ mod tests {
         let input = b"program p\n#if defined(X) \\\n  && defined(Y)\nif (x) then\n#else\nif (y) then\n#endif\nx=1\nend if\nend program\n";
         let expected = b"program p\n#if defined(X) \\\n  && defined(Y)\n   if (x) then\n#else\n   if (y) then\n#endif\n      x=1\n   end if\nend program\n";
         assert_eq!(
-            format_source(input, &FormatConfig::default())
-                .unwrap()
-                .bytes,
+            format_source(input, &indent_only_config()).unwrap().bytes,
             expected
         );
     }
@@ -296,9 +283,7 @@ mod tests {
         let input = b"program p\nif (x) then\n!$      call work()\nend if\nend program\n";
         let expected = b"program p\n   if (x) then\n!$    call work()\n   end if\nend program\n";
         assert_eq!(
-            format_source(input, &FormatConfig::default())
-                .unwrap()
-                .bytes,
+            format_source(input, &indent_only_config()).unwrap().bytes,
             expected
         );
     }
@@ -308,9 +293,7 @@ mod tests {
         let input = b"program p\n!$\n!$omp parallel\n!$\tcall x\nend program\n";
         let expected = b"program p\n!$ \n!$omp parallel\n!$ call x\nend program\n";
         assert_eq!(
-            format_source(input, &FormatConfig::default())
-                .unwrap()
-                .bytes,
+            format_source(input, &indent_only_config()).unwrap().bytes,
             expected
         );
     }
@@ -322,7 +305,7 @@ mod tests {
             b"program p\n   if (x) then\n      !$      call work()\n   end if\nend program\n";
         let config = FormatConfig {
             openmp: false,
-            ..FormatConfig::default()
+            ..indent_only_config()
         };
         assert_eq!(format_source(input, &config).unwrap().bytes, expected);
     }
@@ -332,9 +315,7 @@ mod tests {
         let input = b"program p\n! findentfix:p-on\n! findentfix:p-off\nx=1\nend program\n";
         let expected = b"program p\n! findentfix:p-on\n! findentfix:p-off\n   x=1\nend program\n";
         assert_eq!(
-            format_source(input, &FormatConfig::default())
-                .unwrap()
-                .bytes,
+            format_source(input, &indent_only_config()).unwrap().bytes,
             expected
         );
     }
@@ -345,9 +326,7 @@ mod tests {
         let expected =
             b"program p\n   do 100 i=1,10\n      do 100 j=1,10\n100 continue\nend program\n";
         assert_eq!(
-            format_source(input, &FormatConfig::default())
-                .unwrap()
-                .bytes,
+            format_source(input, &indent_only_config()).unwrap().bytes,
             expected
         );
     }
@@ -358,9 +337,7 @@ mod tests {
         let expected =
             b"program p\n   if (x) then\n      end do\n      y=1\n   end if\nend program\n";
         assert_eq!(
-            format_source(input, &FormatConfig::default())
-                .unwrap()
-                .bytes,
+            format_source(input, &indent_only_config()).unwrap().bytes,
             expected
         );
     }
@@ -371,9 +348,7 @@ mod tests {
         let expected =
             b"program p\n   if (x) then\n   end subroutine\n   continue\nend if\nend program\n";
         assert_eq!(
-            format_source(input, &FormatConfig::default())
-                .unwrap()
-                .bytes,
+            format_source(input, &indent_only_config()).unwrap().bytes,
             expected
         );
     }

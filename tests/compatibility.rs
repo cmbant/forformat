@@ -1,4 +1,4 @@
-use findent::{format_source, FormatConfig};
+use findent::{format_source, FormatConfig, FormatMode};
 
 #[test]
 fn core_fixture_is_idempotent() {
@@ -23,4 +23,69 @@ fn default_mode_preserves_source_body_bytes_except_trailing_space() {
         .any(|window| { window == b"! keep ! punctuation" }));
 
     assert!(!output.windows(3).any(|window| window == b"  \n"));
+}
+
+#[test]
+fn multiline_array_constructor_uses_valid_rust_delimiters() {
+    let source = include_bytes!("fixtures/array_constructor_multiline.f90");
+    let expected = include_bytes!("fixtures/array_constructor_multiline.out");
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        ..FormatConfig::default()
+    };
+    assert_eq!(format_source(source, &config).unwrap().bytes, expected);
+}
+
+#[test]
+fn full_mode_pins_the_reasonable_comment_boundary() {
+    let source = include_bytes!("fixtures/comment_behavior.f90");
+    let expected = include_bytes!("fixtures/comment_behavior.out");
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        ..FormatConfig::default()
+    };
+    assert_eq!(format_source(source, &config).unwrap().bytes, expected);
+}
+
+#[test]
+fn declared_case_applies_to_program_unit_locals() {
+    let source = b"PROGRAM TESTER\n\
+IMPLICIT NONE\n\
+INTEGER L\n\
+REAL RATIO\n\
+l = 2\n\
+ratio = 0.1\n\
+END PROGRAM TESTER\n";
+    let output = format_source(
+        source,
+        &FormatConfig {
+            mode: FormatMode::Full,
+            ..FormatConfig::default()
+        },
+    )
+    .unwrap()
+    .bytes;
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.lines().any(|line| line.trim() == "L = 2"));
+    assert!(output.lines().any(|line| line.trim() == "RATIO = 0.1"));
+}
+
+#[test]
+fn procedure_declarations_enter_the_local_case_table() {
+    let source = b"SUBROUTINE S(x)\n\
+IMPLICIT NONE\n\
+PROCEDURE(state_function) :: DTAUDA\n\
+x = dtauda(1.0)\n\
+END SUBROUTINE S\n";
+    let output = format_source(
+        source,
+        &FormatConfig {
+            mode: FormatMode::Full,
+            ..FormatConfig::default()
+        },
+    )
+    .unwrap()
+    .bytes;
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.lines().any(|line| line.trim() == "x = DTAUDA(1.0)"));
 }

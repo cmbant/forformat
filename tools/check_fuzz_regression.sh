@@ -13,3 +13,25 @@ cargo test --test properties source_and_logical_group_spans_stay_inside_the_inpu
 cargo test format::stack::tests -- --nocapture
 cargo test classify::recognizers::tests -- --nocapture
 cargo test tests::malformed_digit_prefixes_do_not_mutate_label_or_construct_state -- --exact
+
+# Keep the libFuzzer targets exercised in CI.  The corpus is deliberately
+# bounded: this is a smoke/property pass, while longer campaigns remain a
+# developer activity.  Every target gets real input from the fixture corpus;
+# the final two also see the historic CAMB shapes when that checkout exists.
+seed_corpus=$(mktemp -d)
+trap 'rm -rf "$seed_corpus"' EXIT
+cp tests/fixtures/*.f90 "$seed_corpus/"
+if test -d CAMB/fortran; then
+    find CAMB/fortran CAMB/forutils -type f -name '*.f90' -exec cp {} "$seed_corpus/" \;
+fi
+for target in regions declarations project wrapper properties; do
+    target_corpus="$seed_corpus"
+    if test "$target" = properties; then
+        # The property target is intentionally single-buffer: project-wide
+        # case convergence belongs to the project target and is not available
+        # through format_source(&[u8], ...).
+        target_corpus=tests/fixtures
+    fi
+    cargo run --manifest-path fuzz/Cargo.toml --bin "$target" -- \
+        -runs=64 -max_len=4096 "$target_corpus"
+done

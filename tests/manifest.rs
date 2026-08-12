@@ -14,9 +14,8 @@ struct Case {
     stderr: String,
     status: i32,
     args: String,
-    /// Formatting mode this case pins.  Defaults to `indent-only`, so every
-    /// checked-in case stays byte-exact against findent 4.3.7 forever (I6)
-    /// even after full mode becomes the CLI default.
+    /// Formatting mode this case pins. A checked-in case remains explicit so
+    /// its expected bytes do not depend on the CLI default.
     mode: String,
 }
 

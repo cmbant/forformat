@@ -162,6 +162,25 @@ impl ComponentCaseMap {
         self.entries.keys().any(|(_, component)| component == &key)
     }
 
+    /// Return a spelling that is unambiguous even without an owner type.
+    pub fn unique_spelling(&self, name: &[u8]) -> Option<&[u8]> {
+        let key = name.to_ascii_lowercase();
+        let mut spelling = None;
+        for ((_, component), entry) in &self.entries {
+            if component != &key {
+                continue;
+            }
+            let Entry::Unique(candidate) = entry else {
+                return None;
+            };
+            if spelling.is_some_and(|existing: &[u8]| existing != candidate.as_slice()) {
+                return None;
+            }
+            spelling = Some(candidate.as_slice());
+        }
+        spelling
+    }
+
     pub fn merge(&mut self, other: &ComponentCaseMap) {
         for (key, entry) in &other.entries {
             match (self.entries.get(key), entry) {
@@ -200,6 +219,10 @@ pub struct CaseTables {
     pub components: ComponentCaseMap,
     /// Type-bound procedure names.
     pub type_procedures: CaseMap,
+    /// Type-bound procedure bindings keyed by their owning derived type.
+    /// Unlike the project-wide summary, this preserves the governing
+    /// declaration when unrelated types use different spellings.
+    pub bound_type_procedures: ComponentCaseMap,
 }
 
 impl CaseTables {
@@ -209,6 +232,8 @@ impl CaseTables {
         self.types.merge(&other.types);
         self.components.merge(&other.components);
         self.type_procedures.merge(&other.type_procedures);
+        self.bound_type_procedures
+            .merge(&other.bound_type_procedures);
     }
 }
 
@@ -285,6 +310,20 @@ impl<'a> CaseResolver<'a> {
             return self.local.components.get(type_name, name);
         }
         self.project.components.get(type_name, name)
+    }
+
+    /// Resolve a type-bound procedure through its governing type.
+    pub fn type_procedure_spelling(&self, type_name: &[u8], name: &[u8]) -> Option<&'a [u8]> {
+        if let Some(spelling) = self.macros.get(name) {
+            return Some(spelling);
+        }
+        if self.macros.is_ambiguous(name) {
+            return None;
+        }
+        if self.local.bound_type_procedures.contains(type_name, name) {
+            return self.local.bound_type_procedures.get(type_name, name);
+        }
+        self.project.bound_type_procedures.get(type_name, name)
     }
 
     /// The spelling for an ordinary identifier occurrence: a declared name if

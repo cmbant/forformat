@@ -160,7 +160,12 @@ fn reflow_with_context_inner(
                     }
                 }
             } else {
-                copy_group(document, group, &mut lines);
+                lines.push(document.lines[group.lines.start].clone());
+            }
+            if group.lines.len() > 1 {
+                for index in group.lines.clone().skip(1) {
+                    lines.push(document.lines[index].clone());
+                }
             }
             continue;
         }
@@ -192,11 +197,19 @@ fn reflow_with_context_inner(
         }
         let mut body = trim(&group.statements[0].text).to_vec();
         if group.lines.len() > 1 {
+            let original_body = body.clone();
             body = crate::transform::passes::line_rules::respace_joined(
                 &body,
                 &context,
                 &declared_names,
                 index,
+            );
+            body = crate::transform::passes::case_pass::restore_declined_component_spellings(
+                &original_body,
+                &body,
+                index,
+                &declared_names,
+                &context,
             );
             body = trim(&body).to_vec();
         }
@@ -208,11 +221,10 @@ fn reflow_with_context_inner(
                 0
             }),
         };
-        let comment_indent = if group.lines.len() == 1 {
-            layout.first_indent
-        } else {
-            layout.continuation
-        };
+        // A detached trailing comment belongs to the statement as a whole,
+        // not to its last continuation line.  Keeping it at the statement
+        // indent also makes a wrapped statement stable on the next pass.
+        let comment_indent = layout.first_indent;
         let detached = detach_final_inline_comment(document, group, comment_indent);
         if first_indent + body.len() <= config.wrap.line_length {
             match detached {
@@ -331,13 +343,31 @@ fn leading_horizontal_width(line: &[u8]) -> usize {
 }
 
 fn join_openmp_directive(document: &Document, group: &LogicalGroup) -> Option<Vec<u8>> {
+    // A continued OpenMP directive is already a sequence of physical
+    // directives.  Joining it here would erase the repeated sentinel and one
+    // physical line when the wrapper decides the joined text fits.  Wrapping
+    // remains available for a single overlong directive, even when the
+    // classifier grouped the following statement with the directive comment.
+    let mut indices: Vec<usize> = group.lines.clone().collect();
+    if indices.len() > 1 {
+        if !is_openmp_line(&document.lines[indices[0]])
+            || is_openmp_line(&document.lines[indices[1]])
+        {
+            return None;
+        }
+        indices.truncate(1);
+    }
     let mut parts = Vec::new();
     let mut omp_style = false;
-    for (position, index) in group.lines.clone().enumerate() {
+    let mut indent = Vec::new();
+    for (position, index) in indices.into_iter().enumerate() {
         let line = &document.lines[index];
         let start = line.iter().position(|byte| !byte.is_ascii_whitespace())?;
         if !line[start..].starts_with(b"!$") {
             return None;
+        }
+        if position == 0 {
+            indent.extend_from_slice(&line[..start]);
         }
         let mut body = line[start + 2..].trim_ascii_start();
         if body.len() >= 3 && body[..3].eq_ignore_ascii_case(b"omp") {
@@ -362,11 +392,8 @@ fn join_openmp_directive(document: &Document, group: &LogicalGroup) -> Option<Ve
         }
         parts.push(body);
     }
-    let mut joined = if omp_style {
-        b"!$OMP ".to_vec()
-    } else {
-        b"!$ ".to_vec()
-    };
+    let mut joined = indent;
+    joined.extend_from_slice(if omp_style { b"!$OMP " } else { b"!$ " });
     for (index, part) in parts.into_iter().enumerate() {
         if index > 0 {
             joined.push(b' ');
@@ -376,14 +403,28 @@ fn join_openmp_directive(document: &Document, group: &LogicalGroup) -> Option<Ve
     Some(joined)
 }
 
+fn is_openmp_line(line: &[u8]) -> bool {
+    let start = line.iter().position(|byte| !byte.is_ascii_whitespace());
+    start.is_some_and(|start| {
+        line[start..]
+            .get(..5)
+            .is_some_and(|prefix| prefix[..2] == *b"!$" && prefix[2..].eq_ignore_ascii_case(b"omp"))
+    })
+}
+
 fn wrap_openmp_directive(line: &[u8], line_length: usize) -> Result<Vec<Vec<u8>>, Decline> {
-    let prefix: &[u8] = if line
-        .get(2..5)
+    let indent_end = line
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(0);
+    let indent = &line[..indent_end];
+    let prefix: Vec<u8> = if line
+        .get(indent_end + 2..indent_end + 5)
         .is_some_and(|bytes| bytes.eq_ignore_ascii_case(b"omp"))
     {
-        b"!$OMP "
+        [indent, b"!$OMP "].concat()
     } else {
-        b"!$ "
+        [indent, b"!$ "].concat()
     };
     if line.len() <= line_length {
         return Ok(vec![line.to_vec()]);
@@ -396,13 +437,13 @@ fn wrap_openmp_directive(line: &[u8], line_length: usize) -> Result<Vec<Vec<u8>>
     while prefix.len() + body.len() > line_length {
         let limit = line_length.saturating_sub(prefix.len() + 2);
         let position = wrapping::wrap_position(&body, limit).ok_or(Decline::NoSafeBreak)?;
-        let mut physical = prefix.to_vec();
+        let mut physical = prefix.clone();
         physical.extend_from_slice(trim(&body[..position]));
         physical.extend_from_slice(b" &");
         result.push(physical);
         body = trim(&body[position..]).to_vec();
     }
-    let mut last = prefix.to_vec();
+    let mut last = prefix;
     last.extend_from_slice(&body);
     result.push(last);
     Ok(result)
@@ -466,12 +507,13 @@ fn trim(line: &[u8]) -> &[u8] {
 mod tests {
     use super::format_with_context;
     use crate::{
-        analysis::ProjectContext,
+        analysis::{analyze_project, ProjectContext},
         config::{FormatConfig, FormatMode},
         format_source,
         source::LogicalGroup,
         transform::document::Document,
     };
+    use std::path::Path;
 
     fn full(config_setup: impl FnOnce(&mut FormatConfig), source: &[u8]) -> Vec<u8> {
         let mut config = FormatConfig {
@@ -502,6 +544,38 @@ mod tests {
             },
             source,
         )
+    }
+
+    #[test]
+    fn conditional_sentinel_body_keeps_authored_case_with_or_without_project_tables() {
+        let source = b"module t\ninteger :: MyVar\ncontains\nsubroutine s()\n!$ myvar = 1\nmyvar = 2\nend subroutine s\nend module t\n";
+        let config = FormatConfig {
+            mode: FormatMode::Full,
+            ..FormatConfig::default()
+        };
+        let expected = b"module t\n   integer :: MyVar\n\ncontains\n\n   subroutine s\n!$    myvar = 1\n      MyVar = 2\n\n   end subroutine s\n\nend module t\n";
+        let empty = format_with_context(source, &ProjectContext::empty(), &config)
+            .unwrap()
+            .bytes;
+        let project = analyze_project([(Path::new("sentinel.f90"), source.as_slice())]).unwrap();
+        let single_file = format_with_context(source, &project, &config)
+            .unwrap()
+            .bytes;
+        assert_eq!(empty, expected);
+        assert_eq!(single_file, expected);
+    }
+
+    #[test]
+    fn reflow_reuses_component_case_from_the_unjoined_statement() {
+        let source = b"module m\ntype :: T\ninteger :: FIRST\ninteger :: SECOND\nend type T\ncontains\nsubroutine s(this)\ntype(T) :: this\nthis%first = this%second + 12345678901234567890 + 12345678901234567890 + 12345678901234567890\nend subroutine s\nend module m\n";
+        let one_line = full(|config| config.wrap.line_length = 120, source);
+        let continued = full(|config| config.wrap.line_length = 70, source);
+        let one_line_text = String::from_utf8(one_line).unwrap();
+        let continued_text = String::from_utf8(continued).unwrap();
+
+        assert!(one_line_text.contains("this%FIRST = this%SECOND"));
+        assert!(continued_text.contains("this%FIRST = this%SECOND"));
+        assert!(continued_text.contains("&\n"));
     }
 
     #[test]
@@ -539,7 +613,7 @@ end module m
         let twice = profile_full(&once);
         assert_eq!(once, twice);
         let output = String::from_utf8_lossy(&once);
-        assert!(output.contains("        ! this trailing comment"));
+        assert!(output.contains("    ! this trailing comment"));
         assert!(output.contains("    call f(a, a)\n"));
         assert!(!output.contains("call f(a, &\n"));
     }

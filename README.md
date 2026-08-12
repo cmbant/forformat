@@ -1,12 +1,21 @@
 # Findent Rust Formatter
 
 This repository contains a standalone, free-form-only Rust implementation of the Findent
-formatter. It reads bytes from stdin and writes formatted bytes to stdout, preserving source
-spelling while adjusting indentation and removing trailing spaces/tabs:
+formatter. It reads bytes from stdin and writes formatted bytes to stdout. The default is full
+formatting: it applies findent-compatible indentation plus the documented lexical normalization
+and wrapping passes.
 
 ```sh
-cargo run --release -- -ifree < source.f90 > source.f90.indented
+cargo run --release -- -ifree < source.f90 > source.f90.formatted
 ```
+
+Use `--indent-only` when adopting only findent-compatible indentation and trailing-horizontal-space
+handling. Use `--full` explicitly in scripts that want to state the full-format policy; it is the
+default. Full mode intentionally differs from the frozen reference for multiline array
+constructors, conservative comment bodies, kind suffixes on continuation lines, governing
+declarations, `!$` sentinel spacing, and `--ws_remred` inside valid literals. The complete rationale
+and examples are in [docs/compatibility.md](docs/compatibility.md); migration guidance is in
+[docs/migration.md](docs/migration.md).
 
 With the reference installation available, `tools/differential_free.sh target/release/findent`
 checks the retained legacy fixtures against findent 4.3.7 byte-for-byte.

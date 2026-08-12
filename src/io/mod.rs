@@ -218,7 +218,14 @@ fn project_context(
             .map(|source| (source.path.as_path(), source.bytes.as_slice())),
     )?;
     context.define(&config.defines);
+    context.enable_target_local_component_resolution();
     Ok(context)
+}
+
+fn isolated_context(config: &crate::config::FormatConfig) -> ProjectContext {
+    let mut context = ProjectContext::empty();
+    context.define(&config.defines);
+    context
 }
 
 fn format_one(
@@ -389,7 +396,10 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         )
     };
     let project_paths = if invocation.isolated {
-        target_paths.clone()
+        // Isolated means no project tables at all. The target is still read
+        // and formatted, but its declarations remain local to the formatter,
+        // exactly as they are for stdin.
+        Vec::new()
     } else if let Some(tracked) = tracked.as_ref() {
         deduplicate(
             tracked
@@ -446,12 +456,15 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         .iter()
         .map(|path| source_for(path).expect("project source was loaded"))
         .collect();
-    let context = project_context(&project_sources, &invocation.config)?;
+    let context = if invocation.isolated {
+        isolated_context(&invocation.config)
+    } else {
+        project_context(&project_sources, &invocation.config)?
+    };
     if profile {
         eprintln!(
-            "findent profile: project-analysis={:?} analyzed={}",
+            "findent profile: project-analysis={:?}",
             profile_start.elapsed(),
-            context.sources.len()
         );
     }
 

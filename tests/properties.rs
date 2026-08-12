@@ -4,6 +4,13 @@ use findent::{
     FormatConfig, FormatMode,
 };
 
+fn indent_only_config() -> FormatConfig {
+    FormatConfig {
+        mode: FormatMode::IndentOnly,
+        ..FormatConfig::default()
+    }
+}
+
 #[test]
 fn default_formatting_is_idempotent_on_malformed_and_lexical_corpus() {
     let corpus: &[&[u8]] = &[
@@ -15,12 +22,12 @@ fn default_formatting_is_idempotent_on_malformed_and_lexical_corpus() {
         &[0, 1, 2, b'\n', 0xff, b'!', b'\n', b')', b'('],
     ];
     for source in corpus {
-        let once = format_source(source, &FormatConfig::default())
-            .unwrap()
-            .bytes;
-        let twice = format_source(&once, &FormatConfig::default())
-            .unwrap()
-            .bytes;
+        let config = FormatConfig {
+            mode: FormatMode::IndentOnly,
+            ..FormatConfig::default()
+        };
+        let once = format_source(source, &config).unwrap().bytes;
+        let twice = format_source(&once, &config).unwrap().bytes;
         assert_eq!(once, twice, "source was not idempotent: {source:?}");
     }
 }
@@ -58,20 +65,70 @@ fn full_mode_chunk_a_preserves_protected_bytes_and_is_idempotent() {
 }
 
 #[test]
+fn full_mode_fixed_point_and_indent_only_fixed_point_hold_together() {
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        ..FormatConfig::default()
+    };
+    for source in [
+        include_bytes!("fixtures/core.f90").as_slice(),
+        include_bytes!("fixtures/cpp_continuation.f90").as_slice(),
+        include_bytes!("fixtures/array_constructor_multiline.f90").as_slice(),
+        b"program p\nif (x) then\ncall f(a, b, c, d, e, f, g, h)\nend if\nend program p\n"
+            .as_slice(),
+    ] {
+        let once = format_source(source, &config).unwrap().bytes;
+        let twice = format_source(&once, &config).unwrap().bytes;
+        assert_eq!(once, twice, "full mode I1 failed for {source:?}");
+
+        let indent = FormatConfig {
+            mode: FormatMode::IndentOnly,
+            ..FormatConfig::default()
+        };
+        assert_eq!(format_source(&once, &indent).unwrap().bytes, once, "I2");
+    }
+}
+
+#[test]
+fn full_mode_protected_spans_are_byte_exact() {
+    let source = b"program p\ncharacter(len=20) :: s = 'IF  THEN  ' ! body  x = 1\nx = 4Hab  c\n#if defined(X)\nIF (X) THEN\n#endif\nend program p\n";
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        ..FormatConfig::default()
+    };
+    let once = format_source(source, &config).unwrap().bytes;
+    let collect = |bytes: &[u8]| {
+        let mut strings = Vec::new();
+        let mut hollerith = Vec::new();
+        let mut cpp = Vec::new();
+        for line in bytes.split(|byte| *byte == b'\n') {
+            if line.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'#') {
+                cpp.push(line.to_vec());
+            }
+            for region in regions(line) {
+                match region.kind {
+                    RegionKind::StringLiteral => strings.push(line[region.range].to_vec()),
+                    RegionKind::Hollerith => hollerith.push(line[region.range].to_vec()),
+                    _ => {}
+                }
+            }
+        }
+        (strings, hollerith, cpp)
+    };
+    assert_eq!(collect(source), collect(&once));
+}
+
+#[test]
 fn default_formatting_preserves_line_bodies_except_trailing_horizontal_space() {
     let source = b"program p  \r\n  x = \"a  b\"  \n! comment  \r\nend program";
-    let output = format_source(source, &FormatConfig::default())
-        .unwrap()
-        .bytes;
+    let output = format_source(source, &indent_only_config()).unwrap().bytes;
     assert_eq!(trimmed_line_bodies(source), line_bodies(&output));
 }
 
 #[test]
 fn default_formatting_allows_only_label_padding_to_change() {
     let source = b"  program p\n10      continue ! keep  \n  end program p\n";
-    let output = format_source(source, &FormatConfig::default())
-        .unwrap()
-        .bytes;
+    let output = format_source(source, &indent_only_config()).unwrap().bytes;
     assert_eq!(
         normalized_line_bodies(source),
         normalized_line_bodies(&output)
@@ -83,6 +140,7 @@ fn whitespace_reduction_bypasses_hollerith_payloads() {
     let source = b"program p\nx = 4Ha  b ! comment\nend program p\n";
     let config = FormatConfig {
         ws_remred: true,
+        mode: FormatMode::IndentOnly,
         ..FormatConfig::default()
     };
     let output = format_source(source, &config).unwrap().bytes;
@@ -111,15 +169,47 @@ fn streaming_api_matches_owned_api() {
 }
 
 #[test]
+fn full_streaming_api_matches_owned_api() {
+    let source = b"PROGRAM p\nIF (x) THEN\nCALL f(a, b, c, d)\nEND IF\nEND PROGRAM p\n";
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        ..FormatConfig::default()
+    };
+    let owned = format_source(source, &config).unwrap();
+    let mut output = Vec::new();
+    let meta = format_to(source, &config, &mut output).unwrap();
+    assert_eq!(output, owned.bytes);
+    assert_eq!(meta, owned.meta);
+
+    let mut owned_output = Vec::new();
+    let owned_meta = format_to_owned(source.to_vec(), &config, &mut owned_output).unwrap();
+    assert_eq!(owned_output, owned.bytes);
+    assert_eq!(owned_meta, owned.meta);
+}
+
+#[test]
 fn unknown_statements_do_not_invent_structural_depth() {
     let source = b"program p\nif (x) then\neditor ???\ncontinue\nend if\nend program\n";
-    let output = format_source(source, &FormatConfig::default())
-        .unwrap()
-        .bytes;
+    let output = format_source(source, &indent_only_config()).unwrap().bytes;
     assert_eq!(
         output,
         b"program p\n   if (x) then\n      editor ???\n      continue\n   end if\nend program\n"
     );
+}
+
+#[test]
+fn full_mode_unknown_statements_still_have_stable_structure() {
+    let source = b"PROGRAM p\nIF (x) THEN\neditor ???\nCONTINUE\nEND IF\nEND PROGRAM p\n";
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        ..FormatConfig::default()
+    };
+    let once = format_source(source, &config).unwrap().bytes;
+    let twice = format_source(&once, &config).unwrap().bytes;
+    assert_eq!(once, twice);
+    assert!(once
+        .windows(b"editor ???".len())
+        .any(|w| w == b"editor ???"));
 }
 
 #[test]
@@ -179,7 +269,7 @@ fn arbitrary_non_ascii_bytes_in_comments_and_strings_are_transparent() {
         source.extend_from_slice(b"\nx = \"");
         source.push(value);
         source.extend_from_slice(b"\"  \nend program\n");
-        let output = format_source(&source, &FormatConfig::default())
+        let output = format_source(&source, &indent_only_config())
             .expect("non-UTF-8 source remains formatable")
             .bytes;
         assert_eq!(
@@ -270,8 +360,8 @@ fn fixture_prefixes_are_total_and_idempotent() {
                 assert!(group.lines.start <= group.lines.end);
                 assert!(group.lines.end <= buffer.lines.len());
             }
-            let once = format_source(prefix, &FormatConfig::default()).expect("formatter is total");
-            let twice = format_source(&once.bytes, &FormatConfig::default())
+            let once = format_source(prefix, &indent_only_config()).expect("formatter is total");
+            let twice = format_source(&once.bytes, &indent_only_config())
                 .expect("formatted prefix remains total");
             assert_eq!(
                 once.bytes, twice.bytes,

@@ -44,3 +44,38 @@ path = "fuzz_targets/format.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "regions"
+path = "fuzz_targets/regions.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "declarations"
+path = "fuzz_targets/declarations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "project"
+path = "fuzz_targets/project.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wrapper"
+path = "fuzz_targets/wrapper.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "properties"
+path = "fuzz_targets/properties.rs"
+test = false
+doc = false
+bench = false

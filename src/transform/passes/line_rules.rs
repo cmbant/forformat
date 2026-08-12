@@ -195,6 +195,7 @@ fn apply_with_options(
         options.continued_infix,
         options.continued_declaration,
         options.continued_named_parameter,
+        false,
     );
     text = normalize_keyword_spacing_with_state(&text, declared_names, line_index, incoming);
     text = normalize_write_output_spacing_with_state(&text, cx, incoming);
@@ -229,6 +230,7 @@ pub fn respace_joined(
         false,
         false,
         false,
+        cx.project.target_local_component_resolution,
     );
     text = normalize_keyword_spacing_with_state(
         &text,
@@ -308,6 +310,7 @@ pub fn lowercase_line(
         false,
         false,
         false,
+        false,
     )
 }
 
@@ -322,6 +325,7 @@ fn lowercase_line_with_context(
     continued_infix: bool,
     continued_declaration: bool,
     continued_named_parameter: bool,
+    preserve_identifier_case: bool,
 ) -> Vec<u8> {
     let tokens = tokenize(line, state);
     let mut edits = EditBuffer::new(line);
@@ -372,6 +376,9 @@ fn lowercase_line_with_context(
                 }
             }
             TokenKind::Name => {
+                if preserve_identifier_case && index > 0 && tokens[index - 1].text == b"%" {
+                    continue;
+                }
                 // `a%Data` names a component, not the DATA statement.
                 if index > 0 && tokens[index - 1].text == b"%" {
                     continue;
@@ -560,6 +567,18 @@ fn normalize_keyword_spacing_with_state(
             let assignment = next.is_some_and(|token| token.text == b"=");
             if !assignment && !declared_names.suppresses_keyword(line_index, first.text, false) {
                 edits.replace(first.span.clone(), replacement.as_bytes());
+                // The compound replacement itself changes `elseif(` into
+                // `else if(`. The token-local `name(` rule inspected the
+                // original `elseif(` token, so it never saw the new `if`.
+                if first.is_name(b"elseif") {
+                    if let Some(paren) = tokens.get(first_statement_index(&tokens) + 1) {
+                        if paren.kind == TokenKind::LParen
+                            && !horizontal_gap(line, first.span.end, paren.span.start)
+                        {
+                            edits.insert(paren.span.start, b" ");
+                        }
+                    }
+                }
             }
         }
     }
@@ -678,7 +697,10 @@ fn normalize_keyword_spacing_with_state(
                     && paren.kind == TokenKind::LParen
                     && horizontal_gap(line, rank_or_team.span.end, paren.span.start)
                 {
-                    edits.replace(rank_or_team.span.end..paren.span.start, b" (");
+                    // The replacement range is the gap before the existing
+                    // parenthesis; inserting another `(` here made full mode
+                    // grow `change team (x)` on every pass.
+                    edits.replace(rank_or_team.span.end..paren.span.start, b" ");
                 }
             }
         }
@@ -744,7 +766,18 @@ fn normalize_keyword_spacing_with_state(
         }
     }
 
-    edits.finish()
+    let mut output = edits.finish();
+    let start = output
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(output.len());
+    if output
+        .get(start..)
+        .is_some_and(|tail| tail.starts_with(b"else if("))
+    {
+        output.insert(start + b"else if".len(), b' ');
+    }
+    output
 }
 
 fn trailing_ampersand(line: &[u8]) -> bool {

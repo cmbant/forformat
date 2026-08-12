@@ -18,9 +18,12 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
           components: rustfmt, clippy
+      - run: python3 tools/gen_vocab.py --check
+      - run: python3 tools/gen_traceability.py --check
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --all-targets
+      - run: ./tools/check_fixture_syntax.sh target/debug/findent
       - run: ./tools/check_fuzz_regression.sh
       - run: ./tools/check_cli_contract.sh target/debug/findent
 
