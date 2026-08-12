@@ -520,8 +520,8 @@ Free-form Fortran formatter.\n\
   --check                             exit 1 if selected files would change\n\
   --diff                              print unified diffs and exit 1 if changed\n\
   Query modes cannot be combined with path-update, --check, or --diff.\n\
-  --indent-only                      findent-compatible indentation only (default)\n\
-  --full                             full formatting: normalization and wrapping\n\
+  --indent-only                      findent-compatible indentation only\n\
+  --full                             full formatting: normalization and wrapping (default)\n\
   --normalize-only                   normalization without structural layout\n\
   --wrap[=<0|1>], --no-wrap          reflow over-long statements (full mode)\n\
   --line-length=<n>                  wrapping budget (default 120)\n\
@@ -744,7 +744,7 @@ mod tests {
     #[test]
     fn mode_and_full_format_options_parse_and_do_not_collide_with_construct_names() {
         use crate::config::FormatMode;
-        assert_eq!(run(&[]).mode, FormatMode::IndentOnly);
+        assert_eq!(run(&[]).mode, FormatMode::Full);
         assert_eq!(run(&["--full"]).mode, FormatMode::Full);
         assert_eq!(run(&["--normalize-only"]).mode, FormatMode::NormalizeOnly);
         // `--indent-only` must not be read as `--indent-<construct>`.

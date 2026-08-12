@@ -115,9 +115,7 @@ pub struct ConstructIndents {
 impl Default for FormatConfig {
     fn default() -> Self {
         Self {
-            // The port keeps findent's contract as the effective default; the
-            // flip to `Full` is one reviewable commit at cutover (Phase 12).
-            mode: FormatMode::IndentOnly,
+            mode: FormatMode::Full,
             wrap: WrapConfig::default(),
             defines: Vec::new(),
             uppercase_single_l: false,
