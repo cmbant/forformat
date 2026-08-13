@@ -522,12 +522,12 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_extension;
-    use std::path::Path;
     #[cfg(unix)]
     use super::atomic_replace;
+    use super::validate_extension;
     #[cfg(unix)]
     use std::fs;
+    use std::path::Path;
 
     #[test]
     fn section_9_1_valid_extension_is_pure_and_accepts_missing_path() {
