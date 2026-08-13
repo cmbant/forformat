@@ -1796,6 +1796,22 @@ def member_owner_type(
     return owner_type
 
 
+def conditional_sentinel_body_start(line: str) -> int | None:
+    """Return the body offset for a non-OpenMP ``!$`` sentinel line."""
+    stripped = line.lstrip(" \t")
+    if not stripped.startswith("!$"):
+        return None
+    body_start = len(line) - len(stripped) + 2
+    if line[body_start : body_start + 1] not in ("", " ", "\t", "\r", "\n"):
+        return None
+    body = line[body_start:].lstrip(" \t")
+    if body[:3].lower() == "omp" and (
+        len(body) == 3 or not _is_identifier_char(body[3])
+    ):
+        return None
+    return body_start
+
+
 def replace_declared_cases(
     source: str,
     module_cases: Mapping[str, str],
@@ -1842,12 +1858,15 @@ def replace_declared_cases(
             prefix = ""
             continue
 
+        sentinel_start = conditional_sentinel_body_start(line)
+        sentinel = line[:sentinel_start] if sentinel_start is not None else ""
+        case_line = line[sentinel_start:] if sentinel_start is not None else line
         active_procedure = active_procedures[line_number]
         local_cases = active_procedure.local_cases if active_procedure else {}
         local_names = active_procedure.local_names if active_procedure else frozenset()
         starting_quote = state.quote_in
         quote = starting_quote
-        context_line = blank_leading_continuation(line) if prefix else line
+        context_line = blank_leading_continuation(case_line) if prefix else case_line
         context = prefix + context_line
         masked_context = code_context(context)
         use_match = USE_MODULE.match(context)
@@ -1859,8 +1878,8 @@ def replace_declared_cases(
         end_name_end = end_match.end(2) if end_match and end_match.group(2) else -1
         line_output: list[str] = []
         index = 0
-        while index < len(line):
-            char = line[index]
+        while index < len(case_line):
+            char = case_line[index]
             if quote:
                 line_output.append(char)
                 if char == quote:
@@ -1875,11 +1894,11 @@ def replace_declared_cases(
                 line_output.append(char)
                 index += 1
             elif char == "!":
-                line_output.append(line[index:])
+                line_output.append(case_line[index:])
                 break
             elif _is_identifier_start(char):
-                token_end = _identifier_end(line, index)
-                token = line[index:token_end]
+                token_end = _identifier_end(case_line, index)
+                token = case_line[index:token_end]
                 normalized = token.lower()
                 absolute_start = len(prefix) + index
                 member_component = _preceded_by_percent(context, absolute_start)
@@ -1927,7 +1946,7 @@ def replace_declared_cases(
                 line_output.append(char)
                 index += 1
         updated_line = "".join(line_output)
-        output.append(updated_line)
+        output.append(sentinel + updated_line)
         if not state.is_blank and not state.is_comment:
             prefix = statement_context(prefix, line, starting_quote) if state.continuation_out else ""
     return "".join(output)

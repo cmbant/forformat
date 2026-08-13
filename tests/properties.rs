@@ -1,4 +1,4 @@
-use findent::{
+use forformat::{
     format_source, format_to, format_to_owned,
     source::{regions::regions, LogicalGroup, RegionKind, SourceBuffer},
     FormatConfig, FormatMode,

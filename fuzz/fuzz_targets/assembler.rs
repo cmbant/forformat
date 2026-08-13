@@ -1,6 +1,6 @@
 #![no_main]
 
-use findent::source::{LogicalGroup, SourceBuffer};
+use forformat::source::{LogicalGroup, SourceBuffer};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|input: &[u8]| {

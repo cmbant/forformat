@@ -243,7 +243,7 @@ fn format_one(
 
 fn report_declines(meta: &crate::FormatMeta) {
     for (line, reason) in &meta.declines {
-        eprintln!("findent: declined wrap at line {}: {reason:?}", line + 1);
+        eprintln!("forformat: declined wrap at line {}: {reason:?}", line + 1);
     }
 }
 
@@ -263,7 +263,7 @@ pub fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), WorkflowError> {
     static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
     let number = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let name = format!(
-        ".{}.findent-{}-{}",
+        ".{}.forformat-{}-{}",
         target.file_name().unwrap_or_default().to_string_lossy(),
         std::process::id(),
         number
@@ -367,7 +367,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         return Ok(0);
     }
 
-    let profile = env::var_os("FINDENT_PROFILE_IO").is_some();
+    let profile = env::var_os("FORFORMAT_PROFILE_IO").is_some();
     let profile_start = Instant::now();
     let cwd = env::current_dir()?;
     let root = repository_root(&cwd)?;
@@ -415,7 +415,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     );
     if profile {
         eprintln!(
-            "findent profile: discovery={:?} targets={} project={} loaded-set={}",
+            "forformat profile: discovery={:?} targets={} project={} loaded-set={}",
             profile_start.elapsed(),
             target_paths.len(),
             project_paths.len(),
@@ -430,7 +430,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         .collect::<Result<_, _>>()?;
     if profile {
         eprintln!(
-            "findent profile: read={:?} sources={}",
+            "forformat profile: read={:?} sources={}",
             profile_start.elapsed(),
             loaded.len()
         );
@@ -458,7 +458,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     };
     if profile {
         eprintln!(
-            "findent profile: project-analysis={:?}",
+            "forformat profile: project-analysis={:?}",
             profile_start.elapsed(),
         );
     }
@@ -509,7 +509,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     }
     if profile {
         eprintln!(
-            "findent profile: formatting={:?} total={:?} changed={}",
+            "forformat profile: formatting={:?} total={:?} changed={}",
             formatting_start.elapsed(),
             profile_start.elapsed(),
             changed.len()
@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn atomic_replace_preserves_mode_and_cleans_failed_temporary_write() {
         use std::os::unix::fs::PermissionsExt;
-        let directory = std::env::temp_dir().join(format!("findent-io-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!("forformat-io-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir(&directory).unwrap();
         let path = directory.join("source.f90");

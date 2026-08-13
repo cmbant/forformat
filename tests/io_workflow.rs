@@ -9,13 +9,15 @@ use std::{
 static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 fn binary() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_findent"))
+    PathBuf::from(env!("CARGO_BIN_EXE_forformat"))
 }
 
 fn temp_repo() -> PathBuf {
     let number = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
-    let path =
-        std::env::temp_dir().join(format!("findent-workflow-{}-{number}", std::process::id()));
+    let path = std::env::temp_dir().join(format!(
+        "forformat-workflow-{}-{number}",
+        std::process::id()
+    ));
     let _ = fs::remove_dir_all(&path);
     fs::create_dir_all(&path).unwrap();
     Command::new("git")

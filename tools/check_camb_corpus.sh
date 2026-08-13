@@ -11,7 +11,7 @@
 #   tools/check_camb_corpus.sh [camb-path] [binary] [mode]
 #
 #     camb-path  default ./CAMB
-#     binary     default ./target/release/findent
+#     binary     default ./target/release/forformat
 #     mode       full (default) | indent-only
 #
 # Acceptance (Gate D): zero non-idempotent files, and every long line either
@@ -34,7 +34,7 @@
 set -eu
 
 CAMB=${1:-./CAMB}
-BIN=${2:-./target/release/findent}
+BIN=${2:-./target/release/forformat}
 MODE=${3:-full}
 
 # The CAMB profile, duplicated verbatim from scripts/findent_fortran.py.

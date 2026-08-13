@@ -100,7 +100,7 @@ def build_repository(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--camb", type=Path, default=ROOT / "CAMB")
-    parser.add_argument("--binary", default=str(ROOT / "target/release/findent"))
+    parser.add_argument("--binary", default=str(ROOT / "target/release/forformat"))
     parser.add_argument("--findent", default="findent")
     parser.add_argument("--show", type=int, default=3, help="differing lines to print per file")
     parser.add_argument(

@@ -1,4 +1,4 @@
-use findent::{format_source, FormatConfig};
+use forformat::{format_source, FormatConfig};
 use std::{fs, path::PathBuf, process::Command};
 
 #[test]
@@ -41,5 +41,5 @@ fn formatted_fixtures_remain_fortran_syntax_valid_when_gfortran_is_available() {
 }
 
 fn temp_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("findent-smoke-{}-{name}.f90", std::process::id()))
+    std::env::temp_dir().join(format!("forformat-smoke-{}-{name}.f90", std::process::id()))
 }

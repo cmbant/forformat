@@ -3,7 +3,7 @@
 # The oracle is deliberately optional: normal Rust builds do not depend on it.
 set -eu
 
-rust_findent=${1:-target/debug/findent}
+rust_forformat=${1:-target/debug/forformat}
 oracle=${FINDENT_ORACLE:-/opt/findent/src/findent}
 fixture_root=${FINDENT_TEST_ROOT:-/opt/findent/test}
 
@@ -32,10 +32,10 @@ for fixture in progfree.f progfree1.f progfree-dos.f; do
     # here is intentional and matches the shell test driver’s argv contract.
     set -- $flags
     env -u FINDENT_FLAGS LC_ALL=C "$oracle" -ifree "$@" < "$input" > "$fixture.oracle"
-    env -u FINDENT_FLAGS LC_ALL=C "$rust_findent" -ifree "$@" < "$input" > "$fixture.rust"
+    env -u FINDENT_FLAGS LC_ALL=C "$rust_forformat" -ifree "$@" < "$input" > "$fixture.rust"
     if cmp -s "$fixture.oracle" "$fixture.rust"; then
         echo "$fixture: match"
-    elif [ "${FINDENT_DIFFERENTIAL_STRICT:-0}" = 0 ] \
+    elif [ "${FORFORMAT_DIFFERENTIAL_STRICT:-0}" = 0 ] \
         && normalize_legacy_difference "$fixture.oracle" > "$tmpdir/oracle" \
         && normalize_legacy_difference "$fixture.rust" > "$tmpdir/rust" \
         && cmp -s "$tmpdir/oracle" "$tmpdir/rust"; then

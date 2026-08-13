@@ -33,9 +33,9 @@ fn camb_sources() -> Vec<(PathBuf, Vec<u8>)> {
 }
 
 fn main() {
-    let indent_only = findent::FormatConfig {
-        mode: findent::FormatMode::IndentOnly,
-        ..findent::FormatConfig::default()
+    let indent_only = forformat::FormatConfig {
+        mode: forformat::FormatMode::IndentOnly,
+        ..forformat::FormatConfig::default()
     };
     let workloads = [
         (
@@ -62,7 +62,7 @@ fn main() {
         let mut bytes = 0usize;
         for _ in 0..iterations {
             let output =
-                findent::format_source(source, &indent_only).expect("benchmark fixture formats");
+                forformat::format_source(source, &indent_only).expect("benchmark fixture formats");
             bytes = bytes.saturating_add(output.bytes.len());
             std::hint::black_box(output);
         }
@@ -88,9 +88,9 @@ fn main() {
         .iter()
         .map(|(_, source)| source.iter().filter(|byte| **byte == b'\n').count())
         .sum();
-    let full = findent::FormatConfig {
-        mode: findent::FormatMode::Full,
-        ..findent::FormatConfig::default()
+    let full = forformat::FormatConfig {
+        mode: forformat::FormatMode::Full,
+        ..forformat::FormatConfig::default()
     };
     // One iteration is the same unit as the CLI: one project analysis followed
     // by one parallel formatting pass over the selected targets.  The old
@@ -103,7 +103,7 @@ fn main() {
     let mut bytes = 0usize;
     for _ in 0..iterations {
         let start = Instant::now();
-        let mut context = findent::analyze_project(
+        let mut context = forformat::analyze_project(
             sources
                 .iter()
                 .map(|(path, source)| (path.as_path(), source.as_slice())),
@@ -119,7 +119,7 @@ fn main() {
                 .iter()
                 .map(|(_, source)| {
                     scope.spawn(|| {
-                        findent::format_source_with_context(source, &context, &full)
+                        forformat::format_source_with_context(source, &context, &full)
                             .expect("CAMB full-formats")
                     })
                 })

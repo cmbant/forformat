@@ -84,17 +84,6 @@ pub fn macros(document: &mut Document, cx: &PassContext) -> Result<Changed, Form
 /// (`standardize_fortran.py:1589`).
 pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
     let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
-    // `!$` conditional sentinels are laid out as Fortran later, but their
-    // authored body spelling is protected from declaration-case rewriting.
-    // Decide that once per physical line; classify_spelling must not rescan
-    // the source buffer for every token on the line.
-    let conditional_sentinels: Vec<bool> = cx
-        .analysis
-        .buffer
-        .lines
-        .iter()
-        .map(|physical| is_conditional_sentinel(cx.analysis.buffer.line_bytes(physical)))
-        .collect();
     let mut associate_stack: Vec<HashSet<Vec<u8>>> = Vec::new();
     let mut line_edits: Vec<Vec<(Range<usize>, Vec<u8>)>> = vec![Vec::new(); document.lines.len()];
 
@@ -127,9 +116,6 @@ pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, Fo
                 };
                 let line_start = cx.analysis.buffer.lines[line].span.start as usize;
                 let span = span.start - line_start..span.end - line_start;
-                if conditional_sentinels.get(line).copied().unwrap_or(false) {
-                    continue;
-                }
                 let Some(replacement) = classify_spelling(
                     &tokens,
                     index,
@@ -783,17 +769,6 @@ fn old_style_declaration_entity(tokens: &[Token<'_>], index: usize) -> bool {
         && !before.iter().any(|token| {
             token.kind == TokenKind::Name && token.depth == 0 && token.text != b"intent"
         })
-}
-
-fn is_conditional_sentinel(bytes: &[u8]) -> bool {
-    let trimmed = bytes
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .map_or(&[][..], |start| &bytes[start..]);
-    trimmed.starts_with(b"!$")
-        && !trimmed
-            .get(2..)
-            .is_some_and(|body| body.first().is_some_and(u8::is_ascii_alphabetic))
 }
 
 fn is_numeric_literal_kind_name(tokens: &[Token<'_>], index: usize) -> bool {

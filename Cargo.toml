@@ -1,18 +1,17 @@
 [package]
-name = "findent"
+name = "forformat"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "A standalone free-form Fortran formatter"
 license = "BSD-3-Clause"
-repository = "https://github.com/wvermin/findent"
 
 [lib]
-name = "findent"
+name = "forformat"
 path = "src/lib.rs"
 
 [[bin]]
-name = "findent"
+name = "forformat"
 path = "src/main.rs"
 
 [profile.release]

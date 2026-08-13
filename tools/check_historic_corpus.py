@@ -239,7 +239,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pre", type=Path, required=True, help="unformatted tree (3b1b6e08)")
     parser.add_argument("--post", type=Path, help="committed reformat (a1db7a71), for oracle check")
-    parser.add_argument("--binary", default=str(ROOT / "target/release/findent"))
+    parser.add_argument("--binary", default=str(ROOT / "target/release/forformat"))
     parser.add_argument("--findent", default="findent")
     parser.add_argument("--converge", action="store_true",
                         help="compare against the reference's converged output rather than its "

@@ -28,7 +28,7 @@ generic malformed-END handling.
 ## Intentional full-format divergences
 
 `--indent-only` is the findent-compatible indentation contract. Full mode adds lexical normalization
-and wrapping; its reviewed differences from the frozen reference are collected here:
+and wrapping; its reviewed differences from the reference are collected here:
 
 - Multiline `(/ ... /)` array constructors are rewritten as complete, valid `[ ... ]` constructors;
   the reference can change only the opening delimiter on a later continuation.
@@ -52,15 +52,14 @@ and wrapping; its reviewed differences from the frozen reference are collected h
 - An exponent kind suffix follows its own governing declaration even when the exponent token was
   perturbed to uppercase. Thus a declaration `dp` governs `1.E100_DP` as `_dp`; the reference's
   two-line `constants.f90` continuation defect is retained as an adjudicated divergence.
-- The fixed Python reference and Rust agree on the resolved governing-declaration cases: owner-keyed
-  type-bound bindings and old-style/typed local entities. The focused comparisons on 2026-08-12
-  were byte-identical, so those former reference divergences are no longer listed here.
+- The reference and Rust agree byte-for-byte on the resolved governing-declaration cases: owner-keyed
+  type-bound bindings and old-style/typed local entities.
 - Top-level program-unit parameters are in the Python reference's file scope, and Rust now applies
   the same governing-declaration rule. In particular, the bare-program BJL validation file keeps
   `BJL_RECURRENCE_MAX_L` against the unrelated module's `BJL_recurrence_MAX_L`; the focused
   comparison is byte-identical.
 - Conditional `!$` sentinels retain the authored sentinel boundary spacing while their Fortran-like
-  body is normalized; the sentinel body does not inherit project declaration casing.
+  body is normalized, including declaration-driven identifier casing.
 - `--ws_remred` on a valid literal leaves the literal bytes intact. The reference's heuristic can
   treat the quote after `error stop` as code and reduce spaces inside that literal.
 
@@ -92,18 +91,18 @@ not excused by a matching declaration in another scope.
 The in-tree suite covers byte handling, newline preservation, compact `END` forms, semicolon
 statements, keyword identifiers, `findentfix`, CPP branch restoration, labeled `DO`, idempotence,
 and preservation. When the 4.3.7 reference installation is available, run
-`tools/differential_free.sh target/release/findent`; it compares the retained non-fixed legacy
+`tools/differential_free.sh target/release/forformat`; it compares the retained non-fixed legacy
 fixtures `progfree.f`, `progfree1.f`, and `progfree-dos.f` with the oracle and reports the
 intentional preservation-boundary differences. Large real-world inputs are verified against the
-external CAMB corpus during development rather than from checked-in copies; see
+external CAMB corpus rather than from checked-in copies; see
 `FORTRAN_COMBINED_RUST_PORT_PLAN.md` for that workflow. The
 complete legacy shell suite is not a normal Rust test dependency because it includes fixed-form,
 relabeling, editor-wrapper, and other explicitly excluded features.
 
 ## Legacy free-form audit
 
-The retained free-form portions of legacy tests 11, 14, 15, 16, 19, 20, and 24 were rerun against
-the release binary on 2026-08-09 with findent 4.3.7 as the oracle. Their supported rows pass; the
+The retained free-form portions of legacy tests 11, 14, 15, 16, 19, 20, and 24 pass against
+findent 4.3.7 as the oracle. Their supported rows pass; the
 reduced behavior is represented by the manifest and focused fixtures. Test 10's
 free-form label rows are represented by `label_matrix`; its six-column rows are fixed-form and are
 excluded. Test 18 exercises the `wfindent` wrapper and generated/reference files, so it remains an
@@ -138,10 +137,10 @@ respaces seven nested or non-Fortran expressions that Rust declines, so those se
 accepted `comment-content` divergence rather than being normalized out of the diagnostic.
 
 OpenMP-style conditional sentinels retain their authored spacing after the `!$` marker while their
-Fortran body receives keyword lowering. Thus `!$  IF (X) THEN` becomes `!$ if (X) then`: the two
-spaces collapse at the free-form sentinel boundary, but the declared-name table is deliberately
-not applied inside the sentinel body. This is a formatting-only divergence pinned by
-`tests/fixtures/comment_behavior.out`; protected literal, Hollerith, and CPP bytes remain exact.
+Fortran body receives ordinary keyword and declaration-case normalization. Thus `!$  IF (X) THEN`
+becomes `!$ if (X) then`, while a declared `MyVar` is also applied inside the body. The two spaces
+collapse at the free-form sentinel boundary; protected literal, Hollerith, and CPP bytes remain
+exact.
 
 The governing declaration also resolves `DarkEnergyQuintessence.f90`: its procedure-local result
 declaration `Vofphi` (backed by the `procedure :: Vofphi` binding) governs the `VofPhi` definition

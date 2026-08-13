@@ -2,7 +2,7 @@
 # G3: compile self-contained fixtures before and after full formatting.
 set -eu
 
-BIN=${1:-./target/debug/findent}
+BIN=${1:-./target/debug/forformat}
 FIXTURES=${2:-tests/fixtures}
 
 if ! command -v gfortran >/dev/null 2>&1; then

@@ -46,7 +46,7 @@ def corpus_files() -> list[Path]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--binary", default=str(ROOT / "target/release/findent"))
+    parser.add_argument("--binary", default=str(ROOT / "target/release/forformat"))
     parser.add_argument("--findent", default="findent")
     parser.add_argument("--perturbation", action="append", choices=["none", *D.ALL_PERTURBATIONS])
     parser.add_argument("--oracle", action="store_true", help="classify failures against the reference")

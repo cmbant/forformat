@@ -132,6 +132,43 @@ print *, "write(*)'literal'"
 
 
 class DeclarationCaseTests(unittest.TestCase):
+    def test_conditional_sentinel_body_uses_declared_case(self) -> None:
+        source = """\
+module t
+integer :: MyVar
+contains
+subroutine s()
+!$ myvar = 1
+myvar = 2
+end subroutine s
+end module t
+"""
+        cases = collect_declaration_cases({Path("sentinel.f90"): source})[Path("sentinel.f90")]
+        self.assertEqual(
+            format_text(
+                source,
+                wrap=False,
+                module_cases=cases.module_cases,
+                symbol_cases=cases.symbol_cases,
+                procedure_cases=cases.procedure_cases,
+                scope_cases=cases.scope_cases,
+            ),
+            """\
+module t
+integer :: MyVar
+
+contains
+
+subroutine s
+!$ MyVar = 1
+MyVar = 2
+
+end subroutine s
+
+end module t
+""",
+        )
+
     def test_declaration_array_constructor_is_one_entity(self) -> None:
         self.assertEqual(_declared_variable_names("integer :: arr(2) = [A, B]"), ["arr"])
 

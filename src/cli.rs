@@ -4,7 +4,7 @@ use crate::{
 };
 use std::path::PathBuf;
 
-pub const VERSION: &str = "findent 0.1.0";
+pub const VERSION: &str = "forformat 0.1.0";
 
 pub enum Command {
     Run(Box<Invocation>),
@@ -499,7 +499,7 @@ fn set_construct(c: &mut FormatConfig, n: &str, v: usize) -> Result<(), FormatEr
 }
 
 pub fn usage() -> &'static str {
-    "Usage: findent [OPTIONS] < input > output\n\n\
+    "Usage: forformat [OPTIONS] < input > output\n\n\
 Free-form Fortran formatter.\n\
   -i<n>, --indent=<n>                 global indentation (default 3)\n\
   -i-, --indent=none                  leave indentation unchanged\n\
@@ -537,7 +537,7 @@ mod tests {
     use super::{parse, Command};
 
     fn run(args: &[&str]) -> crate::config::FormatConfig {
-        let mut argv = vec!["findent".to_string()];
+        let mut argv = vec!["forformat".to_string()];
         argv.extend(args.iter().map(|arg| (*arg).to_string()));
         match parse(argv).unwrap() {
             Command::Run(invocation) => invocation.config,
@@ -552,7 +552,7 @@ mod tests {
         assert_eq!(attached, separated);
         assert!(!run(&["-i-"]).apply_indent);
         assert!(run(&["-Ia"]).auto_start_indent);
-        assert!(parse(["findent".to_string(), "-iauto".to_string()].into_iter()).is_err());
+        assert!(parse(["forformat".to_string(), "-iauto".to_string()].into_iter()).is_err());
     }
 
     #[test]
@@ -569,15 +569,17 @@ mod tests {
     #[test]
     fn format_aliases_and_option_termination_are_explicit() {
         assert!(matches!(
-            parse(["findent".to_string(), "--input_format=free".to_string()].into_iter()).unwrap(),
+            parse(["forformat".to_string(), "--input_format=free".to_string()].into_iter())
+                .unwrap(),
             Command::Run(_)
         ));
         assert!(matches!(
-            parse(["findent".to_string(), "--output-format=same".to_string()].into_iter()).unwrap(),
+            parse(["forformat".to_string(), "--output-format=same".to_string()].into_iter())
+                .unwrap(),
             Command::Run(_)
         ));
         assert!(
-            parse(["findent".to_string(), "--".to_string(), "-i4".to_string()].into_iter())
+            parse(["forformat".to_string(), "--".to_string(), "-i4".to_string()].into_iter())
                 .is_err()
         );
     }
@@ -680,7 +682,7 @@ mod tests {
         ];
         for option in options {
             assert!(
-                parse(["findent".to_string(), option.to_string()].into_iter()).is_ok(),
+                parse(["forformat".to_string(), option.to_string()].into_iter()).is_ok(),
                 "{option}"
             );
         }
@@ -700,7 +702,7 @@ mod tests {
             "--indent-changeteam",
             "--indent-if",
         ] {
-            match parse(["findent".to_string(), option.to_string()]) {
+            match parse(["forformat".to_string(), option.to_string()]) {
                 Err(crate::error::FormatError::InvalidOption(message)) => {
                     assert_eq!(message, "missing option value", "{option}")
                 }
@@ -709,7 +711,7 @@ mod tests {
         }
         for option in ["--include-left=2", "--label-left=maybe", "--openmp=maybe"] {
             assert!(matches!(
-                parse(["findent".to_string(), option.to_string()].into_iter()),
+                parse(["forformat".to_string(), option.to_string()].into_iter()),
                 Err(crate::error::FormatError::InvalidOption(_))
             ));
         }
@@ -730,7 +732,7 @@ mod tests {
             ),
         ] {
             match parse(
-                std::iter::once("findent".to_string())
+                std::iter::once("forformat".to_string())
                     .chain(args.iter().map(|arg| (*arg).to_string())),
             ) {
                 Err(crate::error::FormatError::InvalidOption(value)) => {
@@ -777,19 +779,19 @@ mod tests {
     #[test]
     fn unsupported_and_invalid_cli_paths_have_stable_categories() {
         assert!(matches!(
-            parse(["findent".to_string(), "-ifixed".to_string()].into_iter()),
+            parse(["forformat".to_string(), "-ifixed".to_string()].into_iter()),
             Err(crate::error::FormatError::Unsupported(_))
         ));
         assert!(matches!(
-            parse(["findent".to_string(), "--not-an-option".to_string()].into_iter()),
+            parse(["forformat".to_string(), "--not-an-option".to_string()].into_iter()),
             Err(crate::error::FormatError::InvalidOption(_))
         ));
         assert!(matches!(
-            parse(["findent".to_string(), "-i".to_string()].into_iter()),
+            parse(["forformat".to_string(), "-i".to_string()].into_iter()),
             Err(crate::error::FormatError::InvalidOption(_))
         ));
         assert!(matches!(
-            parse(["findent".to_string(), "--include-left=maybe".to_string()].into_iter()),
+            parse(["forformat".to_string(), "--include-left=maybe".to_string()].into_iter()),
             Err(crate::error::FormatError::InvalidOption(_))
         ));
     }
@@ -798,7 +800,7 @@ mod tests {
     fn file_workflow_flags_and_query_mode_validation_are_explicit() {
         use crate::config::FormatMode;
         let parsed = parse(
-            ["findent", "--full", "--all"]
+            ["forformat", "--full", "--all"]
                 .into_iter()
                 .map(str::to_owned),
         )
@@ -811,13 +813,13 @@ mod tests {
             _ => panic!("expected run"),
         }
         assert!(parse(
-            ["findent", "-lastindent", "--check", "x.f90"]
+            ["forformat", "-lastindent", "--check", "x.f90"]
                 .into_iter()
                 .map(str::to_owned),
         )
         .is_err());
         assert!(parse(
-            ["findent", "--stdout", "x.f90", "y.f90"]
+            ["forformat", "--stdout", "x.f90", "y.f90"]
                 .into_iter()
                 .map(str::to_owned),
         )

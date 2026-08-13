@@ -1,4 +1,4 @@
-use findent::{cli, format_source, FormatError};
+use forformat::{cli, format_source, FormatError};
 use std::{fs, path::PathBuf};
 
 #[derive(Debug, Default)]
@@ -40,12 +40,12 @@ fn checked_in_manifest_covers_success_and_rejection_paths() {
         } else {
             fs::read(manifest.parent().unwrap().join(&case.stdout)).unwrap()
         };
-        let argv = std::iter::once("findent".to_string())
+        let argv = std::iter::once("forformat".to_string())
             .chain(case.args.split_whitespace().map(str::to_owned));
         let mode = match case.mode.as_str() {
-            "" | "indent-only" => findent::FormatMode::IndentOnly,
-            "normalize-only" => findent::FormatMode::NormalizeOnly,
-            "full" => findent::FormatMode::Full,
+            "" | "indent-only" => forformat::FormatMode::IndentOnly,
+            "normalize-only" => forformat::FormatMode::NormalizeOnly,
+            "full" => forformat::FormatMode::Full,
             other => panic!("unknown manifest mode {other} in case {}", case.name),
         };
         let (stdout, stderr, status) = match cli::parse(argv) {
@@ -66,7 +66,7 @@ fn checked_in_manifest_covers_success_and_rejection_paths() {
 }
 
 fn format_error(error: FormatError) -> String {
-    format!("findent: {error}\n")
+    format!("forformat: {error}\n")
 }
 
 fn parse_manifest(path: &std::path::Path, source: &str) -> Vec<Case> {

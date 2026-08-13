@@ -1,5 +1,5 @@
 [package]
-name = "findent-fuzz"
+name = "forformat-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2021"
@@ -7,7 +7,7 @@ edition = "2021"
 [workspace]
 
 [dependencies]
-findent = { path = ".." }
+forformat = { path = ".." }
 libfuzzer-sys = "0.4"
 
 [[bin]]

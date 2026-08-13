@@ -1,4 +1,4 @@
-"""Build the Python wheel around a separately compiled findent binary."""
+"""Build the Python wheel around a separately compiled forformat binary."""
 
 from __future__ import annotations
 
@@ -25,13 +25,13 @@ def cargo_version() -> str:
 
 
 def binary_path() -> Path:
-    configured = os.environ.get("FINDENT_BINARY")
+    configured = os.environ.get("FORFORMAT_BINARY")
     candidates = [Path(configured)] if configured else []
     candidates.extend(
         ROOT / path
         for path in (
-            "target/release/findent",
-            "target/release/findent.exe",
+            "target/release/forformat",
+            "target/release/forformat.exe",
         )
     )
     for candidate in candidates:
@@ -39,8 +39,8 @@ def binary_path() -> Path:
             return candidate
     searched = ", ".join(str(candidate) for candidate in candidates)
     raise RuntimeError(
-        "findent wheel builds require a prebuilt release binary; "
-        f"searched {searched}. Run `cargo build --locked --release` first or set FINDENT_BINARY."
+        "forformat wheel builds require a prebuilt release binary; "
+        f"searched {searched}. Run `cargo build --locked --release` first or set FORFORMAT_BINARY."
     )
 
 
@@ -50,7 +50,7 @@ class build_py_with_binary(build_py):
     def run(self) -> None:
         super().run()
         source = binary_path()
-        destination_dir = Path(self.build_lib) / "findent_runner" / "bin"
+        destination_dir = Path(self.build_lib) / "forformat_runner" / "bin"
         destination_dir.mkdir(parents=True, exist_ok=True)
         destination = destination_dir / source.name
         shutil.copy2(source, destination)

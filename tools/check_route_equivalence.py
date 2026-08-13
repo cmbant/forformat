@@ -55,7 +55,7 @@ def differing_lines(left: str, right: str) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--camb", type=Path, default=ROOT / "CAMB")
-    parser.add_argument("--binary", default=str(ROOT / "target/release/findent"))
+    parser.add_argument("--binary", default=str(ROOT / "target/release/forformat"))
     parser.add_argument("--show", type=int, default=3)
     parser.add_argument(
         "--perturbation",

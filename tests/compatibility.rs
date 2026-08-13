@@ -1,4 +1,4 @@
-use findent::{
+use forformat::{
     analyze_project, format_source, format_source_with_context, FormatConfig, FormatMode,
 };
 use std::path::Path;
@@ -99,7 +99,7 @@ fn external_macro_case_is_exact() {
     let expected = include_bytes!("fixtures/python_external_macro.out");
     let config = FormatConfig {
         mode: FormatMode::Full,
-        defines: vec![findent::MacroDefine {
+        defines: vec![forformat::MacroDefine {
             name: "SIZE".into(),
             value: None,
         }],

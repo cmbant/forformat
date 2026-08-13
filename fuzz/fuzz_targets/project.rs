@@ -1,6 +1,6 @@
 #![no_main]
 
-use findent::analysis::analyze_project;
+use forformat::analysis::analyze_project;
 use std::path::Path;
 use libfuzzer_sys::fuzz_target;
 

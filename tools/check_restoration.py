@@ -56,7 +56,7 @@ def main() -> int:
     parser.add_argument("--camb", type=Path, default=ROOT / "CAMB")
     # Absolute: the binary runs with a throwaway checkout as its working
     # directory, so a relative path would resolve against that.
-    parser.add_argument("--binary", default=str(ROOT / "target/release/findent"))
+    parser.add_argument("--binary", default=str(ROOT / "target/release/forformat"))
     parser.add_argument("--findent", default="findent")
     parser.add_argument("--perturbation", required=True, choices=D.ALL_PERTURBATIONS)
     parser.add_argument("--show", type=int, default=10, help="disputed lines to print per side")

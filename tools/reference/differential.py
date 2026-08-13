@@ -7,7 +7,7 @@ moved off the fixed point first.  This script perturbs code bytes (never string,
 comment, Hollerith or CPP bytes), then compares:
 
     reference:  standardize_fortran.format_text(findent(perturbed))
-    candidate:  findent-rs --full (perturbed)
+    candidate:  forformat --full (perturbed)
 
 Usage:
 
@@ -320,7 +320,7 @@ def run(command: list[str], text: str) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("files", nargs="*", type=Path)
-    parser.add_argument("--binary", default=str(ROOT / "target/release/findent"))
+    parser.add_argument("--binary", default=str(ROOT / "target/release/forformat"))
     parser.add_argument("--findent", default="findent", help="findent 4.3.7 binary")
     parser.add_argument("--converge", action="store_true", default=False,
                         help="iterate the reference to its converged answer (diagnostic)")

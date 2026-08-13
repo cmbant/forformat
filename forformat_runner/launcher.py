@@ -10,11 +10,11 @@ from pathlib import Path
 
 def bundled_binary() -> Path:
     binary_dir = Path(__file__).resolve().parent / "bin"
-    for name in ("findent.exe", "findent"):
+    for name in ("forformat.exe", "forformat"):
         candidate = binary_dir / name
         if candidate.is_file():
             return candidate
-    raise RuntimeError("the installed findent wheel has no bundled native binary")
+    raise RuntimeError("the installed forformat wheel has no bundled native binary")
 
 
 def main() -> int:

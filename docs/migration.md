@@ -33,31 +33,32 @@ valid literal under `--ws_remred`.
 
 ## CAMB pre-commit hook
 
-The Python wheel is a thin launcher around the native `findent` executable. Its PEP 517 backend is
+The Python wheel is a thin launcher around the native `forformat` executable. Its PEP 517 backend is
 setuptools because it is widely available, produces ordinary platform wheels, and lets the build
 copy a prebuilt release executable without adding a Python runtime dependency. The wheel version is
 read from this repository's `Cargo.toml`; the two version numbers therefore cannot drift. A wheel
 install does not require Rust. Building a wheel from a source checkout does require a matching
-prebuilt binary (`cargo build --locked --release`, or `FINDENT_BINARY=/path/to/findent`), which is
+prebuilt binary (`cargo build --locked --release`, or `FORFORMAT_BINARY=/path/to/forformat`), which is
 what the release CI matrix supplies for Linux x86_64, macOS x86_64/arm64, and Windows x86_64.
 
 The hook must use a Python environment managed by pre-commit. `language: system` is not safe here:
 it resolves `entry:` through `PATH`, where findent 4.3.7 accepts `--full` and exits successfully
-without formatting anything. The wheel's `findent` console script forwards all arguments and
+without formatting anything. The wheel's `forformat` console script forwards all arguments and
 filenames to the native binary, so `language: python` plus the pinned dependency below resolves
 the entry inside pre-commit's environment instead.
 
 The hook remains a CAMB-local hook, so its repository reference is `repo: local` and it has no
 `rev`. The version pin is `additional_dependencies`, not a guessed revision of this formatter's
 source repository. This source tree has no release tag or pre-commit hook manifest; using
-`https://github.com/wvermin/findent` with `rev: 5b333b8` would make pre-commit install the source
+`repo: <this-repository-url>` (fill in the real remote once the repository is published) would make
+pre-commit install the source
 project itself, whose wheel build requires a prebuilt native binary. A separate published hook
 repository and release tag could be adopted later, but that is an owner/release decision, not a
 revision that can be inferred safely here.
 
 Both CAMB hooks are replaced by the one below: `--full` does the standardize half itself, and
 leaving `standardize-fortran` in place would keep the Python dependency this port exists to remove.
-Deleting it loses nothing measurable — running the frozen `standardize_fortran` over the output of
+Deleting it loses nothing measurable — running the reference `standardize_fortran` over the output of
 this formatter changes **0 files and 0 lines across all 58 CAMB sources**, so the second hook is a
 no-op on anything the first has already written.
 
@@ -68,11 +69,11 @@ arguments, not formatter defaults:
 
 ### CAMB Python standardizer
 
-On 2026-08-12, the owner-directed fix was integrated directly into
-`CAMB/scripts/standardize_fortran.py`: extension validation, typed-local extraction, top-level
-parameter scope, and owner-keyed type-bound procedure casing. The synced
-`tools/reference/standardize_fortran.py` is the current reference; the old bytes remain only as
-`standardize_fortran_original.py` for historical comparison. There is no separate patched module.
+`CAMB/scripts/standardize_fortran.py` contains the reference behavior for extension validation,
+typed-local extraction, top-level parameter scope, and owner-keyed type-bound procedure casing. The
+synced `tools/reference/standardize_fortran.py` is the current reference; the original bytes remain
+only as `standardize_fortran_original.py` for the historic-corpus pre-fix comparison. There is no
+separate wrapper or module.
 
 ```yaml
       # Before (both hooks):
@@ -93,11 +94,11 @@ parameter scope, and owner-keyed type-bound procedure casing. The synced
 
       # After (one hook replaces both):
       - id: findent-fortran
-        name: findent Fortran
-        entry: findent
+        name: forformat Fortran
+        entry: forformat
         language: python
         additional_dependencies:
-          - findent==0.1.0
+          - forformat==0.1.0
         pass_filenames: true
         files: \.(?:f90|F90)$
         exclude: ^forutils/
@@ -121,28 +122,20 @@ Explicit paths retain whole-repository declaration discovery; add `--isolated` o
 project context is intentionally unwanted. The hook's explicit filenames use the same project-wide
 analysis while limiting writes to pre-commit's selected files.
 
-The package identity needs an owner decision before publication. `NOTICE` describes a clean-room
-reimplementation of findent 4.3.7 and credits Willem Vermin, while the current metadata calls the
-package `findent`, links to the upstream repository, and credits “findent contributors”. Options:
-
-| Choice | Install line and hook entry | Implication |
-| --- | --- | --- |
-| Keep `findent` | `python -m pip install 'findent==0.1.0'`; `entry: findent` | Retains the current command but risks upstream attribution confusion and a PATH collision. |
-| Rename the distribution and command, for example to `findent-rs` | `python -m pip install 'findent-rs==0.1.0'`; `entry: findent-rs` | Makes the reimplementation and its command distinct; metadata, wheel name, and hook dependency all change. |
-| Keep a distinct distribution name but retain `findent` as the console script | `python -m pip install '<chosen-name>==0.1.0'`; `entry: findent` | Avoids a distribution-name collision but keeps the global command collision; the script is only unambiguous inside pre-commit's environment. |
-
-The metadata is deliberately unchanged pending that choice.
+The distribution name, console script, Cargo package, and binary are `forformat`. This creates no
+PATH collision with the real `findent` and no attribution ambiguity, since NOTICE's clean-room
+statement and the package name agree.
 
 The current CI job produces release artifacts, including a Linux wheel tagged
 `py3-none-linux_x86_64`. That is not a PyPI-compatible manylinux tag, so the migration must not
-claim a PyPI install path today. Until CI produces manylinux wheels and the owner selects and
-publishes the package name, install a release artifact by path, for example:
+claim a PyPI install path. Until CI produces manylinux wheels and the package is published, install
+a release artifact by path, for example:
 
 ```sh
-python -m pip install /path/to/findent-0.1.0-py3-none-linux_x86_64.whl
+python -m pip install /path/to/forformat-0.1.0-py3-none-linux_x86_64.whl
 ```
 
-The `findent==0.1.0` pre-commit dependency is the post-publication configuration. Local hook
+The `forformat==0.1.0` pre-commit dependency is the post-publication configuration. Local hook
 verification can resolve that exact dependency from a release-artifact directory with
 `PIP_FIND_LINKS=/path/to/artifacts`; contributors should not need a separate manual install once
-the chosen, compatible distribution is published.
+the compatible forformat distribution is published.

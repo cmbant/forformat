@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-binary=${1:-target/release/findent}
+binary=${1:-target/release/forformat}
 test -x "$binary"
 
 size=$(wc -c < "$binary")
@@ -16,7 +16,7 @@ if command -v file >/dev/null 2>&1; then
     file "$binary"
 fi
 
-iterations=${FINDENT_STARTUP_ITERATIONS:-50}
+iterations=${FORFORMAT_STARTUP_ITERATIONS:-50}
 start=$(date +%s%N)
 i=0
 while test "$i" -lt "$iterations"; do
@@ -28,7 +28,7 @@ elapsed=$((finish - start))
 average=$((elapsed / iterations))
 
 rss=unavailable
-time_bin=${FINDENT_TIME_BIN:-/usr/bin/time}
+time_bin=${FORFORMAT_TIME_BIN:-/usr/bin/time}
 if test -x "$time_bin"; then
     time_output=$(mktemp)
     trap 'rm -f "$time_output"' EXIT HUP INT TERM

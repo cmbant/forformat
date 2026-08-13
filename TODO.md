@@ -117,7 +117,7 @@ Last audited against `RUST_CONVERSION_PLAN.md` and findent 4.3.7 on 2026-08-10.
 - Added direct stack-boundary tests for repeated underflow attempts, mismatched closes, max-indent
   clamping, raw-depth recovery, and empty-label operations.
 - Added release verification for binary size, checksum reporting, startup measurement, optional RSS
-  (including an explicit `FINDENT_TIME_BIN` override),
+  (including an explicit `FORFORMAT_TIME_BIN` override),
   CLI contracts, actual Cargo package verification, deterministic package-archive hashing, and
   complete tests over the unpacked package crate. When the local `equations.f90` corpus is present,
   the verifier also builds the unpacked release binary and runs the full equations check through it.

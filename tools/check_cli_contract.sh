@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-binary=${1:-target/release/findent}
+binary=${1:-target/release/forformat}
 test -x "$binary"
 
 contract_tmp=$(mktemp -d)
@@ -31,16 +31,16 @@ expect_status 2 -iauto
 expect_status 2 --continuation=0
 expect_status 2 --input-format=auto
 expect_status 2 --output-format=fixed
-expect_diagnostic 2 'findent: invalid option: --not-an-option' --not-an-option
-expect_diagnostic 2 'findent: invalid option: --input-format=unknown' --input-format=unknown
-expect_diagnostic 2 'findent: invalid option: expected non-negative integer, got -1' --align_paren=-1
-expect_diagnostic 2 'findent: unsupported: fixed-form input/output is not supported' -ifixed
+expect_diagnostic 2 'forformat: invalid option: --not-an-option' --not-an-option
+expect_diagnostic 2 'forformat: invalid option: --input-format=unknown' --input-format=unknown
+expect_diagnostic 2 'forformat: invalid option: expected non-negative integer, got -1' --align_paren=-1
+expect_diagnostic 2 'forformat: unsupported: fixed-form input/output is not supported' -ifixed
 
 alias_source=$'program p\nx = 1\nend program\n'
 test "$(printf '%s' "$alias_source" | "$binary" --input_format=free)" = "$(printf '%s' "$alias_source" | "$binary" --input-format=free)"
 
-test "$("$binary" --version)" = "findent 0.1.0"
-"$binary" --help | grep -F 'Usage: findent [OPTIONS]' >/dev/null
+test "$("$binary" --version)" = "forformat 0.1.0"
+"$binary" --help | grep -F 'Usage: forformat [OPTIONS]' >/dev/null
 test "$(printf '' | "$binary" --last-indent)" = 0
 test "$(printf 'program p\n' | "$binary" --last-usable)" = 1
 

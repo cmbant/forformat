@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Seed or refresh the traceability table from the frozen Python test suite.
 
-Every one of the 86 reference tests needs a row with a terminal status before
+Every one of the 90 reference tests needs a row with a terminal status before
 Gate B can pass.  The rows are generated so the list cannot silently drift from
 the suite; the *contents* of the last three columns are maintained by hand and
 preserved across regenerations.
@@ -35,7 +35,7 @@ CATEGORY = {
 HEADER = """# Traceability: Python behaviour to Rust tests
 
 One row per test in the frozen reference suite
-(`tools/reference/test_standardize_fortran.py`, 89 terminal rows in 6 classes).  Gate B
+(`tools/reference/test_standardize_fortran.py`, 90 terminal rows in 6 classes).  Gate B
 of the port plan needs every row to carry a terminal status.
 
 Statuses: `ported`, `covered by broader test`, `intentionally changed`

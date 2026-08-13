@@ -1,6 +1,6 @@
 #![no_main]
 
-use findent::{format_source_with_context, analysis::ProjectContext, FormatConfig, FormatMode};
+use forformat::{format_source_with_context, analysis::ProjectContext, FormatConfig, FormatMode};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|input: &[u8]| {

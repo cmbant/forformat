@@ -1,4 +1,4 @@
-# Findent Rust Formatter
+# Forformat Rust Formatter
 
 This repository contains a standalone, free-form-only Rust implementation of the Findent
 formatter. It reads bytes from stdin and writes formatted bytes to stdout. The default is full
@@ -17,11 +17,11 @@ declarations, `!$` sentinel spacing, and `--ws_remred` inside valid literals. Th
 and examples are in [docs/compatibility.md](docs/compatibility.md); migration guidance is in
 [docs/migration.md](docs/migration.md).
 
-With the reference installation available, `tools/differential_free.sh target/release/findent`
+With the reference installation available, `tools/differential_free.sh target/release/forformat`
 checks the retained legacy fixtures against findent 4.3.7 byte-for-byte.
 
-The public library API is `findent::format_source` / `findent::format_to` /
-`findent::format_to_owned`. Fixed-form conversion,
+The public library API is `forformat::format_source` / `forformat::format_to` /
+`forformat::format_to_owned`. Fixed-form conversion,
 relabeling, dependency extraction, and editor payload generation are intentionally out of scope;
 see [docs/compatibility.md](docs/compatibility.md).
 Migration notes and the supported-option matrix are in [docs/migration.md](docs/migration.md).

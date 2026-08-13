@@ -1,7 +1,7 @@
 # Traceability: Python behaviour to Rust tests
 
-One row per test in the frozen reference suite
-(`tools/reference/test_standardize_fortran.py`, 89 terminal rows in 6 classes).  Gate B
+One row per test in the reference suite
+(`tools/reference/test_standardize_fortran.py`, 90 terminal rows in 6 classes).  Gate B
 of the port plan needs every row to carry a terminal status.
 
 Statuses: `ported`, `covered by broader test`, `intentionally changed`
@@ -17,7 +17,7 @@ metadata.
 
 Regenerate the row skeleton with `python3 tools/gen_traceability.py`; the last
 three columns are hand-maintained and preserved. The added
-`python_external_macro` fixture is derived from the frozen `-D SIZE` assertion.
+`python_external_macro` fixture is derived from the reference `-D SIZE` assertion.
 
 | Python test | Category | Rust destination | Named Rust test | Status |
 |---|---|---|---|---|
@@ -30,6 +30,7 @@ three columns are hand-maintained and preserved. The added
 | `FormattingTests.test_removes_only_redundant_nested_parentheses` | blank-line/layout | `src/transform/passes/structure.rs` | `nested_parentheses_obey_expression_and_protection_rules` | ported |
 | `FormattingTests.test_normalizes_dimension_and_write_output_spacing` | blank-line/layout | `src/transform/passes/line_rules.rs` | `dimension_and_write_output_spacing_matches_the_reference_shape` | ported |
 | `FormattingTests.test_preserves_nested_parentheses_in_arguments_and_associations` | blank-line/layout | `src/transform/passes/structure.rs` | `nested_parentheses_obey_expression_and_protection_rules` | ported |
+| `DeclarationCaseTests.test_conditional_sentinel_body_uses_declared_case` | scope/project-case | `src/format/full.rs` | `conditional_sentinel_body_follows_declared_case_with_or_without_project_tables` | ported |
 | `DeclarationCaseTests.test_declaration_array_constructor_is_one_entity` | scope/project-case | `src/analysis/declarations.rs` | `declared_entities_are_protected_and_typed` | ported |
 | `DeclarationCaseTests.test_extracts_and_matches_declarations` | scope/project-case | `src/transform/passes/case_pass.rs` | `declared_occurrences_use_their_name_spaces_and_are_idempotent` | ported |
 | `DeclarationCaseTests.test_duplicate_resolution` | scope/project-case | `src/transform/passes/case_pass.rs` | `ambiguous_local_and_project_cases_are_silent` | ported |

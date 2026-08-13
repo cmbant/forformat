@@ -3,13 +3,13 @@ requires = ["setuptools>=69", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "findent"
+name = "forformat"
 dynamic = ["version"]
 description = "A standalone free-form Fortran formatter"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "BSD-3-Clause"
-authors = [{ name = "findent contributors" }]
+authors = [{ name = "forformat contributors" }]
 dependencies = []
 classifiers = [
     "Environment :: Console",
@@ -22,13 +22,10 @@ classifiers = [
 ]
 
 [project.scripts]
-findent = "findent_runner.launcher:main"
-
-[project.urls]
-Homepage = "https://github.com/wvermin/findent"
+forformat = "forformat_runner.launcher:main"
 
 [tool.setuptools]
-packages = ["findent_runner"]
+packages = ["forformat_runner"]
 
 [tool.setuptools.package-data]
-findent_runner = ["bin/*"]
+forformat_runner = ["bin/*"]

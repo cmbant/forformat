@@ -1,7 +1,7 @@
 #![no_main]
 
-use findent::{format_source, FormatConfig, FormatMode};
-use findent::source::{LexState, RegionKind};
+use forformat::{format_source, FormatConfig, FormatMode};
+use forformat::source::{LexState, RegionKind};
 use libfuzzer_sys::fuzz_target;
 
 fn protected(source: &[u8]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>) {

@@ -547,13 +547,13 @@ mod tests {
     }
 
     #[test]
-    fn conditional_sentinel_body_keeps_authored_case_with_or_without_project_tables() {
+    fn conditional_sentinel_body_follows_declared_case_with_or_without_project_tables() {
         let source = b"module t\ninteger :: MyVar\ncontains\nsubroutine s()\n!$ myvar = 1\nmyvar = 2\nend subroutine s\nend module t\n";
         let config = FormatConfig {
             mode: FormatMode::Full,
             ..FormatConfig::default()
         };
-        let expected = b"module t\n   integer :: MyVar\n\ncontains\n\n   subroutine s\n!$    myvar = 1\n      MyVar = 2\n\n   end subroutine s\n\nend module t\n";
+        let expected = b"module t\n   integer :: MyVar\n\ncontains\n\n   subroutine s\n!$    MyVar = 1\n      MyVar = 2\n\n   end subroutine s\n\nend module t\n";
         let empty = format_with_context(source, &ProjectContext::empty(), &config)
             .unwrap()
             .bytes;

@@ -123,7 +123,7 @@ def main() -> int:
     parser.add_argument("--pre", type=Path, required=True)
     # Absolute: `rust_project` runs the binary with a throwaway checkout as its
     # working directory, so a relative path would resolve against that.
-    parser.add_argument("--binary", default=str(HERE.parent / "target/release/findent"))
+    parser.add_argument("--binary", default=str(HERE.parent / "target/release/forformat"))
     parser.add_argument("--findent", default="findent")
     parser.add_argument("--converge", action="store_true", default=True)
     parser.add_argument("--sites", type=int, default=4, help="declaration sites to print")
