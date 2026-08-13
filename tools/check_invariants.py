@@ -68,7 +68,10 @@ def main() -> int:
         return D.run([args.binary, "--full", *D.FINDENT_ARGS], text)
 
     def indent_only(text: str) -> str:
-        return D.run([args.binary, *D.FINDENT_ARGS], text)
+        # Full mode is the CLI default, so this must be explicit: without the
+        # flag both columns below would run full mode and I2 would never be
+        # tested at all.
+        return D.run([args.binary, "--indent-only", *D.FINDENT_ARGS], text)
 
     def oracle(text: str) -> str:
         return D.reference_format(module, D.run([args.findent, *D.FINDENT_ARGS], text))
@@ -76,7 +79,7 @@ def main() -> int:
     totals: dict[str, list[int]] = {}
     inherited_total = 0
     for name in names:
-        failures = [0, 0]  # I1, I2
+        failures = [0, 0, 0]  # I1, I2, error
         shown = 0
         for path in files:
             text = path.read_text(errors="surrogateescape")
@@ -84,6 +87,10 @@ def main() -> int:
             try:
                 once = full(perturbed)
             except RuntimeError as error:
+                # A formatter that refuses an input has not satisfied the
+                # invariants on it; counting this as a pass would let a crash
+                # read as success.
+                failures[2] += 1
                 print(f"  ERROR {name} {path}: {error}", file=sys.stderr)
                 continue
             broken = []
@@ -107,11 +114,11 @@ def main() -> int:
         totals[name] = failures
 
     print()
-    print(f"{'perturbation':12s} {'files':>6s} {'I1 fail':>8s} {'I2 fail':>8s}")
+    print(f"{'perturbation':12s} {'files':>6s} {'I1 fail':>8s} {'I2 fail':>8s} {'error':>8s}")
     failed = 0
-    for name, (one, two) in totals.items():
-        print(f"{name:12s} {len(files):6d} {one:8d} {two:8d}")
-        failed += one + two
+    for name, (one, two, errored) in totals.items():
+        print(f"{name:12s} {len(files):6d} {one:8d} {two:8d} {errored:8d}")
+        failed += one + two + errored
     if args.oracle and inherited_total:
         print(f"\n{inherited_total} failing file(s) are inherited: the reference does not converge either.")
     return 1 if failed else 0

@@ -165,13 +165,11 @@ pub fn emit_line_to_with_quote<W: Write>(
                 out.write_all(trim_start(comment))
                     .map_err(FormatError::Write)?;
             }
+        } else if let Some(rest) = near_omp {
+            out.write_all(b"!$ ").map_err(FormatError::Write)?;
+            out.write_all(rest).map_err(FormatError::Write)?;
         } else {
-            if let Some(rest) = near_omp {
-                out.write_all(b"!$ ").map_err(FormatError::Write)?;
-                out.write_all(rest).map_err(FormatError::Write)?;
-            } else {
-                out.write_all(comment).map_err(FormatError::Write)?;
-            }
+            out.write_all(comment).map_err(FormatError::Write)?;
         }
         write_newline(buf, index, out)?;
         return Ok(());

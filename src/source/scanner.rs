@@ -15,7 +15,7 @@ pub struct Token<'a> {
     pub end: usize,
 }
 
-pub fn tokens<'a>(s: &'a [u8]) -> Vec<Token<'a>> {
+pub fn tokens(s: &[u8]) -> Vec<Token<'_>> {
     let mut out = Vec::new();
     let mut i = 0;
     let end = comment_start(s).unwrap_or(s.len());

@@ -7,6 +7,39 @@ description = "A standalone free-form Fortran formatter"
 license = "BSD-3-Clause"
 repository = "https://github.com/cmbant/forformat"
 
+# An explicit allow-list, not an `exclude`.  The CAMB and cosmomc corpora are
+# developer verification targets checked out beside the source and deliberately
+# never vendored; they are untracked rather than gitignored, so `cargo package`
+# swept ~1800 of their files into the crate.  Listing what ships means a new
+# corpus or scratch directory cannot silently join the archive.
+#
+# `include` bypasses .gitignore rather than composing with it, so these are
+# matched by extension: a bare `/tools/**` re-admits the `__pycache__/*.pyc`
+# that .gitignore was keeping out.
+include = [
+    "/src/**/*.rs",
+    "/benches/**/*.rs",
+    "/tests/**/*.rs",
+    "/tests/**/*.f90",
+    "/tests/**/*.out",
+    "/tests/**/*.manifest",
+    "/tests/**/*.json",
+    "/tools/**/*.py",
+    "/tools/**/*.sh",
+    "/tools/**/*.md",
+    "/docs/**/*.md",
+    "/forformat_runner/**/*.py",
+    "/Cargo.toml",
+    "/Cargo.lock",
+    "/README.md",
+    "/README_PYPI.md",
+    "/LICENSE",
+    "/LICENSE-THIRD-PARTY",
+    "/NOTICE",
+    "/pyproject.toml",
+    "/setup.py",
+]
+
 [lib]
 name = "forformat"
 path = "src/lib.rs"

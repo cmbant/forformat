@@ -66,7 +66,6 @@ pub fn format_with_context(
         let mut output = Document::from_bytes(&laid_out.bytes);
         output.newline = document.newline;
         output.trailing_newline = document.trailing_newline;
-        restore_overindented_comment_lines(&document, &mut output, config.wrap.line_length);
         pipeline::post_layout(&mut output, config)?;
         return Ok(FormatResult {
             bytes: output.to_bytes(),
@@ -144,8 +143,7 @@ fn reflow_with_context_inner(
     // how the fixed point (I1) breaks.  Asking the engine for those columns
     // rather than re-deriving them keeps labels, OpenMP sentinels and
     // `--align-paren` in agreement with the pass that will actually place the
-    // text; the engine emits one line per physical line, which is the same
-    // correspondence `restore_overindented_comment_lines` relies on.
+    // text; the engine emits one line per physical line.
     let mut laid_out =
         Document::from_bytes(&engine::format(&document.to_lf_bytes(), config)?.bytes);
     // Step 17 is the one post-layout pass that can make a line *longer*, by
@@ -335,37 +333,6 @@ fn emit_joined_body(lines: &mut Vec<Vec<u8>>, body: &[u8], first_indent: usize) 
     let mut line = vec![b' '; first_indent];
     line.extend_from_slice(body);
     lines.push(line);
-}
-
-fn restore_overindented_comment_lines(
-    source: &Document,
-    output: &mut Document,
-    line_length: usize,
-) {
-    for (source_line, output_line) in source.lines.iter().zip(&mut output.lines) {
-        let source_indent = leading_horizontal_width(source_line);
-        let source_content = source_line.trim_ascii_start();
-        if source_indent == 0
-            || source_line.len() <= line_length
-            || !source_content.starts_with(b"!")
-        {
-            continue;
-        }
-        let output_content = output_line.trim_ascii_start().to_vec();
-        if !output_content.starts_with(b"!") {
-            continue;
-        }
-        if source_indent > leading_horizontal_width(output_line) {
-            *output_line = vec![b' '; source_indent];
-            output_line.extend_from_slice(&output_content);
-        }
-    }
-}
-
-fn leading_horizontal_width(line: &[u8]) -> usize {
-    line.iter()
-        .take_while(|byte| matches!(byte, b' ' | b'\t'))
-        .count()
 }
 
 fn join_openmp_directive(document: &Document, group: &LogicalGroup) -> Option<Vec<u8>> {

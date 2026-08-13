@@ -24,11 +24,22 @@
 # longer quite true and it is not a correctness claim: a name such as `CP%TCMB`
 # is declared in another file, so with no project context neither we nor the
 # frozen oracle can resolve its spelling, and both make the same different
-# choice.  It stays here as a signal, but it does not gate.  The two claims that
-# do are measured elsewhere and both hold at 58/58:
+# choice.  It stays here as a signal, but it does not gate.
+#
+# `differing 1` is that signal, and it is expected: Interpolation.f90 has an
+# authored comment indented past its construct.  We follow the oracle and
+# reindent it, so our output differs from the input while *matching* the
+# reference.  Preserving the authored column instead would restate the input at
+# the cost of I2, since indent-only reindents the comment on the next pass.
+#
+# The claims that do gate are measured elsewhere:
 #
 #     python3 tools/reference/differential.py --perturbation none CAMB/...
-#         our unperturbed stdin output equals the oracle's, file for file
+#         our unperturbed stdin output against the oracle's.  Two files still
+#         differ (halofit.f90, results.f90) and both are the cross-file
+#         declaration case above, not an indentation defect.
+#     python3 tools/check_invariants.py
+#         I1 and I2 over every perturbation; must be zero across the board
 #     python3 tools/check_project_mode.py
 #         project mode reports only the documented first-run corrections
 set -eu
@@ -109,5 +120,8 @@ echo "decline diagnostics $declined"
 echo "longest line       $longest  ($longest_file)"
 
 # A nonzero exit keeps this usable in CI once the port is complete.  See the
-# header for why `differing` is reported but not gated.
-[ "$not_idempotent" -eq 0 ]
+# header for why `differing` is reported but not gated.  Declines *are* gated:
+# AGENTS.md states the corpus wants zero decline diagnostics, and a decline is
+# a long line the wrapper refused, so leaving it ungated let the acceptance
+# criterion drift without failing anything.
+[ "$not_idempotent" -eq 0 ] && [ "$declined" -eq 0 ]

@@ -290,11 +290,7 @@ fn lexical_prefix_end(line: &[u8]) -> Option<usize> {
     if line.get(..end).is_some_and(|line| line.ends_with(b"&")) {
         let prefix_end = end - 1;
         (prefix_end > 0
-            && line[prefix_end - 1]
-                .is_ascii_alphanumeric()
-                .then_some(())
-                .is_some()
-            || prefix_end > 0 && line[prefix_end - 1] == b'_')
+            && (line[prefix_end - 1].is_ascii_alphanumeric() || line[prefix_end - 1] == b'_'))
             .then_some(prefix_end)
     } else {
         None
