@@ -34,8 +34,7 @@ use crate::{
     FormatMeta, FormatResult,
 };
 
-type DetachedComment = (usize, usize);
-type ReflowResult = (Vec<(usize, Decline)>, Vec<DetachedComment>);
+type ReflowResult = Vec<(usize, Decline)>;
 
 /// Format one buffer with project context.
 pub fn format_with_context(
@@ -60,15 +59,13 @@ pub fn format_with_context(
     }
 
     if config.wrap.enabled {
-        let (declined, detached_comments) =
-            reflow_with_context_inner(&mut document, project, &local, config)?;
+        let declined = reflow_with_context_inner(&mut document, project, &local, config)?;
         // Every long line the wrapper refuses is explainable; the corpus check
         // consumes this to separate "unwrappable by design" from a wrapper bug.
         let laid_out = engine::format(&document.to_lf_bytes(), config)?;
         let mut output = Document::from_bytes(&laid_out.bytes);
         output.newline = document.newline;
         output.trailing_newline = document.trailing_newline;
-        restore_detached_comment_indentation(&mut output, &detached_comments);
         restore_overindented_comment_lines(&document, &mut output, config.wrap.line_length);
         pipeline::post_layout(&mut output, config)?;
         return Ok(FormatResult {
@@ -116,7 +113,7 @@ pub fn reflow_with_context(
     local: &crate::analysis::FileFacts,
     config: &FormatConfig,
 ) -> Result<Vec<(usize, Decline)>, FormatError> {
-    Ok(reflow_with_context_inner(document, project, local, config)?.0)
+    reflow_with_context_inner(document, project, local, config)
 }
 
 fn reflow_with_context_inner(
@@ -140,17 +137,44 @@ fn reflow_with_context_inner(
     for group in &analysis.groups {
         plans.push(planner.plan(&analysis.buffer, group, config));
     }
+    // The budget applies to the bytes this run is about to emit, not to the
+    // ones it read.  A statement whose authored lines all fit can still
+    // overrun once the layout engine has moved it to its final column — and
+    // then the *next* run would see the overrun and rewrap, which is exactly
+    // how the fixed point (I1) breaks.  Asking the engine for those columns
+    // rather than re-deriving them keeps labels, OpenMP sentinels and
+    // `--align-paren` in agreement with the pass that will actually place the
+    // text; the engine emits one line per physical line, which is the same
+    // correspondence `restore_overindented_comment_lines` relies on.
+    let mut laid_out =
+        Document::from_bytes(&engine::format(&document.to_lf_bytes(), config)?.bytes);
+    // Step 17 is the one post-layout pass that can make a line *longer*, by
+    // giving a declaration's `::` the space it is entitled to.  It rewrites
+    // lines in place, so measuring after it keeps the index correspondence and
+    // makes the width exact rather than nearly right.
+    crate::transform::passes::layout_post::declaration_separator_alignment(&mut laid_out, config)?;
+    let laid_out_width = |line: usize| laid_out.lines.get(line).map_or(0, |text| text.len());
 
     let mut lines: Vec<Vec<u8>> = Vec::with_capacity(document.lines.len());
     let mut declined = Vec::new();
-    let mut detached_comments = Vec::new();
     for (group, plan) in analysis.groups.iter().zip(&plans) {
         if let Some(directive) = join_openmp_directive(document, group) {
+            // A directive is measured and wrapped at the column the layout
+            // engine is about to move it to.  Measuring the authored indent
+            // instead leaves an over-long directive for the next run to find,
+            // which breaks the fixed point exactly as it does for statements.
+            let directive = reindent(
+                &directive,
+                match plan.body {
+                    PlanBody::Uniform { indent } => indent,
+                    PlanBody::Code { first_indent, .. } => first_indent,
+                },
+            );
             let long = directive.len() > config.wrap.line_length
-                || group
-                    .lines
-                    .clone()
-                    .any(|index| document.lines[index].len() > config.wrap.line_length);
+                || group.lines.clone().any(|index| {
+                    document.lines[index].len() > config.wrap.line_length
+                        || laid_out_width(index) > config.wrap.line_length
+                });
             if long {
                 match wrap_openmp_directive(&directive, config.wrap.line_length) {
                     Ok(wrapped) => lines.extend(wrapped),
@@ -187,10 +211,18 @@ fn reflow_with_context_inner(
             continue;
         }
         let index = group.lines.start;
-        let has_long_physical_line = group
-            .lines
-            .clone()
-            .any(|line| document.lines[line].len() > config.wrap.line_length);
+        let layout = ContinuationLayout {
+            first_indent,
+            continuation: first_indent.saturating_add(if config.indent_continuation {
+                config.continuation_indent
+            } else {
+                0
+            }),
+        };
+        let has_long_physical_line = group.lines.clone().any(|line| {
+            document.lines[line].len() > config.wrap.line_length
+                || laid_out_width(line) > config.wrap.line_length
+        });
         if !has_long_physical_line {
             copy_group(document, group, &mut lines);
             continue;
@@ -213,23 +245,25 @@ fn reflow_with_context_inner(
             );
             body = trim(&body).to_vec();
         }
-        let layout = ContinuationLayout {
-            first_indent,
-            continuation: first_indent.saturating_add(if config.indent_continuation {
-                config.continuation_indent
-            } else {
-                0
-            }),
-        };
-        // A detached trailing comment belongs to the statement as a whole,
-        // not to its last continuation line.  Keeping it at the statement
-        // indent also makes a wrapped statement stable on the next pass.
+        // A detached trailing comment belongs to the statement as a whole, not
+        // to its last continuation line, so it is written above the statement
+        // at the statement's own indent.  The layout engine then places it like
+        // any other comment line — which is what makes it stable: forcing it
+        // back to the statement indent afterwards disagreed with the engine
+        // above a dedented `else if`, and the next run moved it.
         let comment_indent = layout.first_indent;
         let detached = detach_final_inline_comment(document, group, comment_indent);
-        if first_indent + body.len() <= config.wrap.line_length {
+        // Whatever step 17 is going to add around `::` has to be paid for
+        // here, from the same budget: a break chosen against the unpadded text
+        // lands one column over once step 17 runs, and the run after that
+        // would rewrap it.
+        let budget = config
+            .wrap
+            .line_length
+            .saturating_sub(declaration_separator_growth(&body));
+        if first_indent + body.len() <= budget {
             match detached {
                 Some(Some(comment)) => {
-                    detached_comments.push((lines.len(), comment_indent));
                     lines.extend(comment);
                     if group.lines.len() > 1 {
                         emit_joined_body(&mut lines, &body, first_indent);
@@ -248,23 +282,26 @@ fn reflow_with_context_inner(
             copy_group(document, group, &mut lines);
             continue;
         }
-        match wrapping::wrap_body_with_alignment(&body, layout, config.wrap.line_length, align) {
+        match wrapping::wrap_body_with_alignment(&body, layout, budget, align) {
             Ok(wrapped) => {
                 if let Some(comment) = detached.flatten() {
-                    detached_comments.push((lines.len(), comment_indent));
                     lines.extend(comment);
                 }
                 lines.extend(wrapped)
             }
-            Err(Decline::Fits) => lines.push(document.lines[index].clone()),
+            // A decline means the statement stays exactly as authored.  It has
+            // to be copied whole: pushing only the first physical line silently
+            // deleted the continuations of a multi-line group, which turns an
+            // unwrappable statement into a syntax error.
+            Err(Decline::Fits) => copy_group(document, group, &mut lines),
             Err(reason) => {
                 declined.push((index, reason));
-                lines.push(document.lines[index].clone());
+                copy_group(document, group, &mut lines);
             }
         }
     }
     document.set_lines(lines);
-    Ok((declined, detached_comments))
+    Ok(declined)
 }
 
 /// Return the final inline comment, if there is exactly one and it is on the
@@ -298,17 +335,6 @@ fn emit_joined_body(lines: &mut Vec<Vec<u8>>, body: &[u8], first_indent: usize) 
     let mut line = vec![b' '; first_indent];
     line.extend_from_slice(body);
     lines.push(line);
-}
-
-fn restore_detached_comment_indentation(document: &mut Document, comments: &[DetachedComment]) {
-    for &(index, indent) in comments {
-        let Some(line) = document.lines.get_mut(index) else {
-            continue;
-        };
-        let content = line.trim_ascii_start().to_vec();
-        *line = vec![b' '; indent];
-        line.extend_from_slice(&content);
-    }
 }
 
 fn restore_overindented_comment_lines(
@@ -447,6 +473,47 @@ fn wrap_openmp_directive(line: &[u8], line_length: usize) -> Result<Vec<Vec<u8>>
     last.extend_from_slice(&body);
     result.push(last);
     Ok(result)
+}
+
+/// How many bytes step 17 will insert around this statement's `::`.
+///
+/// `declaration_separator_alignment` only ever compresses the run of spaces in
+/// front of a declaration's separator — except when there is none at all, where
+/// it writes the one space the separator is owed on each side.
+fn declaration_separator_growth(body: &[u8]) -> usize {
+    let mut quote = 0u8;
+    let mut index = 0;
+    while index < body.len() {
+        let byte = body[index];
+        if quote != 0 {
+            if byte == quote {
+                if body.get(index + 1) == Some(&quote) {
+                    index += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            index += 1;
+        } else if byte == b'\'' || byte == b'"' {
+            quote = byte;
+            index += 1;
+        } else if byte == b'!' {
+            return 0;
+        } else if body.get(index..index + 2) == Some(b"::") {
+            let before = usize::from(index == 0 || !matches!(body[index - 1], b' ' | b'\t'));
+            let after = usize::from(!matches!(body.get(index + 2), Some(b' ' | b'\t')));
+            return before + after;
+        } else {
+            index += 1;
+        }
+    }
+    0
+}
+
+fn reindent(line: &[u8], indent: usize) -> Vec<u8> {
+    let mut result = vec![b' '; indent];
+    result.extend_from_slice(line.trim_ascii_start());
+    result
 }
 
 fn copy_group(document: &Document, group: &LogicalGroup, lines: &mut Vec<Vec<u8>>) {
@@ -702,6 +769,74 @@ end module m
             .unwrap()
             .bytes;
         assert_eq!(String::from_utf8_lossy(&again), text);
+    }
+
+    /// The four ways step 16 used to need a second run to settle, each taken
+    /// from the `cosmomc`/`CAMB` corpus.  They share one shape: something the
+    /// pipeline does *after* the wrapper measured the text — normalization
+    /// widening it, the layout engine moving it, step 17 padding a `::` —
+    /// pushed a line past the budget that the next run then rewrapped.
+    #[test]
+    fn statements_settle_on_the_first_run_when_later_passes_widen_them() {
+        let cases: [&[u8]; 4] = [
+            // Normalization adds the spaces around `//` that tip the joined
+            // statement over the budget (`source/EstCovmat.f90`).
+            b"module m\ncontains\nsubroutine s\n    if (Feedback >1 ) write(*,*) &\n     ' Parameter '//trim(BaseParams%UsedParamNameOrNumber(i))//' is weakly constrained, neglect correlations'\nend subroutine s\nend module m\n",
+            // The layout engine moves the directive right, and the sentinel has
+            // to be repeated on the wrapped line (`camb/fortran/results.f90`).
+            b"module m\ncontains\nsubroutine s\ndo i = 1, n\ndo j = 1, n\n!$OMP PARALLEL DO DEFAULT(SHARED), SCHEDULE(STATIC), PRIVATE(zpeak, sigma_z, zpeakstart, zpeakend, nu_i, Win)\ndo k = 1, n\nx = 1\nend do\nend do\nend do\nend subroutine s\nend module m\n",
+            // Step 17 gives `::` the space the wrapper had not paid for
+            // (`source/szcounts.f90`).
+            b"module m\ncontains\nsubroutine s\nreal (dl):: dif_old,dif,max,min,dlm,binz,m_min,m_max,mp,yp,zp,thp,xk1,xk2,xk3,yk1,yk2,yk3,fact,qmin,qmax,dlogy\nend subroutine s\nend module m\n",
+            // A detached trailing comment above a dedented `else if`
+            // (`camb/fortran/MathUtils.f90`).
+            b"module m\ncontains\nsubroutine s\nif (fb == zero) then\nxzero = b\nelseif (fa*(fb/abs(fb))<zero) then  ! check that f(ax) and f(bx) have different signs\nc = a\nend if\nend subroutine s\nend module m\n",
+        ];
+        for source in cases {
+            for length in [80usize, 100, 120] {
+                let once = full(|config| config.wrap.line_length = length, source);
+                let twice = full(|config| config.wrap.line_length = length, &once);
+                assert_eq!(
+                    String::from_utf8_lossy(&once),
+                    String::from_utf8_lossy(&twice),
+                    "not a fixed point at {length} columns"
+                );
+            }
+        }
+    }
+
+    /// An unwrappable statement keeps every physical line it came with.  The
+    /// decline path used to emit the first line alone, which silently deleted
+    /// the rest of the statement.
+    #[test]
+    fn a_declined_wrap_keeps_the_whole_statement() {
+        let mut source = b"module m\ncontains\nsubroutine s\ncall f(a, '".to_vec();
+        source.extend(std::iter::repeat_n(b'x', 150));
+        source.extend_from_slice(b"', &\n    b)\nend subroutine s\nend module m\n");
+        let once = full(|_| {}, &source);
+        let text = String::from_utf8_lossy(&once).into_owned();
+        assert!(text.contains("b)\n"), "continuation line dropped:\n{text}");
+        let twice = full(|_| {}, &once);
+        assert_eq!(text, String::from_utf8_lossy(&twice));
+    }
+
+    /// `/)` closes a FORMAT statement's edit-descriptor list; only an array
+    /// constructor's `/)` becomes `]`.  On a continuation line there is no
+    /// `format` keyword to see, so the statement-level fact has to be carried
+    /// there (`camb/forutils/Interpolation.f90`).
+    #[test]
+    fn a_continued_format_statement_keeps_its_slash_before_the_paren() {
+        let source = b"module m\ncontains\nsubroutine s\n9060 format ('    NXD =', i5, ',  NYD =', i5, ',  NXI =', i5, &\n    ',  NYI =', i5 /)\nend subroutine s\nend module m\n";
+        let once = full(|_| {}, source);
+        let text = String::from_utf8_lossy(&once).into_owned();
+        assert!(
+            text.contains("i5 /)"),
+            "format descriptor rewritten:\n{text}"
+        );
+        assert!(
+            !text.contains("i5]"),
+            "format descriptor rewritten:\n{text}"
+        );
     }
 
     #[test]

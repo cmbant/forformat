@@ -1,9 +1,67 @@
-# Forformat Rust Formatter
+# forformat
 
-This repository contains a standalone, free-form-only Rust implementation of the Findent
-formatter. It reads bytes from stdin and writes formatted bytes to stdout. The default is full
-formatting: it applies findent-compatible indentation plus the documented lexical normalization
-and wrapping passes.
+`forformat` is a Python-installable formatter for free-form Fortran source. It is a clean-room
+Rust implementation of the core indentation behavior of [findent](https://github.com/cmbant/findent),
+with an optional full-format mode that also normalizes selected lexical details and wraps long
+statements.
+
+The Python package installs the `forformat` command and includes a native executable in its wheel,
+so users do not need Rust or a Fortran compiler. It is a command-line package rather than an
+importable Python formatting library.
+
+## Install
+
+```sh
+python -m pip install forformat
+```
+
+For a release artifact before the package is published on PyPI, install the compatible wheel by
+path instead:
+
+```sh
+python -m pip install /path/to/forformat-0.1.0-py3-none-linux_x86_64.whl
+```
+
+The package requires Python 3.9 or newer and currently provides platform-specific wheels. Verify
+the installation with:
+
+```sh
+forformat --version
+```
+
+## Use
+
+Format one or more free-form Fortran files in place:
+
+```sh
+forformat src/module.f90
+forformat src/*.f90
+```
+
+For pipelines, read from standard input and write to standard output:
+
+```sh
+forformat --stdin < src/module.f90 > /tmp/module.f90
+forformat --stdout src/module.f90 > /tmp/module.f90
+```
+
+Use `--check` in CI to fail when files need formatting, or `--diff` to print unified diffs:
+
+```sh
+forformat --check src/*.f90
+forformat --diff src/*.f90
+```
+
+The default is `--full`. Use `--indent-only` for findent-compatible indentation and trailing
+whitespace handling, or `--help` for the complete option list. Fixed-form Fortran and automatic
+format detection are not supported.
+
+## Rust formatter
+
+The repository also contains the standalone Rust implementation used to build the Python wheel.
+It reads bytes from stdin and writes formatted bytes to stdout. The default is full formatting: it
+applies findent-compatible indentation plus the documented lexical normalization and wrapping
+passes.
 
 ```sh
 cargo run --release -- -ifree < source.f90 > source.f90.formatted

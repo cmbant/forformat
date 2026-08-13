@@ -38,6 +38,10 @@ struct LineOptions {
     continued_infix: bool,
     continued_declaration: bool,
     continued_named_parameter: bool,
+    /// The statement this line continues is a FORMAT statement.  Its edit
+    /// descriptors are not expressions, so `/)` there is a record separator
+    /// before a closing parenthesis and not an array-constructor delimiter.
+    continued_format: bool,
 }
 
 /// Apply the whole chain to every line of the document.
@@ -94,14 +98,16 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             continue;
         }
         let preserve_comment_after = preserve_full_comment_spacing(document, index, cx);
-        let continued_declaration = continued_statement
-            && cx
-                .analysis
+        let first_statement_tokens = || {
+            cx.analysis
                 .group_of_line(index)
                 .and_then(|group| group.statements.first())
-                .is_some_and(|statement| {
-                    is_declaration_statement(&crate::source::tokens::tokens(&statement.text))
-                });
+                .map(|statement| crate::source::tokens::tokens(&statement.text))
+        };
+        let continued_declaration = continued_statement
+            && first_statement_tokens().is_some_and(|tokens| is_declaration_statement(&tokens));
+        let continued_format = continued_statement
+            && first_statement_tokens().is_some_and(|tokens| is_format_statement(&tokens));
         let line = apply_with_options(
             &document.lines[index],
             cx,
@@ -114,6 +120,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 continued_infix,
                 continued_declaration,
                 continued_named_parameter,
+                continued_format,
             },
         );
         if let Some(physical) = cx.analysis.buffer.lines.get(index) {
@@ -197,7 +204,13 @@ fn apply_with_options(
         options.continued_named_parameter,
         false,
     );
-    text = normalize_keyword_spacing_with_state(&text, declared_names, line_index, incoming);
+    text = normalize_keyword_spacing_with_state(
+        &text,
+        declared_names,
+        line_index,
+        incoming,
+        options.continued_format,
+    );
     text = normalize_write_output_spacing_with_state(&text, cx, incoming);
     text = normalize_delimiter_spacing_with_state(&text, cx, incoming);
     let mut text =
@@ -237,6 +250,7 @@ pub fn respace_joined(
         declared_names,
         line_index,
         LexState::default(),
+        false,
     );
     text = normalize_delimiter_spacing(&text, cx);
     compact_joined_named_arguments(&text)
@@ -357,6 +371,7 @@ fn lowercase_line_with_context(
                                 && continued_named_parameter
                                 && is_continued_named_parameter(&tokens, index));
                     add_operator_edit(line, &mut edits, token, token.text, !named, &mut spacing);
+                    spacing.previous_compact_named = named;
                 } else if is_arithmetic_operator(token.text) {
                     if is_binary_arithmetic_operator(line, token.span.start, token.text)
                         || (continued_infix
@@ -483,7 +498,13 @@ pub fn normalize_keyword_spacing(
     declared_names: &DeclaredNameIndex,
     line_index: usize,
 ) -> Vec<u8> {
-    normalize_keyword_spacing_with_state(line, declared_names, line_index, LexState::default())
+    normalize_keyword_spacing_with_state(
+        line,
+        declared_names,
+        line_index,
+        LexState::default(),
+        false,
+    )
 }
 
 fn normalize_keyword_spacing_with_state(
@@ -491,6 +512,7 @@ fn normalize_keyword_spacing_with_state(
     declared_names: &DeclaredNameIndex,
     line_index: usize,
     incoming: LexState,
+    continued_format: bool,
 ) -> Vec<u8> {
     let tokens = tokenize(line, &mut incoming.clone());
     let mut edits = EditBuffer::new(line);
@@ -503,7 +525,10 @@ fn normalize_keyword_spacing_with_state(
     if let Some((start, end, replacement)) = common_block_edit(line, &tokens) {
         edits.replace(start..end, &replacement);
     }
-    if !is_format_statement(&tokens) {
+    // A continuation line of a FORMAT statement carries no `format` keyword of
+    // its own, so the statement-level flag is the only thing standing between
+    // an edit descriptor like `i5 /)` and a rewrite into `i5]`.
+    if !is_format_statement(&tokens) && !continued_format {
         for pair in tokens.windows(2) {
             if pair[0].kind == TokenKind::LParen
                 && pair[1].kind == TokenKind::Operator
@@ -1779,6 +1804,11 @@ struct OperatorSpacing {
     previous_end: Option<usize>,
     /// Whether that edit already wrote the space between the two operators.
     previous_trailing_space: bool,
+    /// Whether that edit was a deliberately compact `name=`.  The token that
+    /// abuts such an edit opens the argument's value, so a `.not.` there is
+    /// unary and must stay against the `=`: `append=.not. new_chains`, never
+    /// the lopsided `append= .not. new_chains`.
+    previous_compact_named: bool,
 }
 
 fn add_operator_edit(
@@ -1799,11 +1829,13 @@ fn add_operator_edit(
         right += 1;
     }
     let abuts_previous = spacing.previous_end == Some(left);
+    let suppress_leading_space =
+        abuts_previous && (spacing.previous_trailing_space || spacing.previous_compact_named);
     let mut replacement = Vec::new();
     if left == 0 {
         replacement.extend_from_slice(&line[..token.span.start]);
     }
-    if spaced && left > 0 && !(abuts_previous && spacing.previous_trailing_space) {
+    if spaced && left > 0 && !suppress_leading_space {
         replacement.push(b' ');
     }
     replacement.extend_from_slice(operator);
@@ -1813,6 +1845,7 @@ fn add_operator_edit(
     }
     spacing.previous_end = Some(right);
     spacing.previous_trailing_space = trailing;
+    spacing.previous_compact_named = false;
     edits.replace(left..right, &replacement);
 }
 
@@ -1833,6 +1866,7 @@ fn remove_operator_trailing_whitespace(
         spacing.previous_end = Some(token.span.end);
     }
     spacing.previous_trailing_space = false;
+    spacing.previous_compact_named = false;
 }
 
 fn is_trailing_continuation_marker(line: &[u8], start: usize) -> bool {
@@ -2018,6 +2052,27 @@ mod tests {
     fn adjacent_operator_padding_is_idempotent() {
         let once = normalized(b"a=.not.b\nx=y.and..not.z\n");
         assert_eq!(normalized(once.as_bytes()), once);
+    }
+
+    #[test]
+    fn a_named_argument_keeps_a_dotted_operator_against_its_equals() {
+        // The `=` writes no trailing space on purpose; the `.not.` that opens
+        // the value must not push itself off it.  The joined-statement path
+        // compacts this shape, so the two disagreed on a wrapped call and the
+        // file needed a second run to settle.
+        assert_eq!(
+            normalized(b"call f(a, append=.not. new_chains)\n"),
+            "call f(a, append=.not. new_chains)\n"
+        );
+        assert_eq!(
+            normalized(b"call f(a, append= .not. new_chains)\n"),
+            "call f(a, append=.not. new_chains)\n"
+        );
+        // A real assignment still pads both sides.
+        assert_eq!(
+            normalized(b"append=.not.new_chains\n"),
+            "append = .not. new_chains\n"
+        );
     }
 
     #[test]
