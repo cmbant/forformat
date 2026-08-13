@@ -863,7 +863,7 @@ mod tests {
                 "-indent_module=0 (did you mean --indent_module=0? Long options use two dashes.)",
             ),
         ] {
-            match parse(["forformat".to_string(), typo.to_string()].into_iter()) {
+            match parse(["forformat".to_string(), typo.to_string()]) {
                 Err(crate::error::FormatError::InvalidOption(message)) => {
                     assert_eq!(message, expected)
                 }
