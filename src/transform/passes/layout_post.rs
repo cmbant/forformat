@@ -424,16 +424,19 @@ fn scope_header(code: &[u8]) -> bool {
     })
 }
 
-/// Step 20: trailing horizontal whitespace.
+/// Step 20: trailing horizontal whitespace and the final newline.
 ///
-/// This one is implemented: it is unconditional, cannot lengthen a line, and
-/// matches what indent-only mode already does, so full and indent-only output
-/// agree on it (I2).
+/// This matches the reference formatter's pre-commit-style EOF policy: an
+/// empty input stays empty, while every non-empty input ends in exactly one
+/// newline.  The newline sequence itself remains the document's dominant one.
 pub fn output_whitespace(
     document: &mut Document,
     config: &FormatConfig,
 ) -> Result<(), FormatError> {
     let _ = config;
+    let had_input = document.trailing_newline
+        || document.lines.len() > 1
+        || document.lines.first().is_some_and(|line| !line.is_empty());
     for line in &mut document.lines {
         let mut end = line.len();
         while end > 0 && (line[end - 1] == b' ' || line[end - 1] == b'\t') {
@@ -441,6 +444,10 @@ pub fn output_whitespace(
         }
         line.truncate(end);
     }
+    while document.lines.len() > 1 && document.lines.last().is_some_and(Vec::is_empty) {
+        document.lines.pop();
+    }
+    document.trailing_newline = had_input;
     Ok(())
 }
 
@@ -456,6 +463,21 @@ mod tests {
         let mut document = Document::from_bytes(b"x = 1   \n\t\n  y = 2\t \n");
         output_whitespace(&mut document, &FormatConfig::default()).unwrap();
         assert_eq!(document.to_bytes(), b"x = 1\n\n  y = 2\n");
+    }
+
+    #[test]
+    fn final_newlines_match_end_of_file_fixer() {
+        for (source, expected) in [
+            (b"".as_slice(), b"".as_slice()),
+            (b"x = 1".as_slice(), b"x = 1\n".as_slice()),
+            (b"x = 1\n\n\n".as_slice(), b"x = 1\n".as_slice()),
+            (b"x = 1\r\n\r\n".as_slice(), b"x = 1\r\n".as_slice()),
+            (b"\n\n".as_slice(), b"\n".as_slice()),
+        ] {
+            let mut document = Document::from_bytes(source);
+            output_whitespace(&mut document, &FormatConfig::default()).unwrap();
+            assert_eq!(document.to_bytes(), expected, "source: {source:?}");
+        }
     }
 
     fn apply_all(source: &[u8]) -> Vec<u8> {

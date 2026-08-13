@@ -6,10 +6,10 @@ build-backend = "setuptools.build_meta"
 name = "forformat"
 dynamic = ["version"]
 description = "A standalone free-form Fortran formatter"
-readme = "README.md"
+readme = "README_PYPI.md"
 requires-python = ">=3.9"
 license = "BSD-3-Clause"
-authors = [{ name = "forformat contributors" }]
+authors = [{ name = "Antony Lewis" }]
 dependencies = []
 classifiers = [
     "Environment :: Console",
@@ -23,6 +23,9 @@ classifiers = [
 
 [project.scripts]
 forformat = "forformat_runner.launcher:main"
+
+[project.urls]
+Homepage = "https://github.com/cmbant/forformat"
 
 [tool.setuptools]
 packages = ["forformat_runner"]

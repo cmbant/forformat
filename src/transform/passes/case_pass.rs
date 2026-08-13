@@ -20,7 +20,30 @@ use crate::{
         pipeline::{Changed, PassContext},
     },
 };
-use std::{collections::HashSet, ops::Range};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+};
+
+#[derive(Debug, Clone, Default)]
+struct AssociateFrame {
+    names: HashSet<Vec<u8>>,
+    types: HashMap<Vec<u8>, Vec<u8>>,
+}
+
+impl AssociateFrame {
+    fn extend_visible(&mut self, frame: &Self) {
+        for name in &frame.names {
+            self.names.insert(name.clone());
+            // An untyped inner alias must shadow a typed outer alias with the
+            // same name instead of exposing the outer entity by accident.
+            self.types.remove(name);
+            if let Some(type_name) = frame.types.get(name) {
+                self.types.insert(name.clone(), type_name.clone());
+            }
+        }
+    }
+}
 
 /// Steps 1-3: apply the spelling of every known macro name.
 ///
@@ -84,7 +107,7 @@ pub fn macros(document: &mut Document, cx: &PassContext) -> Result<Changed, Form
 /// (`standardize_fortran.py:1589`).
 pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
     let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
-    let mut associate_stack: Vec<HashSet<Vec<u8>>> = Vec::new();
+    let mut associate_stack: Vec<AssociateFrame> = Vec::new();
     let mut line_edits: Vec<Vec<(Range<usize>, Vec<u8>)>> = vec![Vec::new(); document.lines.len()];
 
     // Work on assembled statements, not independently on physical lines.  A
@@ -97,12 +120,26 @@ pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, Fo
             let first = tokens
                 .iter()
                 .position(|token| token.kind != TokenKind::Number);
-            if first.is_some_and(|index| tokens[index].is_name(b"associate")) {
-                associate_stack.push(associate_aliases(&tokens));
+            let mut associate_context = AssociateFrame::default();
+            for frame in &associate_stack {
+                associate_context.extend_visible(frame);
             }
-            let mut associate_names = HashSet::new();
-            for aliases in &associate_stack {
-                associate_names.extend(aliases.iter().cloned());
+            let opening_frame = associate_opening(&tokens, first).map(|_| {
+                associate_frame(
+                    &tokens,
+                    active_procedure(cx.scopes, group.lines.start),
+                    cx.local,
+                    Some(&cx.project.types),
+                    &associate_context,
+                )
+            });
+            // Association names participate in ordinary spelling resolution
+            // on the opening statement, but their types are not visible in
+            // their own selectors. Fortran evaluates every selector in the
+            // enclosing scope.
+            let mut statement_context = associate_context.clone();
+            if let Some(frame) = &opening_frame {
+                statement_context.names.extend(frame.names.iter().cloned());
             }
             for (index, token) in tokens.iter().enumerate() {
                 if token.kind != TokenKind::Name {
@@ -122,13 +159,16 @@ pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, Fo
                     line,
                     &declared_names,
                     cx,
-                    Some(&associate_names),
+                    Some(&statement_context),
                 ) else {
                     continue;
                 };
                 if replacement.as_slice() != token.text {
                     line_edits[line].push((span, replacement));
                 }
+            }
+            if let Some(frame) = opening_frame {
+                associate_stack.push(frame);
             }
             if first.is_some_and(|index| tokens[index].is_name(b"end"))
                 && tokens
@@ -186,11 +226,14 @@ fn classify_spelling(
     line: usize,
     declared_names: &crate::analysis::DeclaredNameIndex,
     cx: &PassContext,
-    associate_names: Option<&HashSet<Vec<u8>>>,
+    associates: Option<&AssociateFrame>,
 ) -> Option<Vec<u8>> {
     let token = &tokens[index];
-    let associate_alias = associate_names
-        .is_some_and(|names| names.contains(token.text.to_ascii_lowercase().as_slice()));
+    let associate_alias = associates.is_some_and(|context| {
+        context
+            .names
+            .contains(token.text.to_ascii_lowercase().as_slice())
+    });
 
     // Indexed member chains whose owner cannot be recovered are deliberately
     // inert for the same reason as every other unresolved `%` member. The
@@ -269,14 +312,7 @@ fn classify_spelling(
     // CAMB tree, which is the one thing that cannot justify a rule.
 
     if preceded_by_percent(tokens, index) {
-        let procedure = cx
-            .scopes
-            .ancestors(cx.scopes.index_of_line(line))
-            .into_iter()
-            .find(|scope| {
-                cx.scopes.scopes[*scope].kind == crate::analysis::scope::ScopeKind::Procedure
-            })
-            .and_then(|scope| cx.scopes.scopes[scope].name.as_deref());
+        let procedure = active_procedure(cx.scopes, line);
         // Ownership may come from another project file (for example a module
         // variable used through USE), so resolve the complete chain against
         // both the target file and project maps.  The case table queried below
@@ -285,34 +321,29 @@ fn classify_spelling(
             tokens,
             index,
             procedure,
-            &cx.local.types,
+            cx.local,
             Some(&cx.project.types),
             true,
+            associates,
         );
-        let Some(_owner_type) = owner_type else {
+        let Some(owner_type) = owner_type else {
             // The typed component table cannot safely reproduce the
             // reference's (type, component) key when the use-site chain is
             // unresolved. A genuinely undetermined governing declaration is
             // inert; it must not fall through to keyword or symbol casing.
-            return file_symbol_spelling(declared_names, cx, token.text, associate_alias);
+            return None;
         };
-        let resolver = cx.resolver();
-        let inherited = inherited_component_spelling(cx, &_owner_type, token.text, true);
+        let inherited = inherited_component_spelling(cx, &owner_type, token.text, true);
         if let Some(spelling) = inherited {
             return Some(spelling);
         }
-        if let Some(spelling) = inherited_type_procedure_spelling(cx, &_owner_type, token.text) {
+        if let Some(spelling) = inherited_type_procedure_spelling(cx, &owner_type, token.text) {
             return Some(spelling);
         }
-        if cx.local.generic_type_procedures.contains(token.text)
-            || cx.project.generic_type_procedures.contains(token.text)
-        {
-            return None;
-        }
-        if let Some(spelling) = resolver.spelling(NameSpace::TypeProcedure, token.text) {
-            return Some(spelling.to_vec());
-        }
-        return file_symbol_spelling(declared_names, cx, token.text, associate_alias);
+        // Once an occurrence is known to be a member, only a declaration on
+        // its owner chain can govern its spelling. A same-named ordinary
+        // symbol or binding on an unrelated type is a different entity.
+        return None;
     }
 
     // The B9 procedure map contains spellings, not merely membership.
@@ -546,16 +577,186 @@ fn preceded_by_percent(tokens: &[Token<'_>], index: usize) -> bool {
     index > 0 && tokens[index - 1].text == b"%"
 }
 
-fn associate_aliases(tokens: &[Token<'_>]) -> HashSet<Vec<u8>> {
-    let mut aliases = HashSet::new();
-    for (index, token) in tokens.iter().enumerate() {
-        if token.kind == TokenKind::Name
-            && tokens.get(index + 1).is_some_and(|next| next.text == b"=>")
-        {
-            aliases.insert(token.text.to_ascii_lowercase());
+fn active_procedure(scopes: &crate::analysis::ScopeTree, line: usize) -> Option<&[u8]> {
+    scopes
+        .ancestors(scopes.index_of_line(line))
+        .into_iter()
+        .find(|scope| {
+            matches!(
+                scopes.scopes[*scope].kind,
+                crate::analysis::scope::ScopeKind::Program
+                    | crate::analysis::scope::ScopeKind::Procedure
+            )
+        })
+        .and_then(|scope| scopes.scopes[scope].name.as_deref())
+}
+
+fn associate_opening(tokens: &[Token<'_>], first: Option<usize>) -> Option<usize> {
+    let first = first?;
+    if tokens[first].is_name(b"associate") {
+        return Some(first);
+    }
+    (tokens[first].kind == TokenKind::Name
+        && tokens
+            .get(first + 1)
+            .is_some_and(|token| token.text == b":")
+        && tokens
+            .get(first + 2)
+            .is_some_and(|token| token.is_name(b"associate")))
+    .then_some(first + 2)
+}
+
+/// Extract the aliases introduced by one ASSOCIATE statement and infer the
+/// type of selectors that are plain data-reference chains. Arbitrary
+/// expressions remain valid aliases but intentionally have no inferred type.
+fn associate_frame(
+    tokens: &[Token<'_>],
+    procedure: Option<&[u8]>,
+    local: &crate::analysis::FileFacts,
+    project: Option<&TypeMaps>,
+    outer: &AssociateFrame,
+) -> AssociateFrame {
+    let mut frame = AssociateFrame::default();
+    for (alias, selector) in associate_specs(tokens) {
+        let name = alias.to_ascii_lowercase();
+        frame.names.insert(name.clone());
+        if let Some(type_name) = designator_type(selector, procedure, local, project, outer) {
+            frame.types.insert(name, type_name);
         }
     }
-    aliases
+    frame
+}
+
+/// Return `(association-name, selector-tokens)` for the top-level entries in
+/// `ASSOCIATE(...)`. Commas and arrows inside selector expressions are not
+/// association delimiters.
+fn associate_specs<'a>(tokens: &'a [Token<'a>]) -> Vec<(&'a [u8], &'a [Token<'a>])> {
+    let Some(associate) = tokens.iter().position(|token| token.is_name(b"associate")) else {
+        return Vec::new();
+    };
+    let Some(open) = tokens
+        .get(associate + 1)
+        .filter(|token| token.kind == TokenKind::LParen)
+    else {
+        return Vec::new();
+    };
+    let entry_depth = open.depth + 1;
+    let close = tokens
+        .iter()
+        .enumerate()
+        .skip(associate + 2)
+        .find(|(_, token)| token.kind == TokenKind::RParen && token.depth == open.depth)
+        .map(|(index, _)| index)
+        .unwrap_or(tokens.len());
+
+    let mut specs = Vec::new();
+    let mut start = associate + 2;
+    for end in (start..close)
+        .filter(|index| {
+            tokens[*index].kind == TokenKind::Comma && tokens[*index].depth == entry_depth
+        })
+        .chain(std::iter::once(close))
+    {
+        let entry = &tokens[start..end];
+        if let [alias, arrow, selector @ ..] = entry {
+            if alias.kind == TokenKind::Name
+                && alias.depth == entry_depth
+                && arrow.text == b"=>"
+                && arrow.depth == entry_depth
+                && !selector.is_empty()
+            {
+                specs.push((alias.text, selector));
+            }
+        }
+        start = end.saturating_add(1);
+    }
+    specs
+}
+
+fn designator_type(
+    tokens: &[Token<'_>],
+    procedure: Option<&[u8]>,
+    local: &crate::analysis::FileFacts,
+    project: Option<&TypeMaps>,
+    associates: &AssociateFrame,
+) -> Option<Vec<u8>> {
+    let names = designator_names(tokens)?;
+    let root = names.first()?;
+    if associates
+        .names
+        .contains(root.to_ascii_lowercase().as_slice())
+    {
+        let current = associates
+            .types
+            .get(root.to_ascii_lowercase().as_slice())?
+            .clone();
+        return resolve_component_owner(current, &names[1..], &local.types, project);
+    }
+    if local
+        .types
+        .resolve_chain_with_locals(procedure, root, &[])
+        .is_some()
+    {
+        let current = local
+            .types
+            .resolve_chain_with_locals(procedure, root, &[])?;
+        return resolve_component_owner(current, &names[1..], &local.types, project);
+    }
+    if procedure.is_none() && local.types.has_procedure_local_root(root) {
+        return None;
+    }
+    if let (Some(project), Some(imported)) = (
+        project,
+        project.and_then(|types| local.imported_variable_type(types, root)),
+    ) {
+        return resolve_component_owner(imported, &names[1..], &local.types, Some(project));
+    }
+    project.and_then(|types| types.resolve_chain(root, &names[1..]))
+}
+
+/// Parse a selector that consists solely of a Fortran data-reference chain,
+/// ignoring array subscripts on each part. Expressions and procedure calls
+/// are deliberately rejected because their result type needs richer semantic
+/// analysis than declaration maps provide.
+fn designator_names<'a>(tokens: &'a [Token<'a>]) -> Option<Vec<&'a [u8]>> {
+    let root = tokens.first()?.kind == TokenKind::Name;
+    if !root {
+        return None;
+    }
+    let base_depth = tokens[0].depth;
+    let mut names = vec![tokens[0].text];
+    let mut index = 1;
+    while index < tokens.len() {
+        if tokens[index].kind.opens_bracket() && tokens[index].depth == base_depth {
+            let open_kind = tokens[index].kind;
+            let close_kind = match open_kind {
+                TokenKind::LParen => TokenKind::RParen,
+                TokenKind::LBracket => TokenKind::RBracket,
+                _ => return None,
+            };
+            index += 1;
+            while index < tokens.len()
+                && !(tokens[index].kind == close_kind && tokens[index].depth == base_depth)
+            {
+                index += 1;
+            }
+            if index == tokens.len() {
+                return None;
+            }
+            index += 1;
+            continue;
+        }
+        if tokens[index].text != b"%" || tokens[index].depth != base_depth {
+            return None;
+        }
+        let member = tokens.get(index + 1)?;
+        if member.kind != TokenKind::Name || member.depth != base_depth {
+            return None;
+        }
+        names.push(member.text);
+        index += 2;
+    }
+    Some(names)
 }
 
 fn is_use_module(tokens: &[Token<'_>], index: usize) -> bool {
@@ -779,23 +980,39 @@ fn member_owner_type(
     tokens: &[Token<'_>],
     index: usize,
     procedure: Option<&[u8]>,
-    local: &TypeMaps,
+    local: &crate::analysis::FileFacts,
     project: Option<&TypeMaps>,
     indexed_chain: bool,
+    associates: Option<&AssociateFrame>,
 ) -> Option<Vec<u8>> {
     let names = component_owner_names(tokens, index, indexed_chain)?;
     let root = names.first()?;
+    if let Some(associates) =
+        associates.filter(|context| context.names.contains(root.to_ascii_lowercase().as_slice()))
+    {
+        let current = associates
+            .types
+            .get(root.to_ascii_lowercase().as_slice())?
+            .clone();
+        return resolve_component_owner(current, &names[1..], &local.types, project);
+    }
     // A target-file root type is authoritative even when its later component
     // link cannot be resolved. Falling back to a project-wide type for that
     // same root would invent an owner (and therefore a component spelling)
     // that the reference leaves authored.
     if local
+        .types
         .resolve_chain_with_locals(procedure, root, &[])
         .is_some()
     {
-        member_owner_type_with_project_components(tokens, index, procedure, local, project?)
-    } else if local.has_procedure_local_root(root) {
+        member_owner_type_with_project_components(tokens, index, procedure, &local.types, project)
+    } else if procedure.is_none() && local.types.has_procedure_local_root(root) {
         None
+    } else if let (Some(project), Some(imported)) = (
+        project,
+        project.and_then(|types| local.imported_variable_type(types, root)),
+    ) {
+        resolve_component_owner(imported, &names[1..], &local.types, Some(project))
     } else {
         project.and_then(|types| types.resolve_chain(root, &names[1..]))
     }
@@ -808,15 +1025,24 @@ fn member_owner_type_with_project_components(
     index: usize,
     procedure: Option<&[u8]>,
     local: &TypeMaps,
-    project: &TypeMaps,
+    project: Option<&TypeMaps>,
 ) -> Option<Vec<u8>> {
     let names = component_owner_names(tokens, index, true)?;
     let root = names.first()?;
-    let mut current = local.resolve_chain_with_locals(procedure, root, &[])?;
-    for link in &names[1..] {
+    let current = local.resolve_chain_with_locals(procedure, root, &[])?;
+    resolve_component_owner(current, &names[1..], local, project)
+}
+
+fn resolve_component_owner(
+    mut current: Vec<u8>,
+    links: &[&[u8]],
+    local: &TypeMaps,
+    project: Option<&TypeMaps>,
+) -> Option<Vec<u8>> {
+    for link in links {
         current = local
             .component_type(&current, link)
-            .or_else(|| project.component_type(&current, link))?;
+            .or_else(|| project.and_then(|types| types.component_type(&current, link)))?;
     }
     Some(current)
 }
@@ -934,6 +1160,86 @@ mod tests {
     }
 
     #[test]
+    fn program_locals_resolve_type_bound_procedure_owners() {
+        let declarations = b"module settings\n\
+type :: TSettingIni\n\
+contains\n\
+procedure :: ReadFilename\n\
+end type TSettingIni\n\
+end module settings\n";
+        let source = b"program CosmoMC\n\
+use settings\n\
+type(TSettingIni) :: Ini\n\
+x = Ini%ReadFileName('file_root')\n\
+end program CosmoMC\n";
+        let project = analyze_project([
+            (Path::new("settings.f90"), declarations.as_slice()),
+            (Path::new("driver.f90"), source.as_slice()),
+        ])
+        .unwrap();
+        let output = run_pass(source, &project, |document, context| {
+            declared(document, context).unwrap()
+        });
+        assert!(output
+            .windows(b"Ini%ReadFilename".len())
+            .any(|window| window == b"Ini%ReadFilename"));
+        assert!(!output
+            .windows(b"Ini%ReadFileName".len())
+            .any(|window| window == b"Ini%ReadFileName"));
+    }
+
+    #[test]
+    fn use_associated_module_variables_resolve_component_owners() {
+        let results = b"module results\n\
+type :: CAMBdata\n\
+integer :: CAMB_PK\n\
+end type CAMBdata\n\
+end module results\n";
+        let gauge = b"module GaugeInterface\n\
+use results\n\
+class(CAMBdata), pointer :: State\n\
+end module GaugeInterface\n";
+        let unrelated = b"module unrelated\n\
+type :: Other\n\
+integer :: CAMB_Pk\n\
+end type Other\n\
+type(Other) :: State\n\
+end module unrelated\n";
+        let source = b"module CAMBmain\n\
+use GaugeInterface\n\
+use GaugeInterface, only: Active => State\n\
+contains\n\
+subroutine OtherWork(State)\n\
+type(Other) :: State\n\
+end subroutine OtherWork\n\
+subroutine MakeNonlinearSources\n\
+x = State%CAMB_Pk\n\
+x = Active%CAMB_Pk\n\
+end subroutine MakeNonlinearSources\n\
+end module CAMBmain\n";
+        let project = analyze_project([
+            (Path::new("results.f90"), results.as_slice()),
+            (Path::new("equations.f90"), gauge.as_slice()),
+            (Path::new("unrelated.f90"), unrelated.as_slice()),
+            (Path::new("cmbmain.f90"), source.as_slice()),
+        ])
+        .unwrap();
+        assert_eq!(project.types.resolve_chain(b"State", &[]), None);
+        let output = run_pass(source, &project, |document, context| {
+            declared(document, context).unwrap()
+        });
+        assert!(output
+            .windows(b"State%CAMB_PK".len())
+            .any(|window| window == b"State%CAMB_PK"));
+        assert!(!output
+            .windows(b"State%CAMB_Pk".len())
+            .any(|window| window == b"State%CAMB_Pk"));
+        assert!(output
+            .windows(b"Active%CAMB_PK".len())
+            .any(|window| window == b"Active%CAMB_PK"));
+    }
+
+    #[test]
     fn declared_names_do_not_leak_from_type_components() {
         let source = b"module C\ntype Foo\ninteger :: SIZE\nend type Foo\ncontains\nsubroutine report(x)\nreal, intent(in) :: x(:)\nprint *, SIZE(x)\nend subroutine report\nend module C\n";
         let output = crate::format_source(
@@ -963,7 +1269,7 @@ mod tests {
     }
 
     #[test]
-    fn local_case_does_not_apply_to_derived_type_components() {
+    fn unresolved_members_do_not_borrow_other_name_spaces() {
         let sources = [
             (
                 Path::new("global.f90"),
@@ -980,8 +1286,75 @@ mod tests {
             run_pass(source, &project, |document, context| {
                 declared(document, context).unwrap()
             }),
-            b"subroutine Work\nreal :: WINDOW\nWINDOW = RedWin%ComponentCase%Window_f_a(a, winamp)\nend subroutine Work\n"
+            b"subroutine Work\nreal :: WINDOW\nWINDOW = RedWin%componentcase%Window_f_a(a, winamp)\nend subroutine Work\n"
         );
+    }
+
+    #[test]
+    fn missing_owner_members_do_not_borrow_unrelated_bindings_or_symbols() {
+        let declarations = b"module declarations\n\
+type :: Other\n\
+contains\n\
+procedure :: RunCase\n\
+end type Other\n\
+integer :: ValueCase\n\
+end module declarations\n";
+        let source = b"program p\n\
+type(Unknown) :: item\n\
+call item%runcase()\n\
+item%valuecase = 1\n\
+end program p\n";
+        let project = analyze_project([
+            (Path::new("declarations.f90"), declarations.as_slice()),
+            (Path::new("use.f90"), source.as_slice()),
+        ])
+        .unwrap();
+        assert_eq!(
+            run_pass(source, &project, |document, context| {
+                declared(document, context).unwrap()
+            }),
+            source
+        );
+    }
+
+    #[test]
+    fn associate_aliases_propagate_indexed_selector_types_with_lexical_shadowing() {
+        let source = b"module SourceWindows\n\
+type :: TSourceWindow\n\
+contains\n\
+procedure :: Window_f_a\n\
+end type TSourceWindow\n\
+type :: TRedWin\n\
+class(TSourceWindow), pointer :: Window\n\
+end type TRedWin\n\
+type :: CAMBdata\n\
+type(TRedWin), allocatable :: Redshift_W(:)\n\
+end type CAMBdata\n\
+type :: Other\n\
+integer :: WrongCase\n\
+end type Other\n\
+contains\n\
+subroutine Work(State, OtherState)\n\
+class(CAMBdata) :: State\n\
+type(Other) :: OtherState\n\
+AssocBlock: associate(UnTyped => UnknownCall(1, 2), RedWin => State%Redshift_W(1))\n\
+call RedWin%window%window_F_A()\n\
+associate(RedWin => OtherState)\n\
+RedWin%wrongcase = 1\n\
+end associate\n\
+call RedWin%WINDOW%WINDOW_F_A()\n\
+end associate AssocBlock\n\
+call RedWin%WINDOW%WINDOW_F_A()\n\
+end subroutine Work\n\
+end module SourceWindows\n";
+        let project = analyze_project([(Path::new("associate.f90"), source.as_slice())]).unwrap();
+        let output = run_pass(source, &project, |document, context| {
+            declared(document, context).unwrap()
+        });
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(output.matches("RedWin%Window%Window_f_a()").count(), 2);
+        assert!(output.contains("RedWin%WrongCase = 1"));
+        assert!(output.contains("call RedWin%WINDOW%WINDOW_F_A()\nend subroutine Work"));
     }
 
     #[test]

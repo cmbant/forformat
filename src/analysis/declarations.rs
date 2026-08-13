@@ -51,6 +51,18 @@ pub struct FileFacts {
     pub macros: CaseMap,
     /// The declared type of each name, used to resolve `a%b%c` chains.
     pub types: TypeMaps,
+    /// Module associations visible in this file. These retain enough USE
+    /// information to resolve the owner of an imported derived-type value
+    /// without treating common names such as `state` as project-global.
+    imports: Vec<UseAssociation>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct UseAssociation {
+    module: Vec<u8>,
+    only: bool,
+    /// `(local_name, remote_name)`, normalized to lowercase.
+    names: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 /// The two declaration name sets consulted by the reference keyword pass.
@@ -184,6 +196,51 @@ impl FileFacts {
         self.declared_types.merge(&other.declared_types);
         self.macros.merge(&other.macros);
         self.types.merge(&other.types);
+        self.imports.extend(other.imports.iter().cloned());
+    }
+
+    /// Resolve a root name through this file's USE associations. Multiple
+    /// imports are accepted only when they agree on the derived type.
+    pub(crate) fn imported_variable_type(
+        &self,
+        project: &TypeMaps,
+        name: &[u8],
+    ) -> Option<Vec<u8>> {
+        let name = name.to_ascii_lowercase();
+        let mut resolved: Option<Vec<u8>> = None;
+        for association in &self.imports {
+            let explicit = association
+                .names
+                .iter()
+                .filter(|(local, _)| local == &name)
+                .map(|(_, remote)| remote.as_slice())
+                .collect::<Vec<_>>();
+            let hidden_by_rename = association
+                .names
+                .iter()
+                .any(|(local, remote)| local != remote && remote == &name);
+            let remotes: Vec<&[u8]> = if !explicit.is_empty() {
+                explicit
+            } else if !association.only && !hidden_by_rename {
+                vec![name.as_slice()]
+            } else {
+                Vec::new()
+            };
+            for remote in remotes {
+                let Some(candidate) = project.module_variable_type(&association.module, remote)
+                else {
+                    continue;
+                };
+                if resolved
+                    .as_ref()
+                    .is_some_and(|existing| existing.as_slice() != candidate)
+                {
+                    return None;
+                }
+                resolved = Some(candidate.to_vec());
+            }
+        }
+        resolved
     }
 }
 
@@ -202,6 +259,11 @@ pub struct TypeMaps {
     /// Variable or component name (lowercase) to its derived type (lowercase).
     pub variable_types: HashMap<Vec<u8>, Vec<u8>>,
     variable_type_ambiguities: HashSet<Vec<u8>>,
+    /// Module-qualified variables retain the namespace that a USE statement
+    /// needs. The unqualified summary above remains as a conservative fallback
+    /// when the whole project agrees on a root name's type.
+    module_variable_types: HashMap<(Vec<u8>, Vec<u8>), Vec<u8>>,
+    module_variable_type_ambiguities: HashSet<(Vec<u8>, Vec<u8>)>,
     /// `(type, component)` to the component's own derived type, all lowercase.
     /// This is what resolves the second and later links of an `a%b%c` chain.
     pub component_types: HashMap<(Vec<u8>, Vec<u8>), Vec<u8>>,
@@ -260,6 +322,12 @@ impl TypeMaps {
             &other.variable_type_ambiguities,
         );
         merge_component_type_map(
+            &mut self.module_variable_types,
+            &mut self.module_variable_type_ambiguities,
+            &other.module_variable_types,
+            &other.module_variable_type_ambiguities,
+        );
+        merge_component_type_map(
             &mut self.component_types,
             &mut self.component_type_ambiguities,
             &other.component_types,
@@ -304,22 +372,32 @@ impl TypeMaps {
         );
     }
 
+    fn insert_module_variable(&mut self, module: &[u8], name: &[u8], type_name: &[u8]) {
+        insert_agreed_component_type(
+            &mut self.module_variable_types,
+            &mut self.module_variable_type_ambiguities,
+            module,
+            name,
+            type_name,
+        );
+    }
+
+    fn module_variable_type(&self, module: &[u8], name: &[u8]) -> Option<&[u8]> {
+        let key = (module.to_ascii_lowercase(), name.to_ascii_lowercase());
+        if self.module_variable_type_ambiguities.contains(&key) {
+            return None;
+        }
+        self.module_variable_types.get(&key).map(Vec::as_slice)
+    }
+
     pub fn insert_component(&mut self, owner: &[u8], name: &[u8], type_name: &[u8]) {
-        let key = (owner.to_ascii_lowercase(), name.to_ascii_lowercase());
-        if self.component_type_ambiguities.contains(&key) {
-            return;
-        }
-        match self.component_types.get(&key) {
-            None => {
-                self.component_types
-                    .insert(key, type_name.to_ascii_lowercase());
-            }
-            Some(existing) if existing != &type_name.to_ascii_lowercase() => {
-                self.component_types.remove(&key);
-                self.component_type_ambiguities.insert(key);
-            }
-            _ => {}
-        }
+        insert_agreed_component_type(
+            &mut self.component_types,
+            &mut self.component_type_ambiguities,
+            owner,
+            name,
+            type_name,
+        );
     }
 
     pub fn insert_parent(&mut self, child: &[u8], parent: &[u8]) {
@@ -447,6 +525,30 @@ fn insert_agreed_type(
     }
 }
 
+fn insert_agreed_component_type(
+    map: &mut HashMap<(Vec<u8>, Vec<u8>), Vec<u8>>,
+    ambiguities: &mut HashSet<(Vec<u8>, Vec<u8>)>,
+    owner: &[u8],
+    name: &[u8],
+    type_name: &[u8],
+) {
+    let key = (owner.to_ascii_lowercase(), name.to_ascii_lowercase());
+    let value = type_name.to_ascii_lowercase();
+    if ambiguities.contains(&key) {
+        return;
+    }
+    match map.get(&key) {
+        None => {
+            map.insert(key, value);
+        }
+        Some(existing) if existing != &value => {
+            map.remove(&key);
+            ambiguities.insert(key);
+        }
+        _ => {}
+    }
+}
+
 fn merge_type_map(
     into: &mut HashMap<Vec<u8>, Vec<u8>>,
     ambiguities: &mut HashSet<Vec<u8>>,
@@ -551,6 +653,10 @@ pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
         // suppresses promotion into file_symbols.
         let file_scope_declaration = file_specification_scope
             .is_some_and(|scope| procedure_scope.is_none_or(|procedure| procedure == scope));
+        let declaring_module = file_specification_scope
+            .filter(|scope| scopes.scopes[*scope].kind == ScopeKind::Module)
+            .and_then(|scope| scopes.scopes[scope].name.as_deref())
+            .map(|name| name.to_ascii_lowercase());
         // Interface bodies are procedure signatures, not module variables.
         // The reference nevertheless sends their headers and declarations
         // through extract_procedure_cases, so keep their dummies and RESULT
@@ -559,13 +665,18 @@ pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
             if let Some((child, parent)) = type_definition_parent(&statement.text) {
                 facts.types.insert_parent(child, parent);
             }
-            use_statement(&statement.text, &mut facts.cases.symbols);
+            use_statement(
+                &statement.text,
+                &mut facts.cases.symbols,
+                &mut facts.imports,
+            );
             auxiliary_declaration(&statement.text, &mut facts.cases.symbols);
             entity_declaration(
                 &statement.text,
                 owner.as_deref(),
                 procedure.as_deref(),
                 file_scope_declaration,
+                declaring_module.as_deref(),
                 &mut facts,
             );
             if let Some(alias) = select_type_alias(&statement.text) {
@@ -998,6 +1109,7 @@ fn entity_declaration(
     owner: Option<&[u8]>,
     procedure: Option<&[u8]>,
     file_scope_declaration: bool,
+    declaring_module: Option<&[u8]>,
     facts: &mut FileFacts,
 ) {
     let tokens = tokenize(text, &mut LexState::default());
@@ -1031,6 +1143,7 @@ fn entity_declaration(
             owner,
             procedure,
             file_scope_declaration,
+            declaring_module,
             facts,
         );
         return;
@@ -1106,6 +1219,11 @@ fn entity_declaration(
                             } else {
                                 facts.types.insert_variable(token.text, declared);
                             }
+                            if let Some(module) = declaring_module {
+                                facts
+                                    .types
+                                    .insert_module_variable(module, token.text, declared);
+                            }
                         }
                     }
                 }
@@ -1123,6 +1241,7 @@ fn old_style_declaration(
     owner: Option<&[u8]>,
     procedure: Option<&[u8]>,
     file_scope_declaration: bool,
+    declaring_module: Option<&[u8]>,
     facts: &mut FileFacts,
 ) {
     let first = &tokens[first_index];
@@ -1204,6 +1323,11 @@ fn old_style_declaration(
                             .insert_procedure_local(procedure, token.text, declared_type);
                     } else {
                         facts.types.insert_variable(token.text, declared_type);
+                    }
+                    if let Some(module) = declaring_module {
+                        facts
+                            .types
+                            .insert_module_variable(module, token.text, declared_type);
                     }
                 }
             }
@@ -1314,40 +1438,78 @@ fn scope_names(
     }
 }
 
-/// The local names in a `USE ... ONLY:` list.  The remote side of a rename is
-/// recorded too: it is an authored identifier in the declaration and supplies
-/// spelling evidence for uses in this file.  The module name itself is not a
-/// declaration; only a separately declared module contributes to `modules`.
-fn use_statement(text: &[u8], symbols: &mut CaseMap) {
+/// Record both the authored names in a `USE` statement and the association
+/// needed to look up a module variable's derived type. The module name itself
+/// is not a declaration; only a separately declared module contributes to the
+/// module case table.
+fn use_statement(text: &[u8], symbols: &mut CaseMap, imports: &mut Vec<UseAssociation>) {
     let tokens = tokenize(text, &mut LexState::default());
     // A leading numeric statement label is not part of the statement.
     let first = usize::from(tokens.first().is_some_and(|t| t.kind == TokenKind::Number));
     if !tokens.get(first).is_some_and(|t| t.is_name(b"use")) {
         return;
     }
-    let Some(only) = tokens
+    let separator = tokens
         .iter()
-        .position(|token| token.depth == 0 && token.is_name(b"only"))
+        .enumerate()
+        .skip(first + 1)
+        .find(|(_, token)| token.depth == 0 && token.text == b"::")
+        .map(|(index, _)| index);
+    let module_start = separator.map_or(first + 1, |index| index + 1);
+    let Some((module_index, module)) = tokens
+        .iter()
+        .enumerate()
+        .skip(module_start)
+        .find(|(_, token)| token.depth == 0 && token.kind == TokenKind::Name)
     else {
         return;
     };
-    if tokens.get(only + 1).is_none_or(|token| token.text != b":") {
-        return;
-    }
-    let mut expect_name = true;
-    for token in tokens.iter().skip(only + 2) {
-        if token.depth != 0 {
-            continue;
+    let only = tokens
+        .iter()
+        .enumerate()
+        .skip(module_index + 1)
+        .find(|(_, token)| token.depth == 0 && token.is_name(b"only"))
+        .and_then(|(index, _)| {
+            tokens
+                .get(index + 1)
+                .is_some_and(|token| token.text == b":")
+                .then_some(index)
+        });
+    let list_start = only.map_or(module_index + 1, |index| index + 2);
+    let mut association = UseAssociation {
+        module: module.text.to_ascii_lowercase(),
+        only: only.is_some(),
+        names: Vec::new(),
+    };
+
+    let mut item_start = list_start;
+    for item_end in (list_start..=tokens.len()).filter(|index| {
+        *index == tokens.len()
+            || tokens[*index].depth == 0 && tokens[*index].kind == TokenKind::Comma
+    }) {
+        let item = &tokens[item_start..item_end];
+        let arrow = item.iter().position(|token| token.text == b"=>");
+        let local = item
+            .iter()
+            .take(arrow.unwrap_or(item.len()))
+            .find(|token| token.depth == 0 && token.kind == TokenKind::Name);
+        let remote = arrow.and_then(|arrow| {
+            item.iter()
+                .skip(arrow + 1)
+                .find(|token| token.depth == 0 && token.kind == TokenKind::Name)
+        });
+        if let Some(local) = local {
+            symbols.insert(local.text);
+            let remote = remote.unwrap_or(local);
+            symbols.insert(remote.text);
+            association.names.push((
+                local.text.to_ascii_lowercase(),
+                remote.text.to_ascii_lowercase(),
+            ));
         }
-        if token.kind == TokenKind::Comma {
-            expect_name = true;
-        } else if token.kind == TokenKind::Name && expect_name {
-            symbols.insert(token.text);
-            expect_name = false;
-        } else if token.text == b"=>" {
-            expect_name = true;
-        }
+        item_start = item_end.saturating_add(1);
     }
+    imports.push(association);
 }
 
 /// Statement forms whose entities are names but do not have a type-spec `::`.

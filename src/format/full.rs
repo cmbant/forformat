@@ -680,6 +680,14 @@ end module m
     }
 
     #[test]
+    fn full_mode_normalizes_the_final_newline() {
+        assert_eq!(full(|_| {}, b""), b"");
+        assert_eq!(full(|_| {}, b"X = 1"), b"X = 1\n");
+        assert_eq!(full(|_| {}, b"X = 1\n\n\n"), b"X = 1\n");
+        assert_eq!(full(|_| {}, b"X = 1\r\n\r\n"), b"X = 1\r\n");
+    }
+
+    #[test]
     fn a_long_statement_is_wrapped_within_its_budget() {
         let source =
             b"program p\ntotal = alpha + beta + gamma + delta + epsilon + zeta + eta + theta\nend program p\n";

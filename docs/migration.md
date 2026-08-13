@@ -50,11 +50,10 @@ the entry inside pre-commit's environment instead.
 The hook remains a CAMB-local hook, so its repository reference is `repo: local` and it has no
 `rev`. The version pin is `additional_dependencies`, not a guessed revision of this formatter's
 source repository. This source tree has no release tag or pre-commit hook manifest; using
-`repo: <this-repository-url>` (fill in the real remote once the repository is published) would make
-pre-commit install the source
-project itself, whose wheel build requires a prebuilt native binary. A separate published hook
-repository and release tag could be adopted later, but that is an owner/release decision, not a
-revision that can be inferred safely here.
+`repo: https://github.com/cmbant/forformat` with an untagged commit would make pre-commit install
+the source project itself, whose wheel build requires a prebuilt native binary. A separate
+published hook repository and release tag could be adopted later, but that is a release decision,
+not a revision that can be inferred safely here.
 
 Both CAMB hooks are replaced by the one below: `--full` does the standardize half itself, and
 leaving `standardize-fortran` in place would keep the Python dependency this port exists to remove.

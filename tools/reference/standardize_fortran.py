@@ -2471,17 +2471,17 @@ def lowercase_line(
     return "".join(output), quote
 
 
-def _modernize_array_constructor_delimiters(code: str) -> str:
+def _modernize_array_constructor_delimiters(code: str, *, format_statement: bool = False) -> str:
     """Modernize old ``(/ ... /)`` array constructors, but never FORMAT syntax."""
     # Slash is an edit descriptor inside FORMAT(...), where the same character
     # sequence is legal and has completely different semantics.
-    if FORMAT_STATEMENT_START.match(code):
+    if format_statement or FORMAT_STATEMENT_START.match(code):
         return code
     code = re.sub(r"\(\s*/\s*", "[", code)
     return re.sub(r"/\s*\)", "]", code)
 
 
-def _normalize_keyword_spacing_code(code: str) -> str:
+def _normalize_keyword_spacing_code(code: str, *, format_statement: bool = False) -> str:
     """Normalize keyword/layout spacing in an unquoted code segment."""
     if not code:
         return code
@@ -2492,8 +2492,10 @@ def _normalize_keyword_spacing_code(code: str) -> str:
     # avoid dispatching dozens of regex substitutions for unrelated statements.
     if "common" in lowered and "/" in code:
         code = COMMON_BLOCK_PREFIX.sub(lambda match: f"{match.group(1)} /{match.group(2)}/ ", code, count=1)
-    if "(" in code and "/" in code:
-        code = _modernize_array_constructor_delimiters(code)
+    # The closing ``/)`` may be on a different physical line from the opening
+    # ``(/``.  Check for slash alone rather than requiring ``(`` on this line.
+    if "/" in code:
+        code = _modernize_array_constructor_delimiters(code, format_statement=format_statement)
     if "go" in lowered:
         code = GO_TO.sub("goto", code)
 
@@ -2567,12 +2569,17 @@ def _normalize_keyword_spacing_code(code: str) -> str:
     return code
 
 
-def normalize_keyword_spacing(line: str, quote: str | None = None) -> tuple[str, str | None]:
+def normalize_keyword_spacing(
+    line: str,
+    quote: str | None = None,
+    *,
+    format_statement: bool = False,
+) -> tuple[str, str | None]:
     """Normalize compound keywords and spacing around Fortran syntax delimiters."""
     # The overwhelming common case contains no literal or comment, so avoid the
     # segment-building loop entirely.
     if quote is None and "'" not in line and '"' not in line and "!" not in line:
-        return _normalize_keyword_spacing_code(line), None
+        return _normalize_keyword_spacing_code(line, format_statement=format_statement), None
 
     output: list[str] = []
     segment_start = 0
@@ -2589,17 +2596,31 @@ def normalize_keyword_spacing(line: str, quote: str | None = None) -> tuple[str,
                 segment_start = index + 1
             index += 1
         elif char in "\"'":
-            output.append(_normalize_keyword_spacing_code(line[segment_start:index]))
+            output.append(
+                _normalize_keyword_spacing_code(
+                    line[segment_start:index], format_statement=format_statement
+                )
+            )
             quote = char
             segment_start = index
             index += 1
         elif char == "!":
-            output.append(_normalize_keyword_spacing_code(line[segment_start:index]))
+            output.append(
+                _normalize_keyword_spacing_code(
+                    line[segment_start:index], format_statement=format_statement
+                )
+            )
             output.append(line[index:])
             return "".join(output), quote
         else:
             index += 1
-    output.append(line[segment_start:] if quote else _normalize_keyword_spacing_code(line[segment_start:]))
+    output.append(
+        line[segment_start:]
+        if quote
+        else _normalize_keyword_spacing_code(
+            line[segment_start:], format_statement=format_statement
+        )
+    )
     return "".join(output), quote
 
 
@@ -4018,6 +4039,7 @@ def format_text(
         procedure_cases = extract_procedure_cases(source)
     scoped_declared_names = extract_scoped_declared_names(source)
     prefix = ""
+    format_statement = False
     lines: list[str] = []
     source_lines, source_states = _scan_source(source)
     active_procedures = _active_procedures_by_line(procedure_cases, len(source_states))
@@ -4050,7 +4072,14 @@ def format_text(
             file_declared_names=declared_names_per_line[line_number],
             uppercase_single_l=uppercase_single_l,
         )
-        normalized, _ = normalize_keyword_spacing(lowercase, starting_quote)
+        format_statement = state.continuation_in and format_statement
+        if not state.continuation_in:
+            format_statement = bool(FORMAT_STATEMENT_START.match(code_context(line)))
+        normalized, _ = normalize_keyword_spacing(
+            lowercase,
+            starting_quote,
+            format_statement=format_statement,
+        )
         normalized = normalize_write_output_spacing(normalized, starting_quote)
         if not is_preprocessor_line(line):
             normalized, _ = normalize_delimiter_spacing(normalized, starting_quote)

@@ -6,9 +6,9 @@ historic-corpus differential's pre-fix comparison mode.
 
 | File | SHA-256 |
 |---|---|
-| `standardize_fortran.py` | `191f346ee9d0a327a6b0e530c9a8cc4ef0077e44607abb60d82d8e782e33421b` |
+| `standardize_fortran.py` | `43d44b07086c3b72cc31db1b1d245ffef64069da6b492f7a3eb6741d95c25c76` |
 | `standardize_fortran_original.py` | `8286229d8e11a8e46b50703c0706079d3c3a935edd9501a22798bbbdb8ed935e` |
-| `test_standardize_fortran.py` | `d30c5c28893d75855206a100abae5949afa7195fb92d8e42132d25a2209970d0` |
+| `test_standardize_fortran.py` | `09476c2cdd190259215118c0ccca5f3e46786c11aabae3928caf29046f0201cc` |
 | `findent_fortran.py` | `62785d11868e736b255e149f915b7de70d48f1075fb061846d2020fc36cede3b` |
 
 CAMB's own `scripts/standardize_fortran.py` and `scripts/test_standardize_fortran.py` contain four
@@ -35,9 +35,9 @@ appears twice on purpose; the last wins.
 
 ```sh
 sha256sum -c <<'EOF'
-191f346ee9d0a327a6b0e530c9a8cc4ef0077e44607abb60d82d8e782e33421b  tools/reference/standardize_fortran.py
+43d44b07086c3b72cc31db1b1d245ffef64069da6b492f7a3eb6741d95c25c76  tools/reference/standardize_fortran.py
 8286229d8e11a8e46b50703c0706079d3c3a935edd9501a22798bbbdb8ed935e  tools/reference/standardize_fortran_original.py
-d30c5c28893d75855206a100abae5949afa7195fb92d8e42132d25a2209970d0  tools/reference/test_standardize_fortran.py
+09476c2cdd190259215118c0ccca5f3e46786c11aabae3928caf29046f0201cc  tools/reference/test_standardize_fortran.py
 62785d11868e736b255e149f915b7de70d48f1075fb061846d2020fc36cede3b  tools/reference/findent_fortran.py
 EOF
 ```
@@ -54,4 +54,4 @@ Run from the CAMB root:
 python3 -m unittest scripts.test_standardize_fortran
 ```
 
-CAMB's own suite reports **89 tests, 0 failures, 0 errors**.
+CAMB's own suite reports **91 tests, 0 failures, 0 errors**.

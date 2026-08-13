@@ -1564,6 +1564,25 @@ end program p
         self.assertEqual(format_text(source, wrap=False), "l = [1, 2, 3]\nprint *, l\n")
         self.assertEqual(format_text(source, wrap=False, uppercase_single_l=True), "L = [1, 2, 3]\nprint *, L\n")
 
+    def test_modernizes_multiline_array_constructors(self) -> None:
+        source = """\
+real :: values(2) = (/ &
+  1.0, &
+  2.0 /)
+10 format(2x, &
+ /)
+"""
+        self.assertEqual(
+            format_text(source, wrap=False),
+            """\
+real :: values(2) = [ &
+  1.0, &
+  2.0]
+10 format(2x, &
+ /)
+""",
+        )
+
     def test_removes_terminal_function_and_subroutine_returns(self) -> None:
         source = """\
 subroutine work
