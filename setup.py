@@ -67,7 +67,8 @@ class bdist_wheel_with_binary(bdist_wheel):
 
     def get_tag(self) -> tuple[str, str, str]:
         _, _, platform = super().get_tag()
-        return "py3", "none", platform
+        override = os.environ.get("FORFORMAT_WHEEL_PLATFORM_TAG")
+        return "py3", "none", override or platform
 
 
 setup(

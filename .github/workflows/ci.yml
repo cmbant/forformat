@@ -47,6 +47,7 @@ jobs:
 
   python-wheels:
     name: Python wheel (${{ matrix.platform }})
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -54,6 +55,8 @@ jobs:
         include:
           - os: ubuntu-latest
             platform: linux-x86_64
+            target: x86_64-unknown-linux-musl
+            wheel_platform_tag: manylinux_2_17_x86_64.musllinux_1_2_x86_64
           - os: macos-13
             platform: macos-x86_64
           - os: macos-14
@@ -68,9 +71,28 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-      - run: cargo build --locked --release
+      - name: Install cross
+        if: matrix.target != ''
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+      - name: Build release binary
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.target }}" ]; then
+            cross build --locked --release --target ${{ matrix.target }}
+          else
+            cargo build --locked --release
+          fi
       - run: python -m pip install --upgrade build
-      - run: python -m build --wheel --outdir dist
+      - name: Build wheel
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.target }}" ]; then
+            export FORFORMAT_BINARY="target/${{ matrix.target }}/release/forformat"
+          fi
+          export FORFORMAT_WHEEL_PLATFORM_TAG="${{ matrix.wheel_platform_tag }}"
+          python -m build --wheel --outdir dist
       - uses: actions/upload-artifact@v4
         with:
           name: forformat-wheel-${{ matrix.platform }}
@@ -96,6 +118,7 @@ jobs:
 
   static-artifacts:
     name: static artifact (${{ matrix.target }})
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -127,6 +150,7 @@ jobs:
 
   windows-artifact:
     name: Windows release artifact
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: windows-latest
     env:
       RUSTFLAGS: -C debuginfo=0 -C strip=debuginfo -C link-arg=/Brepro -C link-arg=/DEBUG:NONE
@@ -160,6 +184,7 @@ jobs:
 
   artifact-verification:
     name: verify uploaded release artifacts
+    if: startsWith(github.ref, 'refs/tags/')
     needs: [static-artifacts, windows-artifact]
     runs-on: ubuntu-latest
     steps:
