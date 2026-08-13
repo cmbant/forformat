@@ -707,6 +707,7 @@ class FileDeclarationCases:
     type_component_cases: Mapping[tuple[str, str], str] = field(default_factory=dict)
     variable_type_cases: Mapping[str, str] = field(default_factory=dict)
     type_component_type_cases: Mapping[tuple[str, str], str] = field(default_factory=dict)
+    implicit_policies: tuple["ImplicitScopePolicy", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -728,6 +729,16 @@ class NamedScopeCase:
     start_line: int
     end_line: int
     name: str
+
+
+@dataclass(frozen=True)
+class ImplicitScopePolicy:
+    """The implicit-typing permission mask active in one scoping unit."""
+
+    start_line: int
+    end_line: int
+    permitted: int
+    uncertain: bool = False
 
 
 @dataclass(frozen=True)
@@ -1151,6 +1162,15 @@ MODULE_DECLARATION = re.compile(
     rf"^\s*module\s+(?!(?:procedure|subroutine|function)\b)({IDENTIFIER})\b",
     re.IGNORECASE,
 )
+SUBMODULE_DECLARATION = re.compile(
+    rf"^\s*submodule\s*\([^)]*\)\s*({IDENTIFIER})\b",
+    re.IGNORECASE,
+)
+IMPLICIT_SCOPE_END = re.compile(
+    r"^\s*end\s*(module|submodule|program|function|subroutine|interface)\b",
+    re.IGNORECASE,
+)
+IMPLICIT_STATEMENT = re.compile(r"^\s*implicit\b(.*)$", re.IGNORECASE)
 PROGRAM_UNIT_END = re.compile(r"^\s*end\s+(?:module|program|function|subroutine)\b", re.IGNORECASE)
 TYPE_DEFINITION_START = re.compile(rf"^\s*type(?!\s+is\b)(?:\s*,[^:]*)?\s*(?:::)?\s*{IDENTIFIER}\b", re.IGNORECASE)
 TYPE_DEFINITION_END = re.compile(r"^\s*end\s*type\b", re.IGNORECASE)
@@ -1195,6 +1215,220 @@ def _active_procedures_by_line(
             active.pop()
         result.append(active[-1] if active else None)
     return tuple(result)
+
+
+_ALL_IMPLICIT_LETTERS = (1 << 26) - 1
+
+
+def _implicit_clauses(text: str) -> tuple[str, ...] | None:
+    """Split an explicit IMPLICIT statement at top-level commas."""
+    clauses: list[str] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(text):
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                return None
+            depth -= 1
+        elif char == "," and depth == 0:
+            clauses.append(text[start:index].strip())
+            start = index + 1
+    if depth != 0:
+        return None
+    clauses.append(text[start:].strip())
+    return tuple(clauses) if all(clauses) else None
+
+
+def _implicit_clause_ranges(clause: str) -> tuple[tuple[str, str], ...] | None:
+    """Validate one declaration-type-spec and return its final letter list."""
+    if not clause.endswith(")"):
+        return None
+    depth = 0
+    open_index = -1
+    for index in range(len(clause) - 1, -1, -1):
+        char = clause[index]
+        if char == ")":
+            depth += 1
+        elif char == "(":
+            depth -= 1
+            if depth == 0:
+                open_index = index
+                break
+            if depth < 0:
+                return None
+    if open_index <= 0 or depth != 0:
+        return None
+    type_spec = clause[:open_index].strip()
+    supported_type = re.fullmatch(
+        r"(?:"
+        r"(?:integer|real|complex|logical|character)(?:\s*(?:\([^()]*\)|\*\s*[A-Za-z0-9_]+))?"
+        r"|double\s+(?:precision|complex)(?:\s*(?:\([^()]*\)|\*\s*[A-Za-z0-9_]+))?"
+        r"|(?:type|class)\s*\([^()]*\)"
+        r")",
+        type_spec,
+        re.IGNORECASE,
+    )
+    if supported_type is None:
+        return None
+    group = clause[open_index + 1 : -1]
+    if re.fullmatch(r"\s*[A-Za-z](?:\s*-\s*[A-Za-z])?(?:\s*,\s*[A-Za-z](?:\s*-\s*[A-Za-z])?)*\s*", group) is None:
+        return None
+    ranges: list[tuple[str, str]] = []
+    for item in group.split(","):
+        endpoints = [part.strip().lower() for part in item.split("-", 1)]
+        ranges.append((endpoints[0], endpoints[-1]))
+    return tuple(ranges)
+
+
+def _apply_implicit_policy(permitted: int, statement: str) -> int | None:
+    """Apply one supported IMPLICIT statement; return ``None`` when uncertain."""
+    match = IMPLICIT_STATEMENT.match(code_context(statement))
+    if match is None:
+        return permitted
+    body = match.group(1).strip()
+    none = re.fullmatch(r"none\s*(?:\(([^()]*)\))?", body, re.IGNORECASE)
+    if none:
+        arguments = none.group(1)
+        if arguments is None:
+            return 0
+        names = [name.strip().lower() for name in arguments.split(",")]
+        if not names or any(name not in {"type", "external"} for name in names):
+            return None
+        return 0 if "type" in names else permitted
+    if body.lower().startswith("none"):
+        return None
+
+    clauses = _implicit_clauses(body)
+    if clauses is None:
+        return None
+    updated = permitted
+    for clause in clauses:
+        ranges = _implicit_clause_ranges(clause)
+        if ranges is None:
+            return None
+        for first_name, last_name in ranges:
+            first = ord(first_name) - ord("a")
+            last = ord(last_name) - ord("a")
+            if first > last:
+                return None
+            for letter in range(first, last + 1):
+                updated |= 1 << letter
+    return updated
+
+
+def extract_implicit_policies(source: str) -> tuple[ImplicitScopePolicy, ...]:
+    """Extract inherited implicit-typing permissions for every scoping unit."""
+    _, states = _scan_source(source)
+    last_line = max(0, len(states) - 1)
+    records: list[dict[str, object]] = [
+        {
+            "kind": "file",
+            "start_line": 0,
+            "end_line": last_line,
+            "parent": None,
+            "statements": [],
+        }
+    ]
+    stack = [0]
+
+    for statement in _code_statements(source):
+        text = statement.text
+        end = IMPLICIT_SCOPE_END.match(text)
+        bare_end = BARE_PROGRAM_UNIT_END.match(text)
+        if end or bare_end:
+            kind = end.group(1).lower() if end else None
+            for stack_index in range(len(stack) - 1, 0, -1):
+                record = records[stack[stack_index]]
+                closes_bare_unit = kind is None and record["kind"] in {"function", "subroutine", "program"}
+                if closes_bare_unit or record["kind"] == kind:
+                    record["end_line"] = statement.end_line
+                    del stack[stack_index:]
+                    break
+            continue
+
+        header = _scope_header(text)
+        module = MODULE_DECLARATION.match(text)
+        submodule = SUBMODULE_DECLARATION.match(text)
+        interface = INTERFACE_START.match(text)
+        if header:
+            kind = header[0]
+        elif module:
+            kind = "module"
+        elif submodule:
+            kind = "submodule"
+        elif interface:
+            kind = "interface"
+        else:
+            kind = None
+        if kind is not None:
+            records.append(
+                {
+                    "kind": kind,
+                    "start_line": statement.start_line,
+                    "end_line": last_line,
+                    "parent": stack[-1],
+                    "statements": [],
+                }
+            )
+            stack.append(len(records) - 1)
+            continue
+
+        if IMPLICIT_STATEMENT.match(code_context(text)):
+            records[stack[-1]]["statements"].append(text)
+
+    result: list[ImplicitScopePolicy] = []
+    for record in records:
+        parent = record["parent"]
+        if record["kind"] in {"file", "interface"} or parent is None:
+            permitted = _ALL_IMPLICIT_LETTERS
+            uncertain = False
+        else:
+            assert int(parent) < len(result)
+            inherited = result[int(parent)]
+            permitted = inherited.permitted
+            uncertain = inherited.uncertain
+        if not uncertain:
+            for statement in record["statements"]:
+                updated = _apply_implicit_policy(permitted, str(statement))
+                if updated is None:
+                    permitted = _ALL_IMPLICIT_LETTERS
+                    uncertain = True
+                    break
+                permitted = updated
+        result.append(
+            ImplicitScopePolicy(
+                int(record["start_line"]),
+                int(record["end_line"]),
+                permitted,
+                uncertain,
+            )
+        )
+    return tuple(result)
+
+
+def _implicit_policies_by_line(
+    policies: Iterable[ImplicitScopePolicy], line_count: int
+) -> tuple[int, ...]:
+    """Return the innermost implicit permission mask for every physical line."""
+    ordered = tuple(policies)
+    return tuple(
+        next(
+            (
+                policy.permitted
+                for policy in reversed(ordered)
+                if policy.start_line <= line_number <= policy.end_line
+            ),
+            _ALL_IMPLICIT_LETTERS,
+        )
+        for line_number in range(line_count)
+    )
+
+
+def _implicit_name_permitted(permitted: int, name: str) -> bool:
+    first = name[:1].lower()
+    return not ("a" <= first <= "z") or bool(permitted & (1 << (ord(first) - ord("a"))))
 
 
 def _declared_names_by_line(scoped_names: Iterable[ScopedDeclaredNames], line_count: int) -> tuple[frozenset[str], ...]:
@@ -1698,6 +1932,7 @@ def collect_declaration_cases(
     component_type_occurrences: dict[tuple[str, str], set[str]] = {}
     procedure_cases = {path: extract_procedure_cases(sources[path]) for path in targets}
     scope_cases = {path: extract_named_scope_cases(sources[path]) for path in targets}
+    implicit_policies = {path: extract_implicit_policies(sources[path]) for path in targets}
     for path, source in sources.items():
         summary = _declaration_summary(source)
         for declaration in summary.declared_names:
@@ -1748,6 +1983,7 @@ def collect_declaration_cases(
             type_component_cases,
             variable_type_cases,
             resolved_component_types,
+            implicit_policies[path],
         )
     return cases
 
@@ -1823,6 +2059,7 @@ def replace_declared_cases(
     variable_type_cases: Mapping[str, str] | None = None,
     type_component_type_cases: Mapping[tuple[str, str], str] | None = None,
     preprocessor_names: Collection[str] = frozenset(),
+    implicit_policies: Iterable[ImplicitScopePolicy] = (),
 ) -> str:
     """Match declaration case in USE statements and owner-resolved members."""
     procedure_cases = tuple(procedure_cases)
@@ -1833,6 +2070,7 @@ def replace_declared_cases(
     type_procedure_cases = type_procedure_cases or {}
     type_component_cases = type_component_cases or {}
     type_component_type_cases = type_component_type_cases or {}
+    top_level_cases = _top_level_cases(source)
     if (
         not module_cases
         and not symbol_cases
@@ -1849,6 +2087,19 @@ def replace_declared_cases(
     prefix = ""
     _, states = _scan_source(source)
     active_procedures = _active_procedures_by_line(procedure_cases, len(states))
+    visible_procedures = tuple(
+        tuple(
+            procedure
+            for procedure in procedure_cases
+            if procedure.start_line <= line_number <= procedure.end_line
+        )
+        for line_number in range(len(states))
+    )
+    scoped_declared_names = extract_scoped_declared_names(source)
+    declared_names_per_line = _declared_names_by_line(scoped_declared_names, len(states))
+    implicit_per_line = _implicit_policies_by_line(
+        tuple(implicit_policies) or extract_implicit_policies(source), len(states)
+    )
     end_scope_by_line = {scope.end_line: scope for scope in scope_cases}
     for state in states:
         line_number = state.number
@@ -1862,8 +2113,6 @@ def replace_declared_cases(
         sentinel = line[:sentinel_start] if sentinel_start is not None else ""
         case_line = line[sentinel_start:] if sentinel_start is not None else line
         active_procedure = active_procedures[line_number]
-        local_cases = active_procedure.local_cases if active_procedure else {}
-        local_names = active_procedure.local_names if active_procedure else frozenset()
         starting_quote = state.quote_in
         quote = starting_quote
         context_line = blank_leading_continuation(case_line) if prefix else case_line
@@ -1937,9 +2186,26 @@ def replace_declared_cases(
                 elif use_match:
                     replacement = symbol_cases.get(normalized)
                 else:
-                    replacement = local_cases.get(normalized)
-                    if replacement is None and normalized not in local_names and normalized not in INTRINSIC_NAMES:
-                        replacement = symbol_cases.get(normalized)
+                    replacement = next(
+                        (
+                            spelling
+                            for procedure in reversed(visible_procedures[line_number])
+                            if (spelling := procedure.local_cases.get(normalized)) is not None
+                        ),
+                        None,
+                    )
+                    governing_local = any(
+                        normalized in procedure.local_names
+                        for procedure in visible_procedures[line_number]
+                    )
+                    if replacement is None and not governing_local and normalized not in INTRINSIC_NAMES:
+                        if (
+                            normalized in top_level_cases
+                            or normalized in declared_names_per_line[line_number]
+                            or _has_explicit_project_context(context, absolute_start, absolute_start + len(token))
+                            or not _implicit_name_permitted(implicit_per_line[line_number], normalized)
+                        ):
+                            replacement = symbol_cases.get(normalized)
                 line_output.append(replacement or token)
                 index = token_end
             else:
@@ -1976,6 +2242,23 @@ def _preceded_by_percent(text: str, index: int) -> bool:
     while index >= 0 and text[index].isspace():
         index -= 1
     return index >= 0 and text[index] == "%"
+
+
+def _has_explicit_project_context(context: str, start: int, end: int) -> bool:
+    """Return whether syntax identifies a project symbol as a non-local entity."""
+    previous = start - 1
+    while previous >= 0 and context[previous].isspace():
+        previous -= 1
+    following = end
+    while following < len(context) and context[following].isspace():
+        following += 1
+
+    if previous >= 0 and context[previous] == "_":
+        return True
+    if following < len(context) and context[following] == "%":
+        return True
+    prefix = context[:start]
+    return re.search(r"\b(?:call|type|class|extends)\s*(?:\(\s*)?$", prefix, re.IGNORECASE) is not None
 
 
 def is_real_literal_exponent_marker(context: str, index: int, token: str) -> bool:
@@ -4005,6 +4288,7 @@ def format_text(
     type_component_type_cases: Mapping[tuple[str, str], str] | None = None,
     uppercase_single_l: bool = False,
     macro_cases: Mapping[str, str] | Collection[str] = (),
+    implicit_policies: Iterable[ImplicitScopePolicy] = (),
 ) -> str:
     """Format Fortran source text without reading from or writing to a file."""
     line_ending = dominant_line_ending(original)
@@ -4028,6 +4312,7 @@ def format_text(
         variable_type_cases,
         type_component_type_cases,
         preprocessor_names,
+        implicit_policies,
     )
     joined_source = join_lexical_token_continuations(source)
     lexical_lines_changed = joined_source != source
@@ -4135,6 +4420,7 @@ def lowercase_file(
     type_component_type_cases: Mapping[tuple[str, str], str] | None = None,
     uppercase_single_l: bool = False,
     macro_cases: Mapping[str, str] | Collection[str] = (),
+    implicit_policies: Iterable[ImplicitScopePolicy] = (),
 ) -> bool:
     """Rewrite *path* and return whether its contents changed."""
     original = read_text_preserving_newlines(path)
@@ -4151,6 +4437,7 @@ def lowercase_file(
         type_component_type_cases=type_component_type_cases,
         uppercase_single_l=uppercase_single_l,
         macro_cases=macro_cases,
+        implicit_policies=implicit_policies,
     )
     if updated == original:
         return False
@@ -4304,6 +4591,7 @@ def main() -> int:
                 type_component_type_cases=cases.type_component_type_cases,
                 uppercase_single_l=args.uppercase_single_l,
                 macro_cases=macro_cases,
+                implicit_policies=cases.implicit_policies,
             )
         )
         return 0
@@ -4334,6 +4622,7 @@ def main() -> int:
                 type_component_type_cases=cases.type_component_type_cases,
                 uppercase_single_l=args.uppercase_single_l,
                 macro_cases=macro_cases,
+                implicit_policies=cases.implicit_policies,
             )
         )
         return 0
@@ -4374,6 +4663,7 @@ def main() -> int:
             type_component_type_cases=cases.type_component_type_cases,
             uppercase_single_l=args.uppercase_single_l,
             macro_cases=macro_cases,
+            implicit_policies=cases.implicit_policies,
         )
         if args.check or args.diff:
             if formatted != original:

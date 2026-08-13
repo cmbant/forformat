@@ -1,33 +1,54 @@
 # forformat
 
-`forformat` is a Python-installable formatter for free-form Fortran source. It is a clean-room
-Rust implementation of the core indentation behavior of [findent](https://github.com/cmbant/findent),
-with an optional full-format mode that also normalizes selected lexical details and wraps long
-statements.
+[![CI](https://github.com/cmbant/forformat/actions/workflows/ci.yml/badge.svg)](https://github.com/cmbant/forformat/actions/workflows/ci.yml)
 
-The Python package installs the `forformat` command and includes a native executable in its wheel,
-so users do not need Rust or a Fortran compiler. It is a command-line package rather than an
-importable Python formatting library.
+`forformat` is a standalone formatter for free-form Fortran. Its native implementation is written
+in Rust and provides findent-compatible indentation together with an optional full-format mode for
+lexical normalization and wrapping long statements.
+
+The repository builds both the `forformat` Rust binary and a Python package that bundles that binary.
+Installing a published Python wheel does not require Rust or a Fortran compiler. `forformat` is a
+command-line formatter, not an importable Python formatting library.
 
 ## Install
+
+### From PyPI
+
+When a release is published, install the command with:
 
 ```sh
 python -m pip install forformat
 ```
 
-For a release artifact before the package is published on PyPI, install the compatible wheel by
-path instead:
-
-```sh
-python -m pip install /path/to/forformat-0.1.0-py3-none-linux_x86_64.whl
-```
-
-The package requires Python 3.9 or newer and currently provides platform-specific wheels. Verify
-the installation with:
+The package requires Python 3.9 or newer. Check the installation with:
 
 ```sh
 forformat --version
 ```
+
+Wheels contain a platform-specific native executable. If `forformat` is not yet available for your
+platform on PyPI, build a wheel from a source checkout as described below.
+
+### From source
+
+To build and run the native formatter, install Rust 1.85 or newer and use Cargo:
+
+```sh
+cargo build --locked --release
+./target/release/forformat --version
+```
+
+To build the Python wheel as well, use Python 3.9 or newer and the Python build frontend:
+
+```sh
+cargo build --locked --release
+python -m pip install --upgrade build
+python -m build --wheel --outdir dist
+python -m pip install dist/forformat-*.whl
+```
+
+The wheel build packages the already-built `target/release/forformat` executable. A source build
+therefore needs Rust; an installed wheel does not.
 
 ## Use
 
@@ -38,72 +59,95 @@ forformat src/module.f90
 forformat src/*.f90
 ```
 
-For pipelines, read from standard input and write to standard output:
+Use standard input and output when composing the formatter with other tools:
 
 ```sh
 forformat --stdin < src/module.f90 > /tmp/module.f90
 forformat --stdout src/module.f90 > /tmp/module.f90
 ```
 
-Use `--check` in CI to fail when files need formatting, or `--diff` to print unified diffs:
+Use `--check` in CI or pre-commit, and `--diff` to review changes without modifying files:
 
 ```sh
 forformat --check src/*.f90
 forformat --diff src/*.f90
 ```
 
-The default is `--full`. Use `--indent-only` for findent-compatible indentation and trailing
-whitespace handling, or `--help` for the complete option list. Fixed-form Fortran and automatic
-format detection are not supported.
+The default is `--full`. The main modes are:
 
-## Rust formatter
+- `--full`: findent-compatible layout plus lexical normalization and statement wrapping.
+- `--indent-only`: indentation and trailing-horizontal-whitespace handling compatible with findent.
+- `--normalize-only`: lexical normalization without structural layout.
 
-The repository also contains the standalone Rust implementation used to build the Python wheel.
-It reads bytes from stdin and writes formatted bytes to stdout. The default is full formatting: it
-applies findent-compatible indentation plus the documented lexical normalization and wrapping
-passes.
+Run `forformat --help` for indentation controls, wrapping options, preprocessor definitions, and
+the complete compatibility option set. Fixed-form Fortran and automatic format detection are not
+supported.
 
-```sh
-cargo run --release -- -ifree < source.f90 > source.f90.formatted
-```
+### Project context
 
-Use `--indent-only` when adopting only findent-compatible indentation and trailing-horizontal-space
-handling. Use `--full` explicitly in scripts that want to state the full-format policy; it is the
-default. Full mode intentionally differs from the reference for multiline array
-constructors, conservative comment bodies, kind suffixes on continuation lines, governing
-declarations, `!$` sentinel spacing, and `--ws_remred` inside valid literals. The complete rationale
-and examples are in [docs/compatibility.md](https://github.com/cmbant/forformat/blob/main/docs/compatibility.md);
-migration guidance is in
-[docs/migration.md](https://github.com/cmbant/forformat/blob/main/docs/migration.md).
+When explicit paths are supplied, the formatter scans the current Git checkout for free-form
+Fortran sources and uses declarations from those files to resolve names during full formatting. Only
+the paths supplied on the command line are changed. This makes project-wide formatting useful when
+a declaration in one module controls the spelling or formatting of code in another file.
 
-With the reference installation available, `tools/differential_free.sh target/release/forformat`
-checks the retained legacy fixtures against findent 4.3.7 byte-for-byte.
-
-The public library API is `forformat::format_source` / `forformat::format_to` /
-`forformat::format_to_owned`. Fixed-form conversion,
-relabeling, dependency extraction, and editor payload generation are intentionally out of scope;
-see [docs/compatibility.md](https://github.com/cmbant/forformat/blob/main/docs/compatibility.md).
-Migration notes and the supported-option matrix are in
-[docs/migration.md](https://github.com/cmbant/forformat/blob/main/docs/migration.md).
-
-The formatter is a clean-room Rust reimplementation informed by findent 4.3.7. Attribution and the
-BSD-3-Clause terms are included in
-[NOTICE](https://github.com/cmbant/forformat/blob/main/NOTICE) and
-[LICENSE-THIRD-PARTY](https://github.com/cmbant/forformat/blob/main/LICENSE-THIRD-PARTY); this
-project's own license is [LICENSE](https://github.com/cmbant/forformat/blob/main/LICENSE).
-
-## Development container
-
-This workspace builds the current native Findent source from the SourceForge
-SVN trunk during the devcontainer image build. The resulting `findent` and
-`wfindent` commands are installed in `/usr/local/bin`.
-
-Open this folder in VS Code and run **Dev Containers: Rebuild and Reopen in
-Container**. Verify the installation with:
+For independent file processing, disable repository scanning with `--isolated`:
 
 ```sh
-findent -h
-wfindent -h
+forformat --isolated src/module.f90
+forformat --isolated --stdout src/module.f90 > /tmp/module.f90
 ```
 
-The checked-out source remains available in `/opt/findent` for inspection.
+To format every tracked free-form Fortran source in a checkout, use:
+
+```sh
+forformat --all
+```
+
+## Rust library
+
+The Rust crate also exposes the core formatter for applications that need an in-memory API:
+
+```rust
+let result = forformat::format_source(source, &config)?;
+```
+
+The public entry points are `forformat::format_source`, `forformat::format_source_with_context`,
+`forformat::format_to`, and `forformat::format_to_owned`. The library is byte-oriented: it preserves
+source bytes outside the formatting contract, including non-UTF-8 bytes in comments and strings.
+
+## Development
+
+The main implementation is under `src/`; the Python wheel launcher is under `forformat_runner/`.
+Tests and golden fixtures are in `tests/`. The frozen Python reference and differential tools are
+in `tools/reference/`.
+
+Run the normal local checks with:
+
+```sh
+cargo test --locked --all-targets
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
+```
+
+For changes to full-mode normalization, wrapping, or layout, also run the invariant and corpus
+checks when the CAMB verification checkout is available:
+
+```sh
+python3 tools/check_invariants.py
+sh tools/check_camb_corpus.sh
+```
+
+The design, compatibility boundaries, migration notes, and file-workflow details are documented in
+[`docs/compatibility.md`](docs/compatibility.md), [`docs/migration.md`](docs/migration.md), and
+[`docs/file-workflow.md`](docs/file-workflow.md). The formatter's pipeline and idempotence
+invariants are described at the top of [`src/format/full.rs`](src/format/full.rs).
+
+## Relationship to findent
+
+`forformat` is a clean-room Rust reimplementation informed by findent 4.3.7. `--indent-only` is
+the findent-compatible indentation contract; full mode intentionally adds behavior beyond that
+contract. See the compatibility document for the reviewed differences and migration guidance.
+
+The project is licensed under the BSD-3-Clause license. Attribution for the findent reference and
+the applicable third-party terms are in [`NOTICE`](NOTICE) and
+[`LICENSE-THIRD-PARTY`](LICENSE-THIRD-PARTY); the project license is [`LICENSE`](LICENSE).

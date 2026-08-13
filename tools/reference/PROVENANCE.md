@@ -1,21 +1,24 @@
 # Reference tools
 
-The current `standardize_fortran.py` is the single Python reference, synced byte-for-byte from
-CAMB's committed script. Nothing in `src/` calls it. The original snapshot is retained for the
-historic-corpus differential's pre-fix comparison mode.
+The current `standardize_fortran.py` is the single Python reference, derived from CAMB's committed
+script and carrying the formatter fixes documented in this repository. Nothing in `src/` calls
+it. The original snapshot is retained for the historic-corpus differential's pre-fix comparison
+mode.
 
 | File | SHA-256 |
 |---|---|
-| `standardize_fortran.py` | `43d44b07086c3b72cc31db1b1d245ffef64069da6b492f7a3eb6741d95c25c76` |
+| `standardize_fortran.py` | `14223363f92c189005cc793329725d25fa09e673909084ba243cf3ebf3e8cb26` |
 | `standardize_fortran_original.py` | `8286229d8e11a8e46b50703c0706079d3c3a935edd9501a22798bbbdb8ed935e` |
-| `test_standardize_fortran.py` | `09476c2cdd190259215118c0ccca5f3e46786c11aabae3928caf29046f0201cc` |
+| `test_standardize_fortran.py` | `3aacef41c135a5ecc1956d520723a97deae693cd57986db774d2846443a9662e` |
 | `findent_fortran.py` | `62785d11868e736b255e149f915b7de70d48f1075fb061846d2020fc36cede3b` |
 
 CAMB's own `scripts/standardize_fortran.py` and `scripts/test_standardize_fortran.py` contain four
 fixes: extension-before-existence validation, typed local entities, top-level/program-unit
 parameter scope, and owner-keyed type-bound procedure casing. The `tools/reference/` copies above
-are synced from those CAMB files. `standardize_fortran_original.py` is the byte snapshot used by
-`check_historic_corpus.py`'s pre-fix comparison mode.
+were the source for the reference copies. The current reference additionally models implicit-
+typing permission scopes so unresolved implicit identifiers retain their authored case.
+`standardize_fortran_original.py` is the byte snapshot used by `check_historic_corpus.py`'s
+pre-fix comparison mode.
 
 
 `R` = findent **4.3.7**, `/usr/local/bin/findent`, sources at `/opt/findent`.
@@ -35,9 +38,9 @@ appears twice on purpose; the last wins.
 
 ```sh
 sha256sum -c <<'EOF'
-43d44b07086c3b72cc31db1b1d245ffef64069da6b492f7a3eb6741d95c25c76  tools/reference/standardize_fortran.py
+14223363f92c189005cc793329725d25fa09e673909084ba243cf3ebf3e8cb26  tools/reference/standardize_fortran.py
 8286229d8e11a8e46b50703c0706079d3c3a935edd9501a22798bbbdb8ed935e  tools/reference/standardize_fortran_original.py
-09476c2cdd190259215118c0ccca5f3e46786c11aabae3928caf29046f0201cc  tools/reference/test_standardize_fortran.py
+3aacef41c135a5ecc1956d520723a97deae693cd57986db774d2846443a9662e  tools/reference/test_standardize_fortran.py
 62785d11868e736b255e149f915b7de70d48f1075fb061846d2020fc36cede3b  tools/reference/findent_fortran.py
 EOF
 ```
@@ -54,4 +57,4 @@ Run from the CAMB root:
 python3 -m unittest scripts.test_standardize_fortran
 ```
 
-CAMB's own suite reports **91 tests, 0 failures, 0 errors**.
+The reference suite reports **93 tests, 0 failures, 0 errors**.

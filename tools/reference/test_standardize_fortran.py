@@ -132,6 +132,82 @@ print *, "write(*)'literal'"
 
 
 class DeclarationCaseTests(unittest.TestCase):
+    def test_implicit_identifiers_do_not_borrow_unrelated_project_case(self) -> None:
+        declarations = """\
+module globals
+integer :: i
+integer :: xfun
+integer :: ProjectName
+contains
+subroutine xproc(n)
+integer :: n
+end subroutine xproc
+end module globals
+"""
+
+        def formatted(source: str) -> str:
+            target = Path("target.f90")
+            cases = collect_declaration_cases(
+                {Path("globals.f90"): declarations, target: source},
+                target_paths=(target,),
+            )[target]
+            return format_text(
+                source,
+                wrap=False,
+                module_cases=cases.module_cases,
+                symbol_cases=cases.symbol_cases,
+                procedure_cases=cases.procedure_cases,
+                scope_cases=cases.scope_cases,
+                type_procedure_cases=cases.type_procedure_cases,
+                type_component_cases=cases.type_component_cases,
+                variable_type_cases=cases.variable_type_cases,
+                type_component_type_cases=cases.type_component_type_cases,
+                implicit_policies=cases.implicit_policies,
+            )
+
+        preserve_sources = (
+            "subroutine s(A)\ndo I = 1, 3\nA(I) = I\nend subroutine s\n",
+            "subroutine s(A)\nimplicit none(external)\ndo I = 1, 3\nA(I) = I\nend subroutine s\n",
+            "subroutine s(A)\nimplicit none(type)\nimplicit integer(i-n)\ndo I = 1, 3\nA(I) = I\nend subroutine s\n",
+            "subroutine s(A)\nimplicit none(type)\nimplicit real(a-)\ndo I = 1, 3\nA(I) = I\nend subroutine s\n",
+            "subroutine s(A)\nimplicit real(a-)\nimplicit none\ndo I = 1, 3\nA(I) = I\nend subroutine s\n",
+            "subroutine host\nimplicit real(a-)\ncontains\nsubroutine s(A)\nimplicit none\ndo I = 1, 3\nA(I) = I\nend subroutine s\nend subroutine host\n",
+            "module target\nimplicit none\ninterface\nsubroutine s(A)\ndo I = 1, 3\nA(I) = I\nend subroutine s\nend interface\nend module target\n",
+        )
+        for source in preserve_sources:
+            with self.subTest(source=source):
+                output = formatted(source)
+                self.assertIn("do I = 1, 3", output)
+                self.assertIn("A(I) = I", output)
+
+        function_syntax = formatted(
+            "subroutine s(out)\nout = XFUN(3)\ncall XPROC(3)\nend subroutine s\n"
+        )
+        self.assertIn("out = XFUN(3)", function_syntax)
+        self.assertIn("call xproc(3)", function_syntax)
+
+        canonicalize_sources = (
+            "subroutine s(A)\nimplicit none\ndo I = 1, 3\nA(I) = I\nend subroutine s\n",
+            "subroutine s(A)\nimplicit none(type)\ndo I = 1, 3\nA(I) = I\nend subroutine s\n",
+            "subroutine host\nimplicit none\ncontains\nsubroutine s(A)\ndo I = 1, 3\nA(I) = I\nend subroutine s\nend subroutine host\n",
+        )
+        for source in canonicalize_sources:
+            with self.subTest(source=source):
+                output = formatted(source)
+                self.assertIn("do i = 1, 3", output)
+                self.assertIn("A(i) = i", output)
+
+        explicit = formatted(
+            "subroutine host\ninteger :: HostName\ncontains\nsubroutine child\nhostname = 1\nend subroutine child\nend subroutine host\n"
+            "subroutine imports\nuse globals, only: projectname\nend subroutine imports\n"
+        )
+        self.assertIn("HostName = 1", explicit)
+        self.assertIn("use globals, only: ProjectName", explicit)
+
+    def test_declaration_case_metadata_defaults_remain_compatible(self) -> None:
+        cases = formatter.FileDeclarationCases({}, {})
+        self.assertEqual(cases.implicit_policies, ())
+
     def test_conditional_sentinel_body_uses_declared_case(self) -> None:
         source = """\
 module t

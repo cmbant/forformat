@@ -15,6 +15,7 @@
 //! live in [`super::names`] and are already complete.
 
 use super::{
+    implicit::{is_implicit_statement, ImplicitPolicy},
     names::{CaseMap, CaseTables},
     scope::{ScopeKind, ScopeTree},
 };
@@ -89,6 +90,34 @@ pub struct DeclaredNameIndex {
     /// reverse index used by case application to avoid leaking a local from a
     /// different procedure through the file-wide declaration table.
     local_scope_names: HashMap<Vec<u8>, Vec<usize>>,
+    /// The implicit-typing policy owned by each scope.  Only the permission
+    /// bit matters for case resolution: an unresolved name that may denote an
+    /// implicit entity must not borrow its spelling from the project table.
+    implicit_policies: Vec<ImplicitPolicy>,
+    /// The governing program-unit/interface scope for each physical line.
+    implicit_scopes_by_line: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclaredSpelling<'a> {
+    Absent,
+    Ambiguous,
+    Spelling(&'a [u8]),
+}
+
+impl DeclaredSpelling<'_> {
+    pub fn is_declared(self) -> bool {
+        !matches!(self, Self::Absent)
+    }
+}
+
+fn declared_spelling<'a>(names: Option<&'a CaseMap>, name: &[u8]) -> DeclaredSpelling<'a> {
+    let Some(names) = names else {
+        return DeclaredSpelling::Absent;
+    };
+    names
+        .get(name)
+        .map_or(DeclaredSpelling::Ambiguous, DeclaredSpelling::Spelling)
 }
 
 impl DeclaredNameIndex {
@@ -109,6 +138,19 @@ impl DeclaredNameIndex {
             .is_some_and(|names| names.contains(name))
     }
 
+    /// Return the nearest local or host-associated declaration governing
+    /// `name` at `line`, including an explicit ambiguous result.
+    pub fn governing_local_case(&self, line: usize, name: &[u8]) -> DeclaredSpelling<'_> {
+        let names = self
+            .scopes_by_line
+            .get(line)
+            .into_iter()
+            .flatten()
+            .filter_map(|index| self.local_names.get(*index))
+            .find(|names| names.contains(name));
+        declared_spelling(names, name)
+    }
+
     pub fn file_declared_contains(&self, line: usize, name: &[u8]) -> bool {
         self.scopes_by_line
             .get(line)
@@ -118,10 +160,9 @@ impl DeclaredNameIndex {
             .any(|names| names.contains(name))
     }
 
-    /// True when the file-declared set has this name but no agreed spelling.
-    /// The nested option distinguishes "not declared here" from "declared
-    /// ambiguously here" without exposing the storage maps.
-    pub fn file_declared_case(&self, line: usize, name: &[u8]) -> Option<Option<&[u8]>> {
+    /// Resolve an enclosing file declaration without conflating absence with
+    /// an ambiguous spelling.
+    pub fn file_declared_case(&self, line: usize, name: &[u8]) -> DeclaredSpelling<'_> {
         self.case_in_maps(
             self.scopes_by_line
                 .get(line)
@@ -136,7 +177,7 @@ impl DeclaredNameIndex {
     /// requiring that scope to be visible at `line`.  This is the file-local
     /// equivalent of the reference's `symbol_cases`: it includes sibling
     /// module declarations, but never procedure-body locals.
-    pub fn file_declared_anywhere(&self, name: &[u8]) -> Option<Option<&[u8]>> {
+    pub fn file_declared_anywhere(&self, name: &[u8]) -> DeclaredSpelling<'_> {
         self.case_in_maps(self.file_declared_names.iter(), name)
     }
 
@@ -144,7 +185,7 @@ impl DeclaredNameIndex {
         &'a self,
         maps: impl Iterator<Item = &'a CaseMap>,
         name: &[u8],
-    ) -> Option<Option<&'a [u8]>> {
+    ) -> DeclaredSpelling<'a> {
         let mut found = false;
         let mut spelling = None;
         for names in maps {
@@ -153,14 +194,20 @@ impl DeclaredNameIndex {
             }
             found = true;
             let Some(candidate) = names.get(name) else {
-                return Some(None);
+                return DeclaredSpelling::Ambiguous;
             };
             if spelling.is_some_and(|existing: &[u8]| existing != candidate) {
-                return Some(None);
+                return DeclaredSpelling::Ambiguous;
             }
             spelling = Some(candidate);
         }
-        found.then_some(spelling)
+        if !found {
+            DeclaredSpelling::Absent
+        } else if let Some(spelling) = spelling {
+            DeclaredSpelling::Spelling(spelling)
+        } else {
+            DeclaredSpelling::Ambiguous
+        }
     }
 
     /// True when a name belongs to some procedure other than the active one.
@@ -173,6 +220,20 @@ impl DeclaredNameIndex {
             .into_iter()
             .flatten()
             .any(|index| Some(*index) != active)
+    }
+
+    /// Whether the active scoping unit permits an implicitly typed entity
+    /// whose name begins with the same letter as `name`.
+    ///
+    /// Unknown/non-ASCII spellings are treated conservatively as permitted so
+    /// an incomplete parse can never authorize project-wide case guessing.
+    pub fn implicit_allows(&self, line: usize, name: &[u8]) -> bool {
+        let scope = self.implicit_scopes_by_line.get(line).copied().unwrap_or(0);
+        self.implicit_policies
+            .get(scope)
+            .copied()
+            .unwrap_or(ImplicitPolicy::ALL)
+            .permits(name)
     }
 
     /// Match `lowercase_keyword`'s two guards: a procedure-local name always
@@ -860,13 +921,73 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
         }
     }
 
+    let mut implicit_statements = vec![Vec::new(); scopes.scopes.len()];
+    for group in &analysis.groups {
+        let owner = scopes
+            .ancestors(scopes.index_of_line(group.lines.start))
+            .into_iter()
+            .find(|index| owns_implicit_policy(scopes.scopes[*index].kind))
+            .unwrap_or(0);
+        for statement in &group.statements {
+            if is_implicit_statement(&statement.text) {
+                implicit_statements[owner].push(statement.text.as_slice());
+            }
+        }
+    }
+
+    // ScopeTree appends children after their parents, so the inherited policy
+    // is complete before a contained program unit is visited. Interface
+    // bodies deliberately restart from the language default instead of
+    // inheriting the host's IMPLICIT NONE.
+    let mut implicit_policies = vec![ImplicitPolicy::ALL; scopes.scopes.len()];
+    for index in 0..scopes.scopes.len() {
+        let scope = &scopes.scopes[index];
+        let mut policy = if scope.kind == ScopeKind::Interface || index == 0 {
+            ImplicitPolicy::ALL
+        } else {
+            debug_assert!(scope.parent.is_some_and(|parent| parent < index));
+            scope
+                .parent
+                .and_then(|parent| implicit_policies.get(parent).copied())
+                .unwrap_or(ImplicitPolicy::ALL)
+        };
+        for statement in &implicit_statements[index] {
+            policy = policy.apply(statement);
+        }
+        implicit_policies[index] = policy;
+    }
+    let implicit_scopes_by_line = scopes_by_line
+        .iter()
+        .map(|ancestors| {
+            ancestors
+                .iter()
+                .copied()
+                .find(|index| owns_implicit_policy(scopes.scopes[*index].kind))
+                .unwrap_or(0)
+        })
+        .collect();
+
     DeclaredNameIndex {
         local_names: locals_by_scope,
         file_declared_names: file_by_scope,
         scopes_by_line,
         procedures_by_line,
         local_scope_names,
+        implicit_policies,
+        implicit_scopes_by_line,
     }
+}
+
+fn owns_implicit_policy(kind: ScopeKind) -> bool {
+    matches!(
+        kind,
+        ScopeKind::File
+            | ScopeKind::Module
+            | ScopeKind::Submodule
+            | ScopeKind::Program
+            | ScopeKind::Procedure
+            | ScopeKind::Interface
+    )
 }
 
 fn is_scoped_declared_owner(kind: ScopeKind) -> bool {
@@ -1653,7 +1774,7 @@ fn define_name(line: &[u8], facts: &mut FileFacts) {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract, scoped_declared_names, TypeMaps};
+    use super::{extract, scoped_declared_names, DeclaredSpelling, TypeMaps};
     use crate::{analysis::scope::ScopeTree, transform::document::Document};
 
     fn facts(source: &[u8]) -> super::FileFacts {
@@ -1706,6 +1827,63 @@ mod tests {
         assert_eq!(
             names.local_at(5).and_then(|locals| locals.get(b"ratio")),
             Some(b"RATIO".as_slice())
+        );
+    }
+
+    #[test]
+    fn implicit_typing_policies_follow_scope_inheritance_and_resets() {
+        let default = scoped(b"subroutine s\nx = I\nend subroutine s\n");
+        assert!(default.implicit_allows(1, b"I"));
+
+        let none = scoped(b"subroutine s\nimplicit none\nx = I\nend subroutine s\n");
+        assert!(!none.implicit_allows(2, b"I"));
+
+        let none_type = scoped(b"subroutine s\nimplicit none(type)\nx = I\nend subroutine s\n");
+        assert!(!none_type.implicit_allows(2, b"I"));
+
+        let none_external =
+            scoped(b"subroutine s\nimplicit none(external)\nx = I\nend subroutine s\n");
+        assert!(none_external.implicit_allows(2, b"I"));
+
+        let contained = scoped(
+            b"subroutine host\nimplicit none\ncontains\nsubroutine child\nx = I\nend subroutine child\nend subroutine host\n",
+        );
+        assert!(!contained.implicit_allows(4, b"I"));
+
+        let ranged = scoped(
+            b"subroutine host\nimplicit none(type)\ncontains\nsubroutine child\nimplicit integer(i-n)\nx = I + A\nend subroutine child\nend subroutine host\n",
+        );
+        assert!(ranged.implicit_allows(5, b"I"));
+        assert!(!ranged.implicit_allows(5, b"A"));
+
+        let interface = scoped(
+            b"module m\nimplicit none\ninterface\nsubroutine signature\nx = I\nend subroutine signature\nend interface\nend module m\n",
+        );
+        assert!(interface.implicit_allows(4, b"I"));
+
+        let malformed = scoped(
+            b"subroutine s\nimplicit none(type)\nimplicit real(a-)\nx = I\nend subroutine s\n",
+        );
+        assert!(malformed.implicit_allows(3, b"I"));
+
+        let malformed_before_none =
+            scoped(b"subroutine s\nimplicit real(a-)\nimplicit none\nx = I\nend subroutine s\n");
+        assert!(malformed_before_none.implicit_allows(3, b"I"));
+
+        let inherited_malformed = scoped(
+            b"subroutine host\nimplicit real(a-)\ncontains\nsubroutine child\nimplicit none\nx = I\nend subroutine child\nend subroutine host\n",
+        );
+        assert!(inherited_malformed.implicit_allows(5, b"I"));
+    }
+
+    #[test]
+    fn governing_local_case_includes_host_association() {
+        let names = scoped(
+            b"subroutine host\ninteger :: IndexValue\ncontains\nsubroutine child\nx = indexvalue\nend subroutine child\nend subroutine host\n",
+        );
+        assert_eq!(
+            names.governing_local_case(4, b"indexvalue"),
+            DeclaredSpelling::Spelling(b"IndexValue".as_slice())
         );
     }
 

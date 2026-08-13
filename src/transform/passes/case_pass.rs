@@ -7,7 +7,7 @@
 use crate::{
     analysis::{
         names::{resolve, NameSpace},
-        scoped_declared_names, TypeMaps,
+        scoped_declared_names, DeclaredSpelling, TypeMaps,
     },
     error::FormatError,
     source::{
@@ -29,6 +29,19 @@ use std::{
 struct AssociateFrame {
     names: HashSet<Vec<u8>>,
     types: HashMap<Vec<u8>, Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImplicitGuard {
+    Apply,
+    Skip,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SymbolQuery {
+    line: usize,
+    associate_alias: bool,
+    implicit_guard: ImplicitGuard,
 }
 
 impl AssociateFrame {
@@ -260,7 +273,16 @@ fn classify_spelling(
     // suffix separately from the number, so it follows the same declaration
     // resolver as an ordinary symbol. An undeclared suffix is inert.
     if is_numeric_literal_kind_name(tokens, index) {
-        return file_symbol_spelling(declared_names, cx, token.text, associate_alias);
+        return file_symbol_spelling(
+            declared_names,
+            cx,
+            token.text,
+            SymbolQuery {
+                line,
+                associate_alias,
+                implicit_guard: ImplicitGuard::Skip,
+            },
+        );
     }
 
     if let Some(spelling) = procedure_definition_spelling(tokens, index, line, declared_names) {
@@ -300,7 +322,16 @@ fn classify_spelling(
     // is an ordinary declared parameter in the reference, not a derived-type
     // name.  This also reaches legacy declarations without `::`.
     if is_intrinsic_kind_name(tokens, index) {
-        return file_symbol_spelling(declared_names, cx, token.text, associate_alias);
+        return file_symbol_spelling(
+            declared_names,
+            cx,
+            token.text,
+            SymbolQuery {
+                line,
+                associate_alias,
+                implicit_guard: ImplicitGuard::Skip,
+            },
+        );
     }
 
     // There is deliberately no "the authored spelling belongs to another scope,
@@ -347,12 +378,25 @@ fn classify_spelling(
     }
 
     // The B9 procedure map contains spellings, not merely membership.
-    if let Some(local) = declared_names.local_at(line) {
-        if local.contains(token.text) {
-            return local.get(token.text).map(ToOwned::to_owned);
-        }
+    match declared_names.governing_local_case(line, token.text) {
+        DeclaredSpelling::Spelling(spelling) => return Some(spelling.to_owned()),
+        DeclaredSpelling::Ambiguous => return None,
+        DeclaredSpelling::Absent => {}
     }
-    file_symbol_spelling(declared_names, cx, token.text, associate_alias)
+    file_symbol_spelling(
+        declared_names,
+        cx,
+        token.text,
+        SymbolQuery {
+            line,
+            associate_alias,
+            implicit_guard: if !is_use_statement(tokens) && implicit_guard_applies(tokens, index) {
+                ImplicitGuard::Apply
+            } else {
+                ImplicitGuard::Skip
+            },
+        },
+    )
 }
 
 /// A type-bound binding and the module procedure it names are one entity.
@@ -555,22 +599,51 @@ fn file_symbol_spelling(
     declared_names: &crate::analysis::DeclaredNameIndex,
     cx: &PassContext,
     name: &[u8],
-    associate_alias: bool,
+    query: SymbolQuery,
 ) -> Option<Vec<u8>> {
-    // Procedure locals are resolved by the innermost active scope at the use
-    // site.  Do not apply a file-wide ambiguity veto here: two locals with the
-    // same normalized name in different scopes are different entities, and
-    // `local_at(line)` above is the governing declaration for each use.
+    // Procedure locals and host-associated names were resolved above. Do not
+    // apply a file-wide ambiguity veto here: same-named locals in different
+    // procedures are different entities.
     if cx.local.file_symbols.contains(name) {
         return cx.local.file_symbols.get(name).map(ToOwned::to_owned);
     }
-    if !associate_alias && declared_names.file_declared_anywhere(name).is_some() {
+    if !query.associate_alias && declared_names.file_declared_anywhere(name).is_declared() {
         // Program-unit specification names are visible in the file but are
         // not part of the reference's project symbol table. Preserve the
         // authored use rather than borrowing a same-named module component.
         return None;
     }
+    if query.implicit_guard == ImplicitGuard::Apply
+        && !query.associate_alias
+        && declared_names.implicit_allows(query.line, name)
+    {
+        // No declaration visible in this file governs the occurrence. If the
+        // active IMPLICIT policy permits a local entity with this initial,
+        // project-wide spelling evidence belongs to a potentially different
+        // entity and cannot safely change the authored case.
+        return None;
+    }
     resolve(&cx.local.file_symbols, &cx.project.file_symbols, name).map(ToOwned::to_owned)
+}
+
+fn is_use_statement(tokens: &[Token<'_>]) -> bool {
+    tokens
+        .iter()
+        .find(|token| token.kind != TokenKind::Number)
+        .is_some_and(|token| token.is_name(b"use"))
+}
+
+fn implicit_guard_applies(tokens: &[Token<'_>], index: usize) -> bool {
+    if tokens
+        .get(index + 1)
+        .is_some_and(|token| token.text == b"%")
+    {
+        return false;
+    }
+    !index
+        .checked_sub(1)
+        .and_then(|previous| tokens.get(previous))
+        .is_some_and(|token| token.is_name(b"call"))
 }
 
 fn preceded_by_percent(tokens: &[Token<'_>], index: usize) -> bool {
@@ -1265,6 +1338,99 @@ end module CAMBmain\n";
                 declared(document, context).unwrap()
             }),
             source
+        );
+    }
+
+    #[test]
+    fn implicit_identifiers_do_not_borrow_unrelated_project_case() {
+        let declarations = b"module globals\ninteger :: i\nend module globals\n";
+        let cases = [
+            (
+                b"subroutine s(A)\ndo I = 1, 3\nA(I) = I\nend subroutine s\n".as_slice(),
+                b"subroutine s(A)\ndo I = 1, 3\nA(I) = I\nend subroutine s\n".as_slice(),
+            ),
+            (
+                b"subroutine s(A)\nimplicit none\ndo I = 1, 3\nA(I) = I\nend subroutine s\n".as_slice(),
+                b"subroutine s(A)\nimplicit none\ndo i = 1, 3\nA(i) = i\nend subroutine s\n".as_slice(),
+            ),
+            (
+                b"subroutine s(A)\nimplicit none(type)\ndo I = 1, 3\nA(I) = I\nend subroutine s\n".as_slice(),
+                b"subroutine s(A)\nimplicit none(type)\ndo i = 1, 3\nA(i) = i\nend subroutine s\n".as_slice(),
+            ),
+            (
+                b"subroutine s(A)\nimplicit none(external)\ndo I = 1, 3\nA(I) = I\nend subroutine s\n".as_slice(),
+                b"subroutine s(A)\nimplicit none(external)\ndo I = 1, 3\nA(I) = I\nend subroutine s\n".as_slice(),
+            ),
+            (
+                b"subroutine host\nimplicit none\ncontains\nsubroutine s(A)\ndo I = 1, 3\nA(I) = I\nend subroutine s\nend subroutine host\n".as_slice(),
+                b"subroutine host\nimplicit none\ncontains\nsubroutine s(A)\ndo i = 1, 3\nA(i) = i\nend subroutine s\nend subroutine host\n".as_slice(),
+            ),
+            (
+                b"module target\nimplicit none\ninterface\nsubroutine s(A)\ndo I = 1, 3\nA(I) = I\nend subroutine s\nend interface\nend module target\n".as_slice(),
+                b"module target\nimplicit none\ninterface\nsubroutine s(A)\ndo I = 1, 3\nA(I) = I\nend subroutine s\nend interface\nend module target\n".as_slice(),
+            ),
+            (
+                b"subroutine s(A)\nimplicit none(type)\nimplicit integer(i-n)\ndo I = 1, 3\nA(I) = I\nend subroutine s\n".as_slice(),
+                b"subroutine s(A)\nimplicit none(type)\nimplicit integer(i-n)\ndo I = 1, 3\nA(I) = I\nend subroutine s\n".as_slice(),
+            ),
+            (
+                b"subroutine s(A)\nimplicit none(type)\nimplicit real(a-)\ndo I = 1, 3\nA(I) = I\nend subroutine s\n".as_slice(),
+                b"subroutine s(A)\nimplicit none(type)\nimplicit real(A-)\ndo I = 1, 3\nA(I) = I\nend subroutine s\n".as_slice(),
+            ),
+            (
+                b"subroutine s(A)\nimplicit real(a-)\nimplicit none\ndo I = 1, 3\nA(I) = I\nend subroutine s\n".as_slice(),
+                b"subroutine s(A)\nimplicit real(A-)\nimplicit none\ndo I = 1, 3\nA(I) = I\nend subroutine s\n".as_slice(),
+            ),
+        ];
+
+        for (index, (source, expected)) in cases.into_iter().enumerate() {
+            let name = format!("case-{index}.f90");
+            let project = analyze_project([
+                (Path::new("globals.f90"), declarations.as_slice()),
+                (Path::new(&name), source),
+            ])
+            .unwrap();
+            assert_eq!(
+                run_pass(source, &project, |document, context| {
+                    declared(document, context).unwrap()
+                }),
+                expected,
+                "implicit policy case {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn implicit_function_syntax_is_guarded_but_call_syntax_is_not() {
+        let declarations = b"module globals\ninteger :: xfun\ncontains\nsubroutine xproc(n)\ninteger :: n\nend subroutine xproc\nend module globals\n";
+        let source = b"subroutine s(out)\nout = XFUN(3)\ncall XPROC(3)\nend subroutine s\n";
+        let project = analyze_project([
+            (Path::new("globals.f90"), declarations.as_slice()),
+            (Path::new("target.f90"), source.as_slice()),
+        ])
+        .unwrap();
+        assert_eq!(
+            run_pass(source, &project, |document, context| {
+                declared(document, context).unwrap()
+            }),
+            b"subroutine s(out)\nout = XFUN(3)\ncall xproc(3)\nend subroutine s\n"
+        );
+    }
+
+    #[test]
+    fn explicit_host_locals_and_use_names_still_canonicalize() {
+        let declarations = b"module globals\ninteger :: ProjectName\nend module globals\n";
+        let source = b"subroutine host\ninteger :: HostName\ncontains\nsubroutine child\nhostname = 1\nend subroutine child\nend subroutine host\nsubroutine imports\nuse globals, only: projectname\nend subroutine imports\n";
+        let project = analyze_project([
+            (Path::new("globals.f90"), declarations.as_slice()),
+            (Path::new("target.f90"), source.as_slice()),
+        ])
+        .unwrap();
+        assert_eq!(
+            run_pass(source, &project, |document, context| {
+                declared(document, context).unwrap()
+            }),
+            b"subroutine host\ninteger :: HostName\ncontains\nsubroutine child\nHostName = 1\nend subroutine child\nend subroutine host\nsubroutine imports\nuse globals, only: ProjectName\nend subroutine imports\n"
         );
     }
 
