@@ -1,6 +1,6 @@
 # Traceability: Python behaviour to Rust tests
 
-One row per test in the reference suite
+One row per test in the frozen reference suite
 (`tools/reference/test_standardize_fortran.py`, 90 terminal rows in 6 classes).  Gate B
 of the port plan needs every row to carry a terminal status.
 
@@ -17,7 +17,7 @@ metadata.
 
 Regenerate the row skeleton with `python3 tools/gen_traceability.py`; the last
 three columns are hand-maintained and preserved. The added
-`python_external_macro` fixture is derived from the reference `-D SIZE` assertion.
+`python_external_macro` fixture is derived from the frozen `-D SIZE` assertion.
 
 | Python test | Category | Rust destination | Named Rust test | Status |
 |---|---|---|---|---|
@@ -30,6 +30,8 @@ three columns are hand-maintained and preserved. The added
 | `FormattingTests.test_removes_only_redundant_nested_parentheses` | blank-line/layout | `src/transform/passes/structure.rs` | `nested_parentheses_obey_expression_and_protection_rules` | ported |
 | `FormattingTests.test_normalizes_dimension_and_write_output_spacing` | blank-line/layout | `src/transform/passes/line_rules.rs` | `dimension_and_write_output_spacing_matches_the_reference_shape` | ported |
 | `FormattingTests.test_preserves_nested_parentheses_in_arguments_and_associations` | blank-line/layout | `src/transform/passes/structure.rs` | `nested_parentheses_obey_expression_and_protection_rules` | ported |
+| `DeclarationCaseTests.test_implicit_identifiers_do_not_borrow_unrelated_project_case` | scope/project-case | — | — | todo |
+| `DeclarationCaseTests.test_declaration_case_metadata_defaults_remain_compatible` | scope/project-case | — | — | todo |
 | `DeclarationCaseTests.test_conditional_sentinel_body_uses_declared_case` | scope/project-case | `src/format/full.rs` | `conditional_sentinel_body_follows_declared_case_with_or_without_project_tables` | ported |
 | `DeclarationCaseTests.test_declaration_array_constructor_is_one_entity` | scope/project-case | `src/analysis/declarations.rs` | `declared_entities_are_protected_and_typed` | ported |
 | `DeclarationCaseTests.test_extracts_and_matches_declarations` | scope/project-case | `src/transform/passes/case_pass.rs` | `declared_occurrences_use_their_name_spaces_and_are_idempotent` | ported |
@@ -84,6 +86,7 @@ three columns are hand-maintained and preserved. The added
 | `SpacingTests.test_lowercases_logical_operators` | lexical | `src/transform/passes/line_rules.rs` | `dotted_words_in_the_intrinsic_table_are_lowercased` | ported |
 | `SpacingTests.test_preserves_case_sensitive_preprocessor_macros` | lexical | `src/transform/passes/line_rules.rs` | `preprocessor_lines_are_preserved_byte_for_byte` | ported |
 | `SpacingTests.test_optionally_uppercases_single_l_and_modernizes_array_constructors` | lexical | `src/transform/passes/line_rules.rs` | `uppercase_single_l_is_opt_in_and_protected_bytes_are_untouched` | ported |
+| `SpacingTests.test_modernizes_multiline_array_constructors` | lexical | — | — | todo |
 | `SpacingTests.test_removes_terminal_function_and_subroutine_returns` | lexical | `src/transform/passes/structure.rs` | `terminal_return_requires_a_bare_final_line_and_is_idempotent` | ported |
 | `SpacingTests.test_spaces_bare_program_unit_ends_like_named_ends` | lexical | `src/transform/passes/layout_post.rs` | `bare_program_unit_ends_have_the_same_separator_as_named_ends` | ported |
 | `SpacingTests.test_preserves_compiler_directive_sentinels_without_comment_spacing` | lexical | `src/transform/passes/line_rules.rs` | `dollar_sentinel_boundaries_and_protected_text_are_preserved` | ported |

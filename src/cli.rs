@@ -90,6 +90,11 @@ where
                 "fixed-form input/output is not supported".into(),
             ));
         }
+        if let Some(suggestion) = single_dash_long_option_suggestion(&arg) {
+            return Err(FormatError::InvalidOption(format!(
+                "{arg} (did you mean {suggestion}? Long options use two dashes.)"
+            )));
+        }
         if let Some(long) = arg.strip_prefix("--") {
             let (name, val) = if let Some((n, v)) = long.split_once('=') {
                 (
@@ -436,6 +441,56 @@ fn parse_num(s: &str) -> Result<usize, FormatError> {
             FormatError::InvalidOption(format!("expected non-negative integer, got {s}"))
         })
 }
+
+/// Point out the common `-all` typo without interfering with findent-style
+/// short options such as `-i4` and `-ifree`.
+fn single_dash_long_option_suggestion(arg: &str) -> Option<String> {
+    let spelling = arg.strip_prefix('-')?;
+    if spelling.is_empty() || spelling.starts_with('-') {
+        return None;
+    }
+    let name = spelling
+        .split_once('=')
+        .map_or(spelling, |(name, _)| name)
+        .replace('_', "-")
+        .to_ascii_lowercase();
+    let known = matches!(
+        name.as_str(),
+        "align-paren"
+            | "all"
+            | "check"
+            | "diff"
+            | "full"
+            | "include-left"
+            | "indent-ampersand"
+            | "indent-changeteam"
+            | "indent-contains"
+            | "indent-continuation"
+            | "indent-only"
+            | "isolated"
+            | "label-left"
+            | "last-indent"
+            | "last-usable"
+            | "line-length"
+            | "max-indent"
+            | "no-wrap"
+            | "normalize-only"
+            | "openmp"
+            | "refactor-end"
+            | "refactor-procedures"
+            | "start-indent"
+            | "stdin"
+            | "stdout"
+            | "uppercase-single-l"
+            | "wrap"
+            | "ws-remred"
+    ) || name == "define"
+        || name == "input-format"
+        || name == "output-format"
+        || name.starts_with("indent-");
+    known.then(|| format!("--{spelling}"))
+}
+
 fn parse_bool(s: &str) -> Result<bool, FormatError> {
     match s {
         "0" | "false" | "no" => Ok(false),
@@ -794,6 +849,32 @@ mod tests {
             parse(["forformat".to_string(), "--include-left=maybe".to_string()].into_iter()),
             Err(crate::error::FormatError::InvalidOption(_))
         ));
+    }
+
+    #[test]
+    fn single_dash_long_option_typos_explain_the_required_spelling() {
+        for (typo, expected) in [
+            (
+                "-all",
+                "-all (did you mean --all? Long options use two dashes.)",
+            ),
+            (
+                "-indent_module=0",
+                "-indent_module=0 (did you mean --indent_module=0? Long options use two dashes.)",
+            ),
+        ] {
+            match parse(["forformat".to_string(), typo.to_string()].into_iter()) {
+                Err(crate::error::FormatError::InvalidOption(message)) => {
+                    assert_eq!(message, expected)
+                }
+                _ => panic!("unexpected result for {typo}"),
+            }
+        }
+
+        // These are valid legacy spellings and must not be mistaken for
+        // single-dash long options.
+        assert!(parse(["forformat".to_string(), "-i4".to_string()].into_iter()).is_ok());
+        assert!(parse(["forformat".to_string(), "-ifree".to_string()].into_iter()).is_ok());
     }
 
     #[test]
