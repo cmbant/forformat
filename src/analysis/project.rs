@@ -116,7 +116,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::{analyze_file, analyze_project, ProjectContext};
-    use crate::{analysis::names::NameSpace, config::MacroDefine};
+    use crate::{
+        analysis::names::NameSpace,
+        config::{FormatConfig, FormatMode, MacroDefine},
+        format_source_with_context,
+    };
     use std::path::Path;
 
     const MODULE: &[u8] = b"module Precision\ninteger, parameter :: dl = 8\nend module Precision\n";
@@ -251,5 +255,36 @@ mod tests {
             resolver.component_spelling(b"t", b"component"),
             Some(b"COMPONENT".as_slice())
         );
+    }
+
+    #[test]
+    fn program_top_level_spelling_still_wins_over_a_module() {
+        let program = b"program validation\ninteger, parameter :: BJL_RECURRENCE_MAX_L = 25\ncontains\nsubroutine check\ninteger :: value\nvalue = bjl_recurrence_max_l\nend subroutine check\nend program validation\n";
+        let module = b"module bessel\ninteger, parameter :: BJL_recurrence_MAX_L = 25\ncontains\nsubroutine check\ninteger :: value\nvalue = bjl_recurrence_max_l\nend subroutine check\nend module bessel\n";
+        let project = analyze_project([
+            (Path::new("program.f90"), program.as_slice()),
+            (Path::new("module.f90"), module.as_slice()),
+        ])
+        .unwrap();
+        let config = FormatConfig {
+            mode: FormatMode::NormalizeOnly,
+            ..FormatConfig::default()
+        };
+        let program_output = format_source_with_context(program, &project, &config)
+            .unwrap()
+            .bytes;
+        let module_output = format_source_with_context(module, &project, &config)
+            .unwrap()
+            .bytes;
+        let program_use = program_output
+            .split(|byte| *byte == b'\n')
+            .find(|line| line.starts_with(b"value ="))
+            .unwrap();
+        let module_use = module_output
+            .split(|byte| *byte == b'\n')
+            .find(|line| line.starts_with(b"value ="))
+            .unwrap();
+        assert_eq!(program_use, b"value = BJL_RECURRENCE_MAX_L");
+        assert_eq!(module_use, b"value = BJL_recurrence_MAX_L");
     }
 }

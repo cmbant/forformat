@@ -20,7 +20,6 @@ jobs:
           components: rustfmt, clippy
       - run: python3 tools/gen_vocab.py --check
       - run: python3 tools/gen_traceability.py --check
-      - run: python3 tools/check_patched_reference.py
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --all-targets

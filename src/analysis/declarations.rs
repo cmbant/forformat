@@ -528,16 +528,29 @@ pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
                 .unwrap_or_default()
                 .to_ascii_lowercase()
         });
-        let procedure = scopes
-            .program_unit_of_line(group.lines.start)
-            .filter(|scope| is_procedure_scope(scope.kind))
-            .and_then(|scope| scope.name.as_deref())
-            .map(|name| name.to_ascii_lowercase());
-        let module_specification = scopes
+        let procedure_scope = scopes
             .ancestors(scopes.index_of_line(group.lines.start))
             .into_iter()
-            .find(|scope| scopes.scopes[*scope].kind == ScopeKind::Module)
-            .is_some_and(|scope| scopes.scopes[scope].is_specification(group.lines.start));
+            .find(|scope| is_procedure_scope(scopes.scopes[*scope].kind));
+        let procedure = procedure_scope
+            .and_then(|scope| scopes.scopes[scope].name.as_deref())
+            .map(|name| name.to_ascii_lowercase());
+        let file_specification_scope = scopes
+            .ancestors(scopes.index_of_line(group.lines.start))
+            .into_iter()
+            .find(|scope| {
+                matches!(
+                    scopes.scopes[*scope].kind,
+                    ScopeKind::Module | ScopeKind::Program
+                )
+            })
+            .filter(|scope| scopes.scopes[*scope].is_specification(group.lines.start));
+        // A program's top-level specification is file-wide just like a
+        // module's.  Its own Program scope is also the procedure-like scope
+        // returned for those lines, so only a distinct nested Procedure
+        // suppresses promotion into file_symbols.
+        let file_scope_declaration = file_specification_scope
+            .is_some_and(|scope| procedure_scope.is_none_or(|procedure| procedure == scope));
         // Interface bodies are procedure signatures, not module variables.
         // The reference nevertheless sends their headers and declarations
         // through extract_procedure_cases, so keep their dummies and RESULT
@@ -552,7 +565,7 @@ pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
                 &statement.text,
                 owner.as_deref(),
                 procedure.as_deref(),
-                module_specification,
+                file_scope_declaration,
                 &mut facts,
             );
             if let Some(alias) = select_type_alias(&statement.text) {
@@ -984,7 +997,7 @@ fn entity_declaration(
     text: &[u8],
     owner: Option<&[u8]>,
     procedure: Option<&[u8]>,
-    module_specification: bool,
+    file_scope_declaration: bool,
     facts: &mut FileFacts,
 ) {
     let tokens = tokenize(text, &mut LexState::default());
@@ -1017,7 +1030,7 @@ fn entity_declaration(
             first_index,
             owner,
             procedure,
-            module_specification,
+            file_scope_declaration,
             facts,
         );
         return;
@@ -1073,7 +1086,7 @@ fn entity_declaration(
                         // table; disagreement there must make a project-wide
                         // spelling ambiguous rather than selecting a winner.
                         facts.cases.symbols.insert(token.text);
-                        if module_specification {
+                        if file_scope_declaration {
                             facts.file_symbols.insert(token.text);
                         }
                         if let Some(declared) = declared {
@@ -1082,7 +1095,7 @@ fn entity_declaration(
                     }
                     (None, declared) => {
                         facts.cases.symbols.insert(token.text);
-                        if module_specification && procedure.is_none() {
+                        if file_scope_declaration {
                             facts.file_symbols.insert(token.text);
                         }
                         if let Some(declared) = declared {
@@ -1109,7 +1122,7 @@ fn old_style_declaration(
     first_index: usize,
     owner: Option<&[u8]>,
     procedure: Option<&[u8]>,
-    module_specification: bool,
+    file_scope_declaration: bool,
     facts: &mut FileFacts,
 ) {
     let first = &tokens[first_index];
@@ -1171,7 +1184,7 @@ fn old_style_declaration(
             if let Some(owner) = owner {
                 facts.cases.components.insert(owner, token.text);
                 facts.cases.symbols.insert(token.text);
-                if module_specification {
+                if file_scope_declaration {
                     facts.file_symbols.insert(token.text);
                 }
                 if let Some(declared_type) = &declared_type {
@@ -1181,7 +1194,7 @@ fn old_style_declaration(
                 }
             } else {
                 facts.cases.symbols.insert(token.text);
-                if module_specification && procedure.is_none() {
+                if file_scope_declaration {
                     facts.file_symbols.insert(token.text);
                 }
                 if let Some(declared_type) = &declared_type {

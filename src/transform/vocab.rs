@@ -2,7 +2,7 @@
 //!
 //! DO NOT EDIT BY HAND.  Regenerate with `python3 tools/gen_vocab.py`, which
 //! reads `tools/reference/standardize_fortran.py`
-//! (sha256 `8286229d8e11a8e46b50703c0706079d3c3a935edd9501a22798bbbdb8ed935e`).
+//! (sha256 `b7f03c94ae80e108d30f4568660baf1051d0a730a171d0504ca83de957ef03de`).
 //!
 //! Everything here is lowercase and sorted so lookups are a branch-predictable
 //! binary search with no allocation and no hash map in the hot path.

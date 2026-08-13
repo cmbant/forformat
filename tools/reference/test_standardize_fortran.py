@@ -974,7 +974,7 @@ state%buildvalue()
         }
         cases = collect_declaration_cases(sources)[Path("use.f90")]
         self.assertNotIn("buildvalue", cases.symbol_cases)
-        self.assertEqual(cases.type_procedure_cases, {"buildvalue": "BuildValue"})
+        self.assertEqual(cases.type_procedure_cases, {("state", "buildvalue"): "BuildValue"})
         self.assertEqual(
             format_text(
                 sources[Path("use.f90")],
@@ -984,7 +984,92 @@ state%buildvalue()
             ),
             """\
 call buildvalue()
-State%BuildValue()
+State%buildvalue()
+""",
+        )
+
+    def test_type_bound_procedure_case_uses_the_governing_owner(self) -> None:
+        sources = {
+            Path("types.f90"): """\
+module types
+    type :: ThermoData
+    contains
+        procedure :: values
+    end type ThermoData
+    type :: OtherData
+    contains
+        procedure :: Values
+    end type OtherData
+end module types
+""",
+            Path("use.f90"): """\
+type(ThermoData) :: data
+call data%Values()
+""",
+        }
+        cases = collect_declaration_cases(sources)[Path("use.f90")]
+        self.assertEqual(
+            format_text(
+                sources[Path("use.f90")],
+                wrap=False,
+                type_procedure_cases=cases.type_procedure_cases,
+                variable_type_cases=cases.variable_type_cases,
+                type_component_type_cases=cases.type_component_type_cases,
+            ),
+            """\
+type(ThermoData) :: data
+call data%values()
+""",
+        )
+
+    def test_old_style_typed_local_entities_govern_case(self) -> None:
+        self.assertEqual(_declared_variable_names("type(EvolutionVars) :: EVOut"), ["EVOut"])
+        sources = {
+            Path("other.f90"): "module other\n    real :: PK\nend module other\n",
+            Path("use.f90"): """\
+subroutine load
+    real(dl) kh, Pk
+    read *, PK
+end subroutine load
+""",
+        }
+        cases = collect_declaration_cases(sources)[Path("use.f90")]
+        self.assertEqual(
+            format_text(
+                sources[Path("use.f90")],
+                wrap=False,
+                symbol_cases=cases.symbol_cases,
+                procedure_cases=cases.procedure_cases,
+            ),
+            """\
+subroutine load
+    real(dl) kh, Pk
+    read *, Pk
+
+end subroutine load
+""",
+        )
+
+    def test_top_level_parameter_governs_file_case(self) -> None:
+        sources = {
+            Path("other.f90"): "module other\n    integer, parameter :: BJL_recurrence_MAX_L = 25\nend module other\n",
+            Path("use.f90"): """\
+integer, parameter :: BJL_RECURRENCE_MAX_L = 25
+if (l > bjl_recurrence_max_l) then
+end if
+""",
+        }
+        cases = collect_declaration_cases(sources)[Path("use.f90")]
+        self.assertEqual(
+            format_text(
+                sources[Path("use.f90")],
+                wrap=False,
+                symbol_cases=cases.symbol_cases,
+            ),
+            """\
+integer, parameter :: BJL_RECURRENCE_MAX_L = 25
+if (l > BJL_RECURRENCE_MAX_L) then
+end if
 """,
         )
 
@@ -1824,7 +1909,7 @@ end module m
     def test_mapping_defaults_are_real_mappings(self) -> None:
         cases = formatter.FileDeclarationCases({}, {})
         procedure = formatter.ProcedureDeclarationCases(0, 0, {})
-        self.assertIsNone(cases.type_procedure_cases.get("missing"))
+        self.assertIsNone(cases.type_procedure_cases.get(("missing", "member")))
         self.assertIsNone(cases.type_component_cases.get(("t", "x")))
         self.assertIsNone(procedure.local_types.get("missing"))
 

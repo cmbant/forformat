@@ -1,18 +1,23 @@
 # Traceability: Python behaviour to Rust tests
 
 One row per test in the frozen reference suite
-(`tools/reference/test_standardize_fortran.py`, 86 tests in 6 classes).  Gate B
+(`tools/reference/test_standardize_fortran.py`, 89 terminal rows in 6 classes).  Gate B
 of the port plan needs every row to carry a terminal status.
 
-Statuses are terminal: `ported`, `covered by broader test`, `intentionally changed`
+Statuses: `ported`, `covered by broader test`, `intentionally changed`
 (with a rationale and a fixture), or `excluded` (with a row-specific scope reason).
 
 Categories: lexical, case, scope/project-case, OpenMP, CPP/macro, comment,
 continuation, wrapping, blank-line/layout, CLI/file-I/O, semantic-compile.
 
-A `covered by broader test` row names the exact check and its regression signal. Rows excluded at the Python-helper boundary name that boundary individually. Golden cases belong in `tests/manifests/core.manifest`, using its existing metadata.
+A `covered by broader test` row names the exact check and its regression signal.
+Rows excluded at the Python-helper boundary name that boundary individually.
+Golden cases belong in `tests/manifests/core.manifest`, using its existing
+metadata.
 
-Regenerate the row skeleton with `python3 tools/gen_traceability.py`; the last three columns are hand-maintained and preserved. The added `python_external_macro` fixture is derived from the frozen `-D SIZE` assertion.
+Regenerate the row skeleton with `python3 tools/gen_traceability.py`; the last
+three columns are hand-maintained and preserved. The added
+`python_external_macro` fixture is derived from the frozen `-D SIZE` assertion.
 
 | Python test | Category | Rust destination | Named Rust test | Status |
 |---|---|---|---|---|
@@ -57,6 +62,9 @@ Regenerate the row skeleton with `python3 tools/gen_traceability.py`; the last t
 | `SpacingTests.test_preserves_concatenation_spacing_on_a_continuation_line` | lexical | `tools/reference/differential.py` | `--perturbation spacing` | covered by broader test — all 48 files: altered concatenation spacing appears as a differing line |
 | `SpacingTests.test_parenthesized_statements_lowercase_unless_locally_shadowed` | lexical | `src/transform/passes/line_rules.rs` | `parenthesized_statements_lowercase_unless_locally_shadowed` | ported |
 | `SpacingTests.test_type_bound_procedures_only_supply_component_case` | lexical | `tests/compatibility.rs` | `type_bound_procedure_case_requires_resolved_owner` | ported |
+| `SpacingTests.test_type_bound_procedure_case_uses_the_governing_owner` | lexical | `tests/compatibility.rs` | `type_bound_procedure_case_requires_resolved_owner` | covered by broader test — the resolved and unresolved fixture halves compare byte-for-byte with the fixed reference |
+| `SpacingTests.test_old_style_typed_local_entities_govern_case` | lexical | `tests/io_workflow.rs` | `a_local_declaration_outranks_conflicting_project_spelling` | covered by broader test — the Rust project route preserves the local entity spelling over a conflicting project declaration |
+| `SpacingTests.test_top_level_parameter_governs_file_case` | lexical | — | — | intentionally changed — the fixed reference applies the top-level parameter, while the current Rust project resolver still selects the competing module spelling; the focused comparison is recorded in the compatibility report |
 | `SpacingTests.test_declaration_entities_are_not_replaced_by_global_symbol_case` | lexical | `src/transform/passes/case_pass.rs` | `declaration_entities_are_not_replaced_by_global_symbol_case` | ported |
 | `SpacingTests.test_normalizes_control_keywords_and_bracket_spacing` | lexical | `src/transform/passes/line_rules.rs` | `chunk_a_keyword_and_delimiter_rules_match_the_reference_shapes` | ported |
 | `SpacingTests.test_removes_empty_subroutine_arguments_and_spaces_select_type` | lexical | `src/transform/passes/line_rules.rs` | `chunk_a_keyword_and_delimiter_rules_match_the_reference_shapes` | ported |
@@ -102,15 +110,3 @@ Regenerate the row skeleton with `python3 tools/gen_traceability.py`; the last t
 | `RegressionFixTests.test_invalid_extension_is_rejected_before_reading` | lexical | `tests/io_workflow.rs` | `section_9_1_checks_extension_before_existence_with_distinct_status2_errors` | ported |
 | `RegressionFixTests.test_standard_free_form_extensions_are_accepted` | lexical | `tests/io_workflow.rs` | `all_discovers_uppercase_extensions_and_ignores_hook_git_environment` | covered by broader test — a valid uppercase extension reaches the file workflow while an invalid suffix is rejected |
 | `RegressionFixTests.test_wrapped_statement_keeps_not_against_its_bracket` | lexical | `src/format/wrapping.rs` | `generated_wrapping_stress_cases_are_fixed_points_and_fit_safe_breaks` | covered by broader test — a wrong bracket break changes the line sequence or fails the fixed-point assertion |
-
-## Repository tests for the patched reference
-
-These checks are authored in this repository and are not rows from the frozen
-CAMB reference suite.
-
-| Patched-reference test | Purpose |
-|---|---|
-| `PatchedSpacingTests.test_type_bound_procedures_only_supply_component_case` | owner-keyed type-bound procedure bindings |
-| `PatchedSpacingTests.test_governing_type_owner_beats_flat_binding_ambiguity` | governing owner beats an ambiguous flat binding |
-| `PatchedSpacingTests.test_old_style_local_declaration_beats_project_case` | local old-style declaration beats project case |
-| `PatchedSpacingTests.test_top_level_parameter_beats_project_case` | top-level parameter beats project case |

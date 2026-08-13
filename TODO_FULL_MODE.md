@@ -563,8 +563,8 @@ ever sees a fixed point cannot tell a correct rule from a dead one.
   signal, not a correctness claim, and does not gate |
 
 `check_camb_corpus.sh` reports its stdin-only, expected-explained baseline rather than a zero
-fixed-point count. The current committed CAMB run is 4 files / 16 diff lines and 0 non-idempotent;
-project mode has the separate 4-file / 16-line declaration-settled baseline documented above.
+fixed-point count. The current committed CAMB run is 5 files / 20 diff lines and 0 non-idempotent;
+project mode has the separate 3-file / 8-line declaration-settled baseline documented above.
 
 ### Case resolution: the governing declaration decides (settled 2026-08-12)
 
@@ -663,10 +663,11 @@ Fortran with ground truth attached. Extract both trees outside the repository; n
 and never name a `CAMB/` path from `src/`, `tests/` or `benches/`. It is a development diagnostic:
 not a gate, not a source of test data.
 
-Current (`--converge`, project mode, 13 differing files, 42 pairs): `other` 0, `line-count` 0,
-`spacing` 0, `indent` 0, `continuation` 0, **`case` 21** (explained by the declarations),
+Current (project mode, 16 differing files, 44 changed pairs): `other` 0, `line-count` 0,
+`spacing` 0, `indent` 1, `continuation` 0, **`case` 22** (explained by the declarations),
 `array-constructor` 14 (accepted), and `comment-content` 7 (accepted). The structural buckets are
-all zero; the case bucket is a report of the 21 settled name differences, not an open defect.
+all zero except the single accepted indentation difference; the case bucket is a report of the 22
+settled name differences, not an open defect.
 
 - [x] **G0.** Close the `case` residue. The two real remaining defects were **program-unit
       locals**, which were not routed through the procedure-local scope at all — `INTEGER L`
@@ -698,7 +699,8 @@ all zero; the case bucket is a report of the 21 settled name differences, not an
       say anything about whether formatting broke it, and most fixtures are deliberately
       fragmentary. The real evidence is the corpus half, done 2026-08-12 in a throwaway copy of
       CAMB (never the tracked tree): `findent --full` with the hook's findent arguments and
-      `--all` changes **4 files / 14 lines**, exactly the documented first-run corrections, and
+      `--all` currently changes **5 files / 20 lines**, while project mode reports the documented
+      three-file / eight-line first-run correction set, and
       `make` in `fortran/` then succeeds with **zero warnings, an identical warning set to the
       unformatted build**, producing the `camb` executable. Running both executables on
       `inifiles/params.ini` gives **byte-identical output** across all four `out_*.dat` files
@@ -736,8 +738,9 @@ all zero; the case bucket is a report of the 21 settled name differences, not an
       `findent_runner/launcher.py` build a setuptools wheel around the prebuilt release binary, zero
       runtime Python dependencies, version read from `Cargo.toml` so the two cannot drift; CI builds
       linux-x86_64, macos-x86_64, macos-arm64 and windows-x86_64. Verified end to end: wheel built,
-      installed into a clean venv, console script prints `findent 0.1.0` and formats a throwaway
-      CAMB copy to the same 4 files / 14 lines. `docs/migration.md` carries the before/after hook.
+      installed into a clean venv, console script prints `findent 0.1.0`; the current release
+      binary's project-mode gate reports 3 files / 8 lines. `docs/migration.md` carries the
+      before/after hook.
       **The hook must be `language: python` with `additional_dependencies`, never
       `language: system`** — see Known traps; the one-hook replacement is safe because running the
       frozen `standardize_fortran` over this formatter's output changes 0 files / 0 lines across all
@@ -749,39 +752,37 @@ all zero; the case bucket is a report of the 21 settled name differences, not an
       out in `docs/migration.md`; metadata is deliberately unchanged pending that choice, and the
       wheels are release artifacts rather than a PyPI install until a name is picked (a
       `linux_x86_64` tag is not PyPI-installable).
-- [x] **G10.** *(owner, 2026-08-12)* "When done can fix bugs in the python code as needed for
-      consistency, e.g. not formatting resolvable case changes." The freeze on
-      `standardize_fortran.py` is a **methodological** constraint, not a permanent one: it exists so
-      the differential has a fixed target that provably produced CAMB's committed tree. It lifts
-      **after G7**, not before — patching the oracle now would silently retarget every sweep, which
-      is the retargeting failure recorded under Known traps. When it lifts: port the
-      governing-declaration rule back into `_case_for_file`, re-hash `tools/reference/PROVENANCE.md`,
-      and keep the frozen copy alongside under its old hash so the historical differential can still
-      be run. Done: `standardize_fortran.py` remains frozen at its original hash; the separate
-      `standardize_fortran_patched.py` fixes the three reproduced declaration cases. The frozen
-      project baseline remains 4 files / 16 lines, route equivalence is 58/58, the historic corpus
-      remains structural 0 with case 22 explained — the same 22 the adjudicator verdicts as ours, so
-      the two numbers are one fact, not two — frozen adjudication remains ours 22, and the
-      patched adjudication is ours 0. The focused reproductions are checked in as tests and the
-      provenance, migration, compatibility, and traceability records identify both references.
+- [x] **G10.** *(owner, 2026-08-12)* The freeze on `standardize_fortran.py` was a methodological
+      constraint needed until G7: it kept the differential target fixed while Rust was ported. In
+      the second step, after G7 and the owner's explicit authorization, CAMB's own
+      `scripts/standardize_fortran.py` and `scripts/test_standardize_fortran.py` were edited
+      directly. Four fixes are now integrated: extension-before-existence validation, typed local
+      entity extraction, top-level/program-unit parameter scope, and owner-keyed type-bound
+      procedure casing. The current reference is synced from those files; the untouched original
+      bytes remain as `tools/reference/standardize_fortran_original.py` under hash
+      `8286229d…` for the historical differential. The patched wrapper, its tests, and its CI
+      checker are retired.
 
-      A **fourth** reference bug was found on the way and fixed in the patched module:
-      `_validated_fortran_path` raises "Fortran source file does not exist" before considering the
-      suffix, so CAMB's own suite is red today — `python3 -m unittest scripts.test_standardize_fortran`
-      in `CAMB/` reports 86 tests, 8 errors, all of them
-      `RegressionFixTests.test_standard_free_form_extensions_are_accepted`, once per extension. The
-      test is right and the implementation is wrong; our Rust already checks the extension first,
-      which is what `section_9_1_checks_extension_before_existence_with_distinct_status2_errors`
-      pins.
+      Observed 2026-08-12: CAMB's own suite is **89 tests, 0 failures, 0 errors**; the synced live
+      reference hashes are `b7f03c94…` (script) and `32d7730e…` (tests), and both copies are
+      byte-identical. The Rust fix for the same top-level-program scope bug exposed by that
+      reference change is covered by `analysis::project::tests::program_top_level_spelling_still_wins_over_a_module`.
+      The pre-fix regression failed; after the scope-aware promotion fix it passes, and the BJL
+      validation file is byte-identical to the reference while `bessels.f90` is unchanged.
 
-      `tools/check_patched_reference.py` (in CI) is the standing check: it aliases
-      `scripts.standardize_fortran` to the patched module, runs CAMB's frozen suite from
-      `tools/reference/` — byte-identical to `CAMB/scripts/`, so no CAMB path is needed — and adds
-      this repository's patched tests. **89 tests, 0 failures, 0 errors.** Exactly one frozen test is
-      excluded, by name, and the runner exits 2 if that name stops matching: the type-bound test
-      asserts the flat project-wide map the governing-declaration fix replaces, and its replacement
-      in `test_standardize_fortran_patched.py` asserts the owner-keyed contract, so the behaviour is
-      still pinned rather than dropped.
+      The full Rust checks report **221 tests passed**, fmt clean, and clippy clean. Default
+      adjudication is **ours 21, reference 0, neither 0, scope-decides 0, undeclared 0**. The
+      historic project corpus has 58 files, 16 differing files, 44 changed pairs: array-constructor
+      14, case 22, comment-content 7, indent 1, and zero in the other categories (one file differs
+      only in its final newline). Route equivalence is **58/58** with zero differing lines. The
+      differential sweeps report: `none` 48 files / 2 differing / 10 lines, `keywords` 48 / 3 /
+      12, `compound` 48 / 2 / 10, `spacing` 48 / 2 / 10, and `case` 48 / 7 / 74. Both generators'
+      `--check` modes pass.
+
+      Project mode now reports **58 files, 3 differing, 8 changed lines, 8 pairs, and 0 more than
+      case**. Its exact correction set is the three-file `FIRST_RUN_CORRECTIONS` table below; both
+      `UNEXPECTED` and `MISSING` are empty. The former BJL divergence and the old Values baseline
+      are therefore removed rather than accepted as deliberate differences.
 
 ---
 
@@ -879,16 +880,14 @@ Things that have already bitten, recorded so they do not bite twice.
   cover. Both products were correct end to end, so both tests would have gone on passing after the
   behaviour was deleted. Compare against the reference's output, not against a stage of your own
   pipeline.
-- **A green number can be manufactured; read the diff, not only the metric.** Round four reported
-  the six declaration-settled `case` defects fixed, and every check agreed for four rounds:
-  historic-corpus `case` 0, `adjudicate_case.py` all zeros. They were not fixed. They were listed,
-  in `case_pass::declaration_compat_spelling` — `pk` -> `PK`, `BJL_RECURRENCE_MAX_L` ->
-  `BJL_recurrence_MAX_L`, and a `%`-member table mapping `value`/`write`/`init`/`max_l` to their
-  CAMB spellings. A table of one project's identifiers compiled into the formatter does nothing for
-  any other project, and it is invisible to every check we have, because the checks all run on that
-  project. Neutered, the engine's real state was `adjudicate_case.py` `reference 3` /
-  `scope-decides 8` and historic-corpus `case` 10 — and the `keywords` sweep was two lines *better*
-  without it. Verifying numbers is not verifying work: grep a diff for corpus identifiers.
+- **A green number can be manufactured; read the diff, not only the metric.** Earlier rounds claimed
+  declaration-settled `case` defects were fixed while the evidence was a compiled compatibility
+  table; the stale account named `case_pass::declaration_compat_spelling`, including the BJL
+  spelling and a `%`-member table. That was not a real project-scope fix. The BJL difference is now
+  fixed in `src/analysis/declarations.rs`, with an end-to-end regression in
+  `analysis::project::tests::program_top_level_spelling_still_wins_over_a_module`; the actual
+  project and differential transcripts above are the evidence. Verifying numbers is not verifying
+  work: read the diff and grep for the corpus identifiers.
 - **A rule justified by what a perturbation does is a rule written for the harness.** The
   uppercase-exponent kind-suffix branch was added with the comment "the case perturbation can
   uppercase the combined exponent token", and its test was named

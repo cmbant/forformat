@@ -125,10 +125,6 @@ def main() -> int:
     # working directory, so a relative path would resolve against that.
     parser.add_argument("--binary", default=str(HERE.parent / "target/release/findent"))
     parser.add_argument("--findent", default="findent")
-    parser.add_argument(
-        "--patched", action="store_true",
-        help="use the governing-declaration reference; the default remains frozen",
-    )
     parser.add_argument("--converge", action="store_true", default=True)
     parser.add_argument("--sites", type=int, default=4, help="declaration sites to print")
     args = parser.parse_args()
@@ -138,10 +134,8 @@ def main() -> int:
         print(f"no corpus under {args.pre}", file=sys.stderr)
         return 2
 
-    reference_path = D.HERE / "standardize_fortran_patched.py" if args.patched else None
-    module = D.load_reference(reference_path)
-    if args.patched:
-        print("reference       tools/reference/standardize_fortran_patched.py")
+    module = D.load_reference()
+    print("reference       tools/reference/standardize_fortran.py")
     D.VOCABULARY = frozenset(module.FORTRAN_STANDARD_WORDS) | frozenset(module.INTRINSIC_NAMES)
     sources = {
         path.relative_to(args.pre): path.read_text(errors="surrogateescape") for path in files

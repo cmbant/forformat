@@ -66,20 +66,13 @@ An owner who prefers to migrate in two steps can swap `findent-fortran` first an
 is one hook. The twelve arguments are CAMB's editable house style and are deliberately hook
 arguments, not formatter defaults:
 
-### G10 Python reference fixes
+### CAMB Python standardizer
 
-The frozen oracle remains `tools/reference/standardize_fortran.py`. The corrected copy is
-`tools/reference/standardize_fortran_patched.py`; it is a validation reference, not a replacement
-for the frozen file and does not change existing sweep targets. If the owner wants CAMB's committed
-tree to use the corrected Python behavior during the handoff, copy that patched file to
-`CAMB/scripts/standardize_fortran.py` (preserving CAMB's filename). The owner then reruns the
-standardization hook in a CAMB checkout; this repository's `CAMB/` copy is intentionally untouched.
-
-On the supplied CAMB tree, the Rust output versus the patched reference was checked in a throwaway
-checkout: the former 4-file/14-line declaration correction set becomes **0 files / 0 lines**.
-That is a handoff verification, not a change to `CAMB/` here. The corrected Python also fixes the
-three settled reference cases (`values`, `pk`, and `bjl_recurrence_max_l`) without changing the
-frozen baseline.
+On 2026-08-12, the owner-directed fix was integrated directly into
+`CAMB/scripts/standardize_fortran.py`: extension validation, typed-local extraction, top-level
+parameter scope, and owner-keyed type-bound procedure casing. The synced
+`tools/reference/standardize_fortran.py` is the current reference; the old bytes remain only as
+`standardize_fortran_original.py` for historical comparison. There is no separate patched module.
 
 ```yaml
       # Before (both hooks):

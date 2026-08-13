@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import difflib
+import hashlib
 import importlib.util
 import re
 import subprocess
@@ -38,8 +39,11 @@ FINDENT_ARGS = [
 
 def load_reference(path: Path | None = None):
     path = path or (HERE / "standardize_fortran.py")
+    path = path.resolve()
+    digest = hashlib.sha256(str(path).encode()).hexdigest()[:12]
+    module_name = f"reference_{path.stem}_{digest}"
     spec = importlib.util.spec_from_file_location(
-        "frozen_standardize_fortran" if path.name == "standardize_fortran.py" else "patched_standardize_fortran",
+        module_name,
         path,
     )
     module = importlib.util.module_from_spec(spec)

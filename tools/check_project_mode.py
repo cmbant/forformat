@@ -51,14 +51,11 @@ WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # baseline, not an exclusion: a correction that grows, shrinks or disappears
 # fails the check, because either the resolver changed or CAMB did.
 #
-#   %Values -> values   results.f90:105    procedure :: values => Thermo_values
 #   max_nu  -> max_Nu   model.f90:24       integer, parameter :: max_Nu = 5
 #   EVout   -> EVOut    equations.f90:703  type(EvolutionVars) EV, EVOut
 #                       equations.f90:829  type(EvolutionVars) EV, EVOut
 #   item    -> Item     ObjectLists.f90:90 generic :: Item => TRealList_Item
 FIRST_RUN_CORRECTIONS: collections.Counter[tuple[str, str, str]] = collections.Counter({
-    ("fortran/camb_python.f90", "Values", "values"): 1,
-    ("fortran/equations.f90", "Values", "values"): 7,
     ("fortran/equations.f90", "EVout", "EVOut"): 2,
     ("fortran/equations.f90", "max_nu", "max_Nu"): 1,
     ("fortran/model.f90", "max_nu", "max_Nu"): 3,
