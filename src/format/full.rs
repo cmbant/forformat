@@ -176,6 +176,10 @@ fn reflow_with_context_inner(
     // lines in place, so measuring after it keeps the index correspondence and
     // makes the width exact rather than nearly right.
     crate::transform::passes::layout_post::declaration_separator_alignment(&mut laid_out, config)?;
+    // Comment alignment only shrinks a gap, so it cannot invalidate a wrap
+    // decision — but it must still be measured, or the wrapper sizes lines
+    // against an authored gap that is about to be compressed away.
+    crate::transform::passes::layout_post::trailing_comment_alignment(&mut laid_out, config)?;
     let laid_out_width = |line: usize| laid_out.lines.get(line).map_or(0, |text| text.len());
 
     let mut lines: Vec<Vec<u8>> = Vec::with_capacity(document.lines.len());
@@ -845,6 +849,50 @@ end module m
                 );
             }
         }
+    }
+
+    #[test]
+    fn project_case_does_not_make_wrapped_intrinsics_non_idempotent() {
+        // The unrelated project declaration supplies project-wide `Size` evidence. The
+        // target declaration uses the intrinsic twice in a dimension bound;
+        // at a narrow budget the second occurrence becomes a continuation
+        // fragment, which must retain the intrinsic's canonical lowercase
+        // spelling across both runs.
+        let target = b"module target\n\
+implicit none\n\
+contains\n\
+subroutine s(x, i, j)\n\
+real :: x\n\
+real(ReallyLongKindName) :: LongJMat(size(x%element(i, j)%x), size(x%element(i, j)%x))\n\
+end subroutine s\n\
+end module target\n";
+        let project_source = b"module project_names\n\
+real :: Size\n\
+end module project_names\n";
+        let project = analyze_project([
+            (Path::new("target.f90"), target.as_slice()),
+            (Path::new("project_names.f90"), project_source.as_slice()),
+        ])
+        .unwrap();
+        let config = FormatConfig {
+            mode: FormatMode::Full,
+            wrap: crate::config::WrapConfig {
+                enabled: true,
+                line_length: 80,
+            },
+            ..FormatConfig::default()
+        };
+        let once = format_with_context(target, &project, &config)
+            .unwrap()
+            .bytes;
+        let twice = format_with_context(&once, &project, &config).unwrap().bytes;
+        assert_eq!(twice, once);
+        let output = String::from_utf8(once).unwrap();
+        assert!(
+            output.contains("LongJMat(size(x%element(i, j)%x), &\n"),
+            "{output}"
+        );
+        assert!(output.contains("size(x%element(i, j)%x))"), "{output}");
     }
 
     /// An unwrappable statement keeps every physical line it came with.  The

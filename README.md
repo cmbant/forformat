@@ -103,6 +103,25 @@ To format every tracked free-form Fortran source in a checkout, use:
 forformat --all
 ```
 
+Repository-wide formatting settings are discovered from the nearest project root. For any
+repository, put formatter options in a top-level `.forformat.toml`; Python projects can use the
+same option names in `[tool.forformat]` in `pyproject.toml`:
+
+```toml
+[tool.forformat]
+mode = "full"
+indent = 4
+line-length = 100
+align-paren = true
+defines = ["USE_MPI", "REAL_KIND"]
+```
+
+The standalone `.forformat.toml` uses the same top-level keys. Configuration applies to `--all`,
+explicit file paths, and standard-input runs from that project. Command-line options take
+precedence over the project file; use `--config PATH` to select a file explicitly or `--no-config`
+to ignore discovered settings. Workflow controls such as `--all`, `--check`, and `--diff` remain
+command-line-only.
+
 ## Rust library
 
 The Rust crate also exposes the core formatter for applications that need an in-memory API:

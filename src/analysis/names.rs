@@ -96,6 +96,19 @@ impl CaseMap {
         }
     }
 
+    /// Fold in only the names this map does not already have.
+    ///
+    /// This is inheritance rather than accumulation: a `BLOCK` that redeclares
+    /// a host name shadows it, so the two spellings are not evidence about one
+    /// entity and must not make it ambiguous the way [`Self::merge`] would.
+    pub fn overlay(&mut self, outer: &CaseMap) {
+        for (key, entry) in &outer.entries {
+            self.entries
+                .entry(key.clone())
+                .or_insert_with(|| entry.clone());
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

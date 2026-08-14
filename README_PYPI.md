@@ -55,6 +55,19 @@ Input from standard input is also processed without a repository scan:
 forformat --stdin < src/module.f90 > /tmp/module.f90
 ```
 
+Project settings can be kept in a top-level `.forformat.toml`, or in `[tool.forformat]` in a
+Python project's `pyproject.toml`. Keys use the same names as the long command-line options:
+
+```toml
+[tool.forformat]
+indent = 4
+line-length = 100
+align-paren = true
+```
+
+Command-line options override project settings. `--config PATH` selects a specific file and
+`--no-config` disables configuration discovery.
+
 ### Example profile
 
 This profile mirrors the indentation settings used by CAMB. The final
@@ -63,7 +76,6 @@ underscores.
 
 ```sh
 forformat \
-	--full \
 	--indent=4 \
 	--indent-module=0 \
 	--indent-procedure=0 \

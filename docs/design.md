@@ -702,8 +702,13 @@ normalization must not change their structural meaning.
 Defaults remain findent 4.3.7's. CAMB passes its profile as explicit arguments exactly as
 `findent_fortran.py` does today, so nothing has to change on day one.
 
-Optional and non-blocking: a discovered TOML config (`.findent.toml`, or `[tool.findent]` in
-`pyproject.toml`) with precedence **CLI > config file > findent defaults**.
+Project configuration is supported with precedence **CLI > config file > formatter defaults**.
+The nearest `.forformat.toml` is used for general repositories; `.findent.toml` is accepted as a
+compatibility spelling. Python projects can put the same keys in `[tool.forformat]` in
+`pyproject.toml`. The config keys mirror the long CLI option names, with booleans and arrays where
+that is more natural (`align-paren = true`, `defines = ["NAME"]`). `--config PATH` selects a file
+explicitly and `--no-config` disables discovery. File-selection and reporting controls remain
+CLI-only.
 
 Distribution is a Python wheel wrapping prebuilt binaries, exposing console entry points that
 replace both hook scripts. CI already builds reproducible static musl and Windows MSVC artifacts,

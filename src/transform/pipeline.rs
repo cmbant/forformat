@@ -155,6 +155,9 @@ pub fn normalize(
 /// `format::full`, which has to lay the text out again when it did.
 pub fn post_layout(document: &mut Document, config: &FormatConfig) -> Result<bool, FormatError> {
     let widths_changed = passes::layout_post::declaration_separator_alignment(document, config)?;
+    // After step 17, because a comment's column is measured from the code it
+    // follows and step 17 is what settles where that code ends.
+    passes::layout_post::trailing_comment_alignment(document, config)?;
     passes::layout_post::program_unit_spacing(document, config)?;
     passes::layout_post::limit_blank_lines(document, config)?;
     passes::layout_post::output_whitespace(document, config)?;

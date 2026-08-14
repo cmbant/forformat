@@ -232,8 +232,13 @@ fn apply_with_options(
     );
     text = normalize_write_output_spacing_with_state(&text, cx, incoming);
     text = normalize_delimiter_spacing_with_state(&text, cx, incoming);
-    let mut text =
-        normalize_comment_spacing_with_state(&text, cx, incoming, options.preserve_comment_after);
+    let mut text = normalize_comment_spacing_with_state(
+        &text,
+        cx,
+        incoming,
+        options.preserve_comment_after,
+        code_span_len(&text) as isize - code_span_len(line) as isize,
+    );
     if options.continued_statement && options.continued_named_parameter {
         text = compact_continued_named_argument(&text, options.open_groups);
     }
@@ -995,7 +1000,13 @@ fn normalize_delimiter_spacing_with_state(
 /// Port target: `normalize_comment_spacing` plus `format_comment_operators`,
 /// which is the one transform allowed to touch comment text (I3).
 pub fn normalize_comment_spacing(line: &[u8], cx: &PassContext) -> Vec<u8> {
-    normalize_comment_spacing_with_state(line, cx, LexState::default(), false)
+    normalize_comment_spacing_with_state(line, cx, LexState::default(), false, 0)
+}
+
+/// The width of the code on a line, ignoring indentation and any comment.
+fn code_span_len(line: &[u8]) -> usize {
+    let end = crate::source::regions::comment_start(line).unwrap_or(line.len());
+    line[..end].trim_ascii().len()
 }
 
 fn normalize_comment_spacing_with_state(
@@ -1003,6 +1014,7 @@ fn normalize_comment_spacing_with_state(
     cx: &PassContext,
     incoming: LexState,
     preserve_after: bool,
+    code_growth: isize,
 ) -> Vec<u8> {
     let _ = cx;
     let mut state = incoming;
@@ -1038,7 +1050,26 @@ fn normalize_comment_spacing_with_state(
     out.extend_from_slice(&before[..leading_end]);
     if !code.is_empty() {
         out.extend_from_slice(&code);
-        out.push(b' ');
+        // Keep the comment where the author put it rather than collapsing the
+        // gap to one space: a hand-aligned column of trailing comments is
+        // information this pass cannot judge, because it cannot see the
+        // neighbouring lines.  Step 17b makes the block-wide decision once
+        // layout has settled.
+        //
+        // The gap is corrected by however much the earlier rules widened this
+        // line's code, so what survives is the authored *column*, not the
+        // authored gap.  Without that, adding one space inside `i,j, j_ss`
+        // moves that comment one column right and a block its author had
+        // aligned no longer looks aligned to the pass that must decide.
+        // The correction only ever narrows: a line must not leave this pass
+        // wider than it arrived, or the wrapper — which measures here, before
+        // step 17b compresses anything — would size it against padding that is
+        // about to go away.  When the code shrank instead, holding the column
+        // would mean widening, so the column moves and the block falls back to
+        // a single space, which is the behaviour it had anyway.
+        let gap = before.len() - leading_end - code.len();
+        let corrected = (gap as isize - code_growth).max(1) as usize;
+        out.resize(out.len() + corrected.min(gap.max(1)), b' ');
     }
     out.push(b'!');
     if preserve_after
@@ -1414,7 +1445,7 @@ fn normalize_delimiters_in_code(code: &[u8], out: &mut Vec<u8>, following_conten
     }
 }
 
-fn is_directive_comment(comment: &[u8]) -> bool {
+pub(crate) fn is_directive_comment(comment: &[u8]) -> bool {
     if comment.len() < 2 || comment[0] != b'!' {
         return false;
     }
@@ -1652,6 +1683,13 @@ fn is_contextual_declaration_name(
     index: usize,
     continued_entity_list: bool,
 ) -> bool {
+    // Names nested in an entity's shape or initializer are uses, not
+    // declaration entities. In particular, an intrinsic such as SIZE in a
+    // dimension bound must still receive its canonical spelling even when a
+    // project declares an unrelated symbol named Size.
+    if tokens.get(index).is_none_or(|token| token.depth != 0) {
+        return false;
+    }
     let entities_start = match tokens[..index].iter().rposition(|token| {
         token.kind == TokenKind::Operator && token.text == b"::" && token.depth == 0
     }) {
@@ -2249,9 +2287,14 @@ mod tests {
 
     #[test]
     fn string_literals_and_comments_keep_their_case() {
+        // Normalization keeps the authored gap before the comment; the
+        // block-wide decision to compress it belongs to
+        // `layout_post::trailing_comment_alignment`, which cannot be made from
+        // one line. `an_isolated_trailing_comment_keeps_one_space` covers the
+        // end-to-end result.
         assert_eq!(
             normalized(b"CALL sub('IF THEN END')  ! IF THEN END\n"),
-            "call sub('IF THEN END') ! IF THEN END\n"
+            "call sub('IF THEN END')  ! IF THEN END\n"
         );
     }
 

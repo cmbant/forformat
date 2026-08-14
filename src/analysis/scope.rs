@@ -31,6 +31,11 @@ pub enum ScopeKind {
     /// A derived-type definition, whose members are components and type-bound
     /// procedures rather than variables.
     DerivedType,
+    /// A `BLOCK` or `ASSOCIATE` construct.  It is not a program unit, but it
+    /// does own declarations: a name declared in a `BLOCK` is invisible after
+    /// the matching `END BLOCK`, so it must not be attributed to the host
+    /// procedure the way an ordinary body declaration is.
+    Construct,
 }
 
 impl ScopeKind {
@@ -181,6 +186,7 @@ fn opening_kind(kind: StatementKind, parent: ScopeKind) -> Option<ScopeKind> {
         }
         StatementKind::Interface | StatementKind::AbstractInterface => Some(ScopeKind::Interface),
         StatementKind::Type => Some(ScopeKind::DerivedType),
+        StatementKind::Block | StatementKind::Associate => Some(ScopeKind::Construct),
         // `MODULE PROCEDURE name` is an interface member or a type-bound
         // binding in those scopes, and a real definition in a submodule.  This
         // mirrors the same decision in the indentation planner.
@@ -193,7 +199,10 @@ fn opening_kind(kind: StatementKind, parent: ScopeKind) -> Option<ScopeKind> {
 }
 
 fn closes_scope(kind: StatementKind, class: StatementClass) -> bool {
-    if matches!(kind, StatementKind::EndProcedure) {
+    if matches!(
+        kind,
+        StatementKind::EndProcedure | StatementKind::EndBlock | StatementKind::EndAssociate
+    ) {
         return true;
     }
     // `END`, `END MODULE`, `END TYPE`, `END INTERFACE`, `END SUBROUTINE` and
@@ -253,6 +262,40 @@ mod tests {
             tree.program_unit_of_line(2).unwrap().name.as_deref(),
             Some(b"m".as_slice())
         );
+    }
+
+    #[test]
+    fn block_and_associate_constructs_open_and_close_a_scope() {
+        let tree = tree(
+            b"subroutine s(obj)\n\
+                associate (a => obj%c)\n\
+                  x = a\n\
+                end associate\n\
+                outer: block\n\
+                  integer :: b\n\
+                end block outer\n\
+                y = 1\n\
+              end subroutine s\n",
+        );
+        let kinds: Vec<_> = tree.scopes.iter().map(|scope| scope.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                ScopeKind::File,
+                ScopeKind::Procedure,
+                ScopeKind::Construct,
+                ScopeKind::Construct
+            ]
+        );
+        assert_eq!(tree.scopes[2].lines, 1..4);
+        assert_eq!(tree.scopes[3].lines, 4..7);
+        // A construct is not a program unit, so the host still governs.
+        assert_eq!(
+            tree.program_unit_of_line(5).unwrap().name.as_deref(),
+            Some(b"s".as_slice())
+        );
+        assert_eq!(tree.index_of_line(5), 3);
+        assert_eq!(tree.index_of_line(7), 1);
     }
 
     #[test]

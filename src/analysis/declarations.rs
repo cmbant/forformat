@@ -76,8 +76,8 @@ struct UseAssociation {
 /// file-declared names explicit.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DeclaredNameIndex {
-    /// Names owned by each procedure scope; line lookup selects the
-    /// innermost active procedure without copying the map.
+    /// Names owned by each procedure or construct scope; line lookup selects
+    /// the innermost active one without copying the map.
     local_names: Vec<CaseMap>,
     /// Names owned by each enclosing module/program/procedure scope.
     file_declared_names: Vec<CaseMap>,
@@ -86,6 +86,10 @@ pub struct DeclaredNameIndex {
     scopes_by_line: Vec<Vec<usize>>,
     /// The innermost procedure scope active on each physical line.
     procedures_by_line: Vec<Option<usize>>,
+    /// The innermost scope owning local declarations on each physical line.
+    /// This differs from `procedures_by_line` inside a `BLOCK` or `ASSOCIATE`,
+    /// whose declarations do not survive its `END`.
+    local_owners_by_line: Vec<Option<usize>>,
     /// Procedure-local names indexed by owning scope.  This is a compact
     /// reverse index used by case application to avoid leaking a local from a
     /// different procedure through the file-wide declaration table.
@@ -121,13 +125,15 @@ fn declared_spelling<'a>(names: Option<&'a CaseMap>, name: &[u8]) -> DeclaredSpe
 }
 
 impl DeclaredNameIndex {
-    /// The spelling map for the innermost procedure active on `line`.
+    /// The spelling map of the innermost local scope active on `line` — the
+    /// enclosing procedure, or a `BLOCK`/`ASSOCIATE` construct inside it.
     ///
-    /// The map is stored once per procedure scope; callers must not materialize
-    /// a visible-name map for every physical line (that is quadratic on large
-    /// modules).  `None` means the line is outside every procedure.
+    /// The map is stored once per scope; callers must not materialize a
+    /// visible-name map for every physical line (that is quadratic on large
+    /// modules).  `None` means the line is outside every procedure.  A
+    /// construct's map already carries the host names it does not shadow.
     pub fn local_at(&self, line: usize) -> Option<&CaseMap> {
-        self.procedures_by_line
+        self.local_owners_by_line
             .get(line)
             .and_then(|index| *index)
             .and_then(|index| self.local_names.get(index))
@@ -862,23 +868,39 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
     // enclosing procedure locals are intentionally not unioned here because
     // that is what `active_procedure_at` does in the reference.
     let mut locals_by_scope = vec![CaseMap::default(); scopes.scopes.len()];
+    // The innermost scope that owns each line's local declarations. A `BLOCK`
+    // owns its own, so a declaration inside one is not attributed to the host
+    // procedure and cannot outlive the construct.
+    let local_owners_by_line: Vec<Option<usize>> = scopes_by_line
+        .iter()
+        .map(|ancestors| {
+            ancestors
+                .iter()
+                .copied()
+                .find(|index| owns_locals(scopes.scopes[*index].kind))
+        })
+        .collect();
     for (index, scope) in scopes.scopes.iter().enumerate() {
-        if !is_procedure_scope(scope.kind) {
+        if !owns_locals(scope.kind) {
             continue;
         }
         let mut header_names = Vec::new();
-        if let Some(group) = analysis
-            .groups
-            .iter()
-            .find(|group| group.lines.start == scope.lines.start)
-        {
-            for statement in &group.statements {
-                header_names.extend(procedure_header_names(&statement.text));
+        if is_procedure_scope(scope.kind) {
+            if let Some(group) = analysis
+                .groups
+                .iter()
+                .find(|group| group.lines.start == scope.lines.start)
+            {
+                for statement in &group.statements {
+                    header_names.extend(procedure_header_names(&statement.text));
+                }
             }
         }
         for group in &analysis.groups {
             let line = group.lines.start;
-            if !scope_contains(scope, line) || !scope.is_specification(line) {
+            if local_owners_by_line.get(line).copied().flatten() != Some(index)
+                || !scope.is_specification(line)
+            {
                 continue;
             }
             for statement in &group.statements {
@@ -901,6 +923,44 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
         }
     }
 
+    // A construct's own declarations are the only thing that distinguishes it
+    // from its host, so the reverse index keeps attributing them to the host
+    // procedure: they are still names of that procedure's territory, just with
+    // a shorter life.
+    let mut local_scope_names: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
+    for (scope, names) in locals_by_scope.iter().enumerate() {
+        let owner = scopes
+            .ancestors(scope)
+            .into_iter()
+            .find(|index| is_procedure_scope(scopes.scopes[*index].kind));
+        let Some(owner) = owner else {
+            continue;
+        };
+        for name in names.keys() {
+            local_scope_names
+                .entry(name.to_ascii_lowercase())
+                .or_default()
+                .push(owner);
+        }
+    }
+
+    // Names a construct inherits from its host are visible inside it, so the
+    // construct's map is completed from its ancestors. ScopeTree emits parents
+    // before children, so each parent map is final by the time it is read.
+    for index in 0..scopes.scopes.len() {
+        if scopes.scopes[index].kind != ScopeKind::Construct {
+            continue;
+        }
+        let Some(parent) = scopes.scopes[index].parent.filter(|parent| *parent < index) else {
+            continue;
+        };
+        if !owns_locals(scopes.scopes[parent].kind) {
+            continue;
+        }
+        let inherited = locals_by_scope[parent].clone();
+        locals_by_scope[index].overlay(&inherited);
+    }
+
     let procedures_by_line = scopes_by_line
         .iter()
         .map(|ancestors| {
@@ -910,16 +970,6 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
                 .find(|index| is_procedure_scope(scopes.scopes[*index].kind))
         })
         .collect();
-
-    let mut local_scope_names: HashMap<Vec<u8>, Vec<usize>> = HashMap::new();
-    for (scope, names) in locals_by_scope.iter().enumerate() {
-        for name in names.keys() {
-            local_scope_names
-                .entry(name.to_ascii_lowercase())
-                .or_default()
-                .push(scope);
-        }
-    }
 
     let mut implicit_statements = vec![Vec::new(); scopes.scopes.len()];
     for group in &analysis.groups {
@@ -972,6 +1022,7 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
         file_declared_names: file_by_scope,
         scopes_by_line,
         procedures_by_line,
+        local_owners_by_line,
         local_scope_names,
         implicit_policies,
         implicit_scopes_by_line,
@@ -1001,8 +1052,12 @@ fn is_procedure_scope(kind: ScopeKind) -> bool {
     matches!(kind, ScopeKind::Program | ScopeKind::Procedure)
 }
 
-fn scope_contains(scope: &super::scope::Scope, line: usize) -> bool {
-    scope.lines.start <= line && line < scope.lines.end
+/// The scopes whose declarations are *local* names rather than file symbols.
+///
+/// A `BLOCK` construct joins the procedures here: its declarations behave like
+/// procedure locals, except that they stop being visible at its `END BLOCK`.
+fn owns_locals(kind: ScopeKind) -> bool {
+    is_procedure_scope(kind) || kind == ScopeKind::Construct
 }
 
 /// The subset of declaration extraction used by the reference's
@@ -1554,7 +1609,9 @@ fn scope_names(
                 file_symbols.insert(name);
                 declared_types.insert(name);
             }
-            ScopeKind::File | ScopeKind::Interface => {}
+            // A construct name lives in its own name space and is not a
+            // declaration of anything the case tables resolve.
+            ScopeKind::File | ScopeKind::Interface | ScopeKind::Construct => {}
         }
     }
 }
@@ -1802,6 +1859,41 @@ mod tests {
         assert!(names.local_contains(5, b"local"));
         assert!(!names.local_contains(7, b"size"));
         assert!(!names.file_declared_contains(0, b"size"));
+    }
+
+    #[test]
+    fn block_declarations_do_not_outlive_their_construct() {
+        let names = scoped(
+            b"module m\ninteger :: ModuleVar\ncontains\nsubroutine s()\nblock\ninteger :: MYVAR\nmyvar = 1\nend block\nmyvar = 2\nend\nend module m\n",
+        );
+        assert!(names.local_contains(6, b"myvar"));
+        assert_eq!(
+            names.governing_local_case(6, b"myvar"),
+            DeclaredSpelling::Spelling(b"MYVAR")
+        );
+        // Line 8 is after END BLOCK: the construct's declaration is gone.
+        assert!(!names.local_contains(8, b"myvar"));
+        assert_eq!(
+            names.governing_local_case(8, b"myvar"),
+            DeclaredSpelling::Absent
+        );
+        // The host's own names stay visible inside the block.
+        assert!(names.file_declared_contains(6, b"modulevar"));
+    }
+
+    #[test]
+    fn a_block_shadows_a_host_name_without_making_it_ambiguous() {
+        let names = scoped(
+            b"subroutine s()\ninteger :: Value\nblock\ninteger :: VALUE\nVALUE = 1\nend block\nValue = 2\nend subroutine s\n",
+        );
+        assert_eq!(
+            names.governing_local_case(4, b"value"),
+            DeclaredSpelling::Spelling(b"VALUE")
+        );
+        assert_eq!(
+            names.governing_local_case(6, b"value"),
+            DeclaredSpelling::Spelling(b"Value")
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@ use crate::{
     config::{FormatConfig, FormatMode, MacroDefine},
     error::FormatError,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The `--version` line, taken from the package manifest so a version bump is
 /// a one-line change in `Cargo.toml`.
@@ -29,6 +29,112 @@ pub struct Invocation {
 }
 
 pub fn parse<I>(args: I) -> Result<Command, FormatError>
+where
+    I: IntoIterator<Item = String>,
+    I::IntoIter: Iterator<Item = String>,
+{
+    let args: Vec<String> = args.into_iter().collect();
+    let preliminary = parse_inner(args.clone())?;
+    if matches!(preliminary, Command::Help | Command::Version) {
+        return Ok(preliminary);
+    }
+    let (no_config, explicit_config) = config_selection(&args)?;
+    let config_args = if no_config {
+        Vec::new()
+    } else {
+        let cwd = std::env::current_dir().map_err(|error| {
+            FormatError::InvalidOption(format!("cannot determine current directory: {error}"))
+        })?;
+        let start = config_start(&preliminary, &cwd);
+        crate::config::config_args(&start, explicit_config.as_deref())?
+    };
+    let mut combined = Vec::with_capacity(1 + config_args.len() + args.len());
+    combined.push(
+        args.first()
+            .cloned()
+            .unwrap_or_else(|| "forformat".to_string()),
+    );
+    combined.extend(config_args);
+    combined.extend(args.into_iter().skip(1));
+    parse_inner(combined)
+}
+
+fn config_start(command: &Command, cwd: &Path) -> PathBuf {
+    if let Command::Run(invocation) = command {
+        if invocation.all && invocation.paths.len() == 1 {
+            let candidate = if invocation.paths[0].is_absolute() {
+                invocation.paths[0].clone()
+            } else {
+                cwd.join(&invocation.paths[0])
+            };
+            if candidate.is_dir() {
+                return candidate;
+            }
+        }
+    }
+    cwd.to_path_buf()
+}
+
+fn config_selection(args: &[String]) -> Result<(bool, Option<PathBuf>), FormatError> {
+    let mut no_config = false;
+    let mut explicit = None;
+    let mut options_ended = false;
+    let mut values = args.iter().skip(1);
+    while let Some(arg) = values.next() {
+        if arg == "--" {
+            options_ended = true;
+            continue;
+        }
+        if options_ended {
+            continue;
+        }
+        let Some(long) = arg.strip_prefix("--") else {
+            continue;
+        };
+        let (name, inline_value) = match long.split_once('=') {
+            Some((name, value)) => (name, Some(value)),
+            None => (long, None),
+        };
+        let name = name.replace('_', "-").to_ascii_lowercase();
+        if name == "no-config" {
+            no_config = true;
+        } else if name == "config" && inline_value.is_some() {
+            let path = inline_value.unwrap();
+            if path.is_empty() {
+                return Err(FormatError::InvalidOption(
+                    "--config requires a path".to_string(),
+                ));
+            }
+            if explicit.replace(PathBuf::from(path)).is_some() {
+                return Err(FormatError::InvalidOption(
+                    "--config may be specified only once".to_string(),
+                ));
+            }
+        } else if name == "config" {
+            let path = values.next().ok_or_else(|| {
+                FormatError::InvalidOption("--config requires a path".to_string())
+            })?;
+            if path.is_empty() || path.starts_with('-') {
+                return Err(FormatError::InvalidOption(
+                    "--config requires a path".to_string(),
+                ));
+            }
+            if explicit.replace(PathBuf::from(path)).is_some() {
+                return Err(FormatError::InvalidOption(
+                    "--config may be specified only once".to_string(),
+                ));
+            }
+        }
+    }
+    if no_config && explicit.is_some() {
+        return Err(FormatError::InvalidOption(
+            "--config cannot be combined with --no-config".to_string(),
+        ));
+    }
+    Ok((no_config, explicit))
+}
+
+fn parse_inner<I>(args: I) -> Result<Command, FormatError>
 where
     I: IntoIterator<Item = String>,
     I::IntoIter: Iterator<Item = String>,
@@ -118,6 +224,10 @@ where
                 }
             };
             match name.as_str() {
+                "config" => {
+                    let _ = need(&mut value, &mut a)?;
+                }
+                "no-config" => {}
                 "indent" => {
                     let v = need(&mut value, &mut a)?;
                     if v == "none" {
@@ -169,6 +279,10 @@ where
                     c.ws_remred_value = value.as_deref().map(parse_num).transpose()?.unwrap_or(1);
                     c.ws_remred = c.ws_remred_value != 0;
                 }
+                "align-declarations" => {
+                    c.align_declarations = parse_bool(&need(&mut value, &mut a)?)?
+                }
+                "align-comments" => c.align_comments = parse_bool(&need(&mut value, &mut a)?)?,
                 "last-indent" => c.last_indent = true,
                 "last-usable" => c.last_usable = true,
                 "all" => all = true,
@@ -375,9 +489,9 @@ where
             "--stdout requires exactly one path and cannot be combined with --all, --check, or --diff".into(),
         ));
     }
-    if all && !paths.is_empty() {
+    if all && paths.len() > 1 {
         return Err(FormatError::InvalidOption(
-            "--all cannot be combined with paths".into(),
+            "--all accepts at most one directory path".into(),
         ));
     }
     if isolated && (all || paths.is_empty()) {
@@ -458,9 +572,12 @@ fn single_dash_long_option_suggestion(arg: &str) -> Option<String> {
         .to_ascii_lowercase();
     let known = matches!(
         name.as_str(),
-        "align-paren"
+        "align-comments"
+            | "align-declarations"
+            | "align-paren"
             | "all"
             | "check"
+            | "config"
             | "diff"
             | "full"
             | "include-left"
@@ -477,6 +594,7 @@ fn single_dash_long_option_suggestion(arg: &str) -> Option<String> {
             | "max-indent"
             | "no-wrap"
             | "normalize-only"
+            | "no-config"
             | "openmp"
             | "refactor-end"
             | "refactor-procedures"
@@ -569,8 +687,10 @@ Free-form Fortran formatter.\n\
   --include-left=<0|1>               put INCLUDE at the starting indent\n\
   -Rr, -RR, --refactor-end[=upcase]  complete END definition statements\n\
   --ws-remred[=<n>]                  reduce redundant whitespace\n\
+  --align-declarations=<0|1>         shrink space to align `::` blocks (default 1)\n\
+  --align-comments=<0|1>             shrink space to align trailing comment blocks (default 0)\n\
   -lastindent, -lastusable           print query result instead of source\n\
-  <paths>, --all                      format explicit files or all tracked sources\n\
+  <paths>, --all [directory]          format explicit files or all tracked sources\n\
   --stdin                             read source from stdin (default without paths)\n\
   --stdout                            write one file's result to stdout\n\
   --isolated                          do not scan repository sources for case resolution\n\
@@ -584,6 +704,8 @@ Free-form Fortran formatter.\n\
   --line-length=<n>                  wrapping budget (default 120)\n\
   -D NAME[=VALUE], --define=...      define a macro name (repeatable)\n\
   --uppercase-single-l               uppercase a lone `l` used as a name\n\
+  --config=<path>                    use a project TOML configuration explicitly\n\
+  --no-config                        ignore project TOML configuration\n\
   -h, --help                         show this help\n\
   -v, --version                      show version\n\
 Fixed-form input/output and automatic format detection are intentionally unsupported."
@@ -713,6 +835,8 @@ mod tests {
             "--indent-continuation=7",
             "--align-paren=3",
             "--ws-remred=1",
+            "--align-declarations=0",
+            "--align-comments=1",
             "--indent-changeteam=4",
             "--indent-associate=4",
             "--indent-block=4",
@@ -818,6 +942,15 @@ mod tests {
         assert!(!run(&["--wrap=0"]).wrap.enabled);
         assert_eq!(run(&["--line-length=100"]).wrap.line_length, 100);
         assert!(run(&["--uppercase-single-l"]).uppercase_single_l);
+    }
+
+    #[test]
+    fn alignment_reduction_toggles_default_on_for_declarations_and_off_for_comments() {
+        let default = run(&[]);
+        assert!(default.align_declarations);
+        assert!(!default.align_comments);
+        assert!(!run(&["--align-declarations=0"]).align_declarations);
+        assert!(run(&["--align-comments=1"]).align_comments);
     }
 
     #[test]

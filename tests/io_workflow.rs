@@ -1,3 +1,4 @@
+use forformat::io::{repository_root, tracked_sources};
 use std::{
     fs,
     io::Write,
@@ -86,6 +87,146 @@ fn all_discovers_uppercase_extensions_and_ignores_hook_git_environment() {
         b"program p\n   x=1\nend program p\n"
     );
     let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn project_config_applies_to_all_and_cli_options_override_it() {
+    let repo = temp_repo();
+    fs::write(
+        repo.join("pyproject.toml"),
+        b"[tool.forformat]\nmode = \"indent-only\"\nindent = 4\n",
+    )
+    .unwrap();
+    fs::write(repo.join("source.f90"), b"program p\nx=1\nend program p\n").unwrap();
+    git_add(&repo);
+
+    let configured = run(&repo, &["--all"]);
+    assert_eq!(configured.status.code(), Some(0));
+    assert_eq!(
+        fs::read(repo.join("source.f90")).unwrap(),
+        b"program p\n    x=1\nend program p\n"
+    );
+
+    fs::write(repo.join("source.f90"), b"program p\nx=1\nend program p\n").unwrap();
+    let overridden = run(&repo, &["--all", "--indent=2"]);
+    assert_eq!(overridden.status.code(), Some(0));
+    assert_eq!(
+        fs::read(repo.join("source.f90")).unwrap(),
+        b"program p\n  x=1\nend program p\n"
+    );
+
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn standalone_project_config_is_used_and_can_be_disabled() {
+    let repo = temp_repo();
+    fs::write(repo.join(".forformat.toml"), b"indent = 5\n").unwrap();
+    fs::write(repo.join("source.f90"), b"program p\nx=1\nend program p\n").unwrap();
+    git_add(&repo);
+
+    let configured = run(&repo, &["--indent-only", "--all"]);
+    assert_eq!(configured.status.code(), Some(0));
+    assert_eq!(
+        fs::read(repo.join("source.f90")).unwrap(),
+        b"program p\n     x=1\nend program p\n"
+    );
+
+    fs::write(repo.join("source.f90"), b"program p\nx=1\nend program p\n").unwrap();
+    let defaults = run(&repo, &["--no-config", "--indent-only", "--all"]);
+    assert_eq!(defaults.status.code(), Some(0));
+    assert_eq!(
+        fs::read(repo.join("source.f90")).unwrap(),
+        b"program p\n   x=1\nend program p\n"
+    );
+
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn config_selector_spellings_and_explicit_pyproject_are_honored() {
+    let repo = temp_repo();
+    fs::write(
+        repo.join("pyproject.toml"),
+        b"[tool.forformat]\nindent = 7\n",
+    )
+    .unwrap();
+    fs::write(repo.join("source.f90"), b"program p\nx=1\nend program p\n").unwrap();
+    git_add(&repo);
+
+    let disabled = run(&repo, &["--indent-only", "--all", "--no_config"]);
+    assert_eq!(disabled.status.code(), Some(0));
+    assert_eq!(
+        fs::read(repo.join("source.f90")).unwrap(),
+        b"program p\n   x=1\nend program p\n"
+    );
+
+    fs::write(repo.join("source.f90"), b"program p\nx=1\nend program p\n").unwrap();
+    let explicit = run(
+        &repo,
+        &["--indent-only", "--all", "--config", "pyproject.toml"],
+    );
+    assert_eq!(explicit.status.code(), Some(0));
+    assert_eq!(
+        fs::read(repo.join("source.f90")).unwrap(),
+        b"program p\n       x=1\nend program p\n"
+    );
+
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn help_and_version_ignore_malformed_project_config() {
+    let repo = temp_repo();
+    fs::write(repo.join(".forformat.toml"), b"indent = \"").unwrap();
+
+    let help = run(&repo, &["--help"]);
+    assert_eq!(help.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("Free-form Fortran formatter."));
+
+    let version = run(&repo, &["--version"]);
+    assert_eq!(version.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("forformat "));
+
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn all_directory_scope_uses_only_the_nested_repo_and_its_config() {
+    let parent = temp_repo();
+    fs::write(
+        parent.join("outer.f90"),
+        b"program outer\nx=1\nend program outer\n",
+    )
+    .unwrap();
+    git_add(&parent);
+    let repo = parent.join("camb");
+    fs::create_dir(&repo).unwrap();
+    Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    fs::write(repo.join(".forformat.toml"), b"indent = 6\n").unwrap();
+    fs::write(repo.join("source.f90"), b"program p\nx=1\nend program p\n").unwrap();
+    git_add(&repo);
+
+    let context_root = repository_root(&repo).unwrap().unwrap();
+    assert_eq!(context_root, fs::canonicalize(&repo).unwrap());
+    assert_eq!(
+        tracked_sources(&context_root).unwrap(),
+        vec![repo.join("source.f90")]
+    );
+
+    let output = run(&parent, &["--indent-only", "--all", "./camb"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("source.f90"));
+    assert_eq!(
+        fs::read(repo.join("source.f90")).unwrap(),
+        b"program p\n      x=1\nend program p\n"
+    );
+
+    let _ = fs::remove_dir_all(parent);
 }
 
 #[test]

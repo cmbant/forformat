@@ -443,17 +443,52 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     let profile = env::var_os("FORFORMAT_PROFILE_IO").is_some();
     let profile_start = Instant::now();
     let cwd = env::current_dir()?;
-    let root = repository_root(&cwd)?;
+    let all_scope = if invocation.all {
+        invocation
+            .paths
+            .first()
+            .map(|path| {
+                let candidate = resolve_input(path, None);
+                let canonical = fs::canonicalize(&candidate).map_err(|error| {
+                    WorkflowError::Usage(format!(
+                        "--all directory does not exist: {} ({error})",
+                        candidate.display()
+                    ))
+                })?;
+                if !fs::metadata(&canonical)?.is_dir() {
+                    return Err(WorkflowError::Usage(format!(
+                        "--all requires a directory: {}",
+                        candidate.display()
+                    )));
+                }
+                Ok(canonical)
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let root = if let Some(scope) = all_scope.as_deref() {
+        repository_root(scope)?
+    } else {
+        repository_root(&cwd)?
+    };
     let tracked = if invocation.all || (!invocation.isolated && root.is_some()) {
         root.as_deref().map(tracked_sources).transpose()?
     } else {
         None
     };
     let target_paths = if invocation.all {
-        tracked
+        let tracked = tracked
             .as_ref()
-            .ok_or_else(|| WorkflowError::Usage("--all requires a valid Git checkout".into()))?
-            .clone()
+            .ok_or_else(|| WorkflowError::Usage("--all requires a valid Git checkout".into()))?;
+        match all_scope.as_deref() {
+            Some(scope) => tracked
+                .iter()
+                .filter(|path| path.starts_with(scope))
+                .cloned()
+                .collect(),
+            None => tracked.clone(),
+        }
     } else {
         deduplicate(
             invocation

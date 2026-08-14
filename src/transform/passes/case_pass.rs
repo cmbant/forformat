@@ -7,7 +7,7 @@
 use crate::{
     analysis::{
         names::{resolve, NameSpace},
-        scoped_declared_names, DeclaredSpelling, TypeMaps,
+        scoped_declared_names, CaseMap, DeclaredSpelling, TypeMaps,
     },
     error::FormatError,
     source::{
@@ -120,6 +120,11 @@ pub fn macros(document: &mut Document, cx: &PassContext) -> Result<Changed, Form
 /// (`standardize_fortran.py:1589`).
 pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
     let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
+    // An implicit function result is declared in the procedure's local
+    // namespace, while calls to that function resolve through the file-wide
+    // procedure namespace.  Capture that one-entity override once so the
+    // header and every other occurrence use the same spelling in this pass.
+    let procedure_spellings = implicit_function_spellings(cx.analysis, &declared_names);
     let mut associate_stack: Vec<AssociateFrame> = Vec::new();
     let mut line_edits: Vec<Vec<(Range<usize>, Vec<u8>)>> = vec![Vec::new(); document.lines.len()];
 
@@ -173,6 +178,7 @@ pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, Fo
                     &declared_names,
                     cx,
                     Some(&statement_context),
+                    Some(&procedure_spellings),
                 ) else {
                     continue;
                 };
@@ -240,6 +246,7 @@ fn classify_spelling(
     declared_names: &crate::analysis::DeclaredNameIndex,
     cx: &PassContext,
     associates: Option<&AssociateFrame>,
+    procedure_spellings: Option<&CaseMap>,
 ) -> Option<Vec<u8>> {
     let token = &tokens[index];
     let associate_alias = associates.is_some_and(|context| {
@@ -285,11 +292,17 @@ fn classify_spelling(
         );
     }
 
-    if let Some(spelling) = procedure_definition_spelling(tokens, index, line, declared_names) {
+    if let Some(spelling) =
+        procedure_definition_spelling(tokens, index, line, declared_names, procedure_spellings)
+    {
         return Some(spelling);
     }
     if is_declaration_entity(tokens, index) {
-        return None;
+        // A declaration is normally its own authority, but the one that types
+        // the result of a function without `RESULT(...)` declares the function
+        // itself. It names the same entity as the header, so it follows the
+        // header rather than competing with it.
+        return implicit_result_spelling(cx, line, token, procedure_spellings);
     }
 
     if let Some(space) = named_end_space(tokens, index) {
@@ -377,11 +390,21 @@ fn classify_spelling(
         return None;
     }
 
+    // Inside the function itself, the header has to win here rather than
+    // below, because the local result declaration would otherwise satisfy the
+    // local lookup first.
+    if let Some(spelling) = implicit_result_spelling(cx, line, token, procedure_spellings) {
+        return Some(spelling);
+    }
+
     // The B9 procedure map contains spellings, not merely membership.
     match declared_names.governing_local_case(line, token.text) {
         DeclaredSpelling::Spelling(spelling) => return Some(spelling.to_owned()),
         DeclaredSpelling::Ambiguous => return None,
         DeclaredSpelling::Absent => {}
+    }
+    if let Some(spelling) = procedure_spellings.and_then(|spellings| spellings.get(token.text)) {
+        return Some(spelling.to_owned());
     }
     file_symbol_spelling(
         declared_names,
@@ -408,6 +431,7 @@ fn procedure_definition_spelling(
     index: usize,
     line: usize,
     declared_names: &crate::analysis::DeclaredNameIndex,
+    procedure_spellings: Option<&CaseMap>,
 ) -> Option<Vec<u8>> {
     let first = tokens
         .iter()
@@ -430,10 +454,87 @@ fn procedure_definition_spelling(
             })
             .and_then(|_| tokens.get(index))
     }?;
-    declared_names
-        .local_at(line)
-        .and_then(|local| local.get(procedure_name.text))
+    procedure_spellings
+        .and_then(|spellings| spellings.get(procedure_name.text))
+        .or_else(|| {
+            declared_names
+                .local_at(line)
+                .and_then(|local| local.get(procedure_name.text))
+        })
         .map(ToOwned::to_owned)
+}
+
+/// The header spelling of the function `line` is inside, when `token` names
+/// that function and it takes its result from its own name.
+fn implicit_result_spelling(
+    cx: &PassContext,
+    line: usize,
+    token: &Token<'_>,
+    procedure_spellings: Option<&CaseMap>,
+) -> Option<Vec<u8>> {
+    let active = active_procedure(cx.scopes, line)?;
+    if !active.eq_ignore_ascii_case(token.text) {
+        return None;
+    }
+    procedure_spellings?.get(token.text).map(ToOwned::to_owned)
+}
+
+/// Return the header spelling of each function whose result is its own name.
+///
+/// A function without `RESULT(...)` names one entity twice: in its header, and
+/// in the local declaration that gives its result a type.  The definition is
+/// the header, so its spelling governs the whole entity — the body, the named
+/// `END`, and calls from other procedures, which cannot see the local map at
+/// all.  Resolving every occurrence from this one map is also what makes the
+/// name a fixed point: the header is what the next pass reads back.
+fn implicit_function_spellings(
+    analysis: &crate::transform::document::Analysis,
+    declared_names: &crate::analysis::DeclaredNameIndex,
+) -> CaseMap {
+    let mut spellings = CaseMap::default();
+    for group in &analysis.groups {
+        for statement in &group.statements {
+            let tokens = tokenize(&statement.text, &mut LexState::default());
+            let Some(first) = tokens
+                .iter()
+                .position(|token| token.kind != TokenKind::Number)
+            else {
+                continue;
+            };
+            if tokens[first].is_name(b"end") {
+                continue;
+            }
+            let Some(function) = tokens
+                .iter()
+                .position(|token| token.depth == 0 && token.is_name(b"function"))
+            else {
+                continue;
+            };
+            let Some(name) = tokens
+                .get(function + 1)
+                .filter(|token| token.kind == TokenKind::Name)
+            else {
+                continue;
+            };
+            // RESULT is a header keyword at depth zero; a dummy named
+            // `result` is nested in the argument list and does not count.
+            if tokens
+                .iter()
+                .skip(function + 2)
+                .any(|token| token.depth == 0 && token.is_name(b"result"))
+            {
+                continue;
+            }
+            // Only a function that declares its own result locally is a
+            // two-spelling entity; without that declaration the ordinary
+            // symbol resolver already governs the name.
+            if !declared_names.local_contains(group.lines.start, name.text) {
+                continue;
+            }
+            spellings.insert(name.text);
+        }
+    }
+    spellings
 }
 
 fn resolver_spelling(cx: &PassContext, space: NameSpace, name: &[u8]) -> Option<Vec<u8>> {
@@ -461,10 +562,17 @@ pub(crate) fn restore_declined_component_spellings(
             {
                 return None;
             }
-            let spelling =
-                classify_spelling(&original_tokens, index, line, declared_names, cx, None)
-                    .is_none()
-                    .then_some(token.text);
+            let spelling = classify_spelling(
+                &original_tokens,
+                index,
+                line,
+                declared_names,
+                cx,
+                None,
+                None,
+            )
+            .is_none()
+            .then_some(token.text);
             Some(spelling)
         })
         .collect();
@@ -1230,6 +1338,114 @@ mod tests {
             declared(document, context).unwrap()
         });
         assert_eq!(twice, once);
+    }
+
+    #[test]
+    fn implicit_function_result_spelling_is_shared_with_calls() {
+        let source = b"module m\n\
+contains\n\
+function BETA3(x)\n\
+implicit none\n\
+real :: x\n\
+real :: BeTa3\n\
+BeTa3 = x\n\
+end function beta3\n\
+subroutine s(x, num)\n\
+real :: x, num\n\
+num = bEtA3(x)\n\
+end subroutine s\n\
+end module m\n";
+        let project =
+            analyze_project([(Path::new("implicit-result.f90"), source.as_slice())]).unwrap();
+        let config = FormatConfig {
+            mode: FormatMode::Full,
+            ..FormatConfig::default()
+        };
+        let once = format_source_with_context(source, &project, &config)
+            .unwrap()
+            .bytes;
+        let twice = format_source_with_context(&once, &project, &config)
+            .unwrap()
+            .bytes;
+        assert_eq!(twice, once);
+        // The header defines the entity; the result declaration, the body, the
+        // named END and the call in `s` all follow it.
+        let output = String::from_utf8(once).unwrap();
+        assert!(output.contains("function BETA3(x)"));
+        assert!(output.contains("real :: BETA3"));
+        assert!(output.contains("BETA3 = x"));
+        assert!(output.contains("end function BETA3"));
+        assert!(output.contains("num = BETA3(x)"));
+    }
+
+    #[test]
+    fn explicit_function_result_does_not_use_result_spelling_for_calls() {
+        let source = b"module m\n\
+contains\n\
+function BETA3(x) result(ResultValue)\n\
+implicit none\n\
+real :: x\n\
+real :: resultvalue\n\
+resultvalue = x\n\
+end function beta3\n\
+subroutine s(x, num)\n\
+real :: x, num\n\
+num = bEtA3(x)\n\
+end subroutine s\n\
+end module m\n";
+        let project =
+            analyze_project([(Path::new("explicit-result.f90"), source.as_slice())]).unwrap();
+        let config = FormatConfig {
+            mode: FormatMode::Full,
+            ..FormatConfig::default()
+        };
+        let once = format_source_with_context(source, &project, &config)
+            .unwrap()
+            .bytes;
+        let twice = format_source_with_context(&once, &project, &config)
+            .unwrap()
+            .bytes;
+        assert_eq!(twice, once);
+        let output = String::from_utf8(once).unwrap();
+        assert!(output.contains("function BETA3(x) result(resultvalue)"));
+        assert!(output.contains("resultvalue = x"));
+        assert!(output.contains("num = BETA3(x)"));
+        assert!(!output.contains("num = ResultValue(x)"));
+    }
+
+    #[test]
+    fn a_block_declaration_does_not_recase_uses_after_its_end() {
+        let source = b"module m\n\
+integer :: ModuleVar\n\
+contains\n\
+subroutine s()\n\
+block\n\
+integer :: MYVAR\n\
+myvar = 1\n\
+end block\n\
+myvar = 2\n\
+modulevar = 3\n\
+end\n\
+end module m\n";
+        let project = analyze_project([(Path::new("block.f90"), source.as_slice())]).unwrap();
+        let config = FormatConfig {
+            mode: FormatMode::Full,
+            ..FormatConfig::default()
+        };
+        let once = format_source_with_context(source, &project, &config)
+            .unwrap()
+            .bytes;
+        let twice = format_source_with_context(&once, &project, &config)
+            .unwrap()
+            .bytes;
+        assert_eq!(twice, once);
+        let output = String::from_utf8(once).unwrap();
+        assert!(output.contains("MYVAR = 1"));
+        // The construct's declaration is out of scope here, so nothing governs
+        // this occurrence and it is left as authored.
+        assert!(output.contains("myvar = 2"));
+        // A host declaration still reaches past the construct as before.
+        assert!(output.contains("ModuleVar = 3"));
     }
 
     #[test]
