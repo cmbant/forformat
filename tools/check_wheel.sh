@@ -57,4 +57,70 @@ forformat --not-an-option </dev/null >/dev/null 2>"$work/stderr.txt" || status=$
 test "$status" -eq 2
 grep -q 'invalid option: --not-an-option' "$work/stderr.txt"
 
-echo "wheel check: forformat $version installed from $dist passed the CLI contract"
+mkdir "$work/repo"
+git -C "$work/repo" init -q
+printf 'indent = 8\n' > "$work/repo/.forformat.toml"
+printf 'module SharedName\nend module SharedName\n' > "$work/repo/project.f90"
+git -C "$work/repo" add -A
+printf 'indent = 5\n' > "$work/explicit.toml"
+
+(
+cd "$work"
+FORFORMAT_WHEEL_WORK="$work" python - <<'PY'
+import os
+import subprocess
+import warnings
+from pathlib import Path
+
+from forformat import ForformatError, ForformatWarning, format_source
+
+work = Path(os.environ["FORFORMAT_WHEEL_WORK"])
+repo = work / "repo"
+os.chdir(repo)
+
+source = "program p\nx=1\nend program p\n"
+formatted = format_source(source)
+assert isinstance(formatted, str)
+assert "\n   x = 1\n" in formatted
+
+configured = format_source(
+    source,
+    options=("--config", str(work / "explicit.toml")),
+)
+assert "\n     x = 1\n" in configured
+
+target = repo / "target.f90"
+target.write_text("program p\ninteger :: StaleName\nend program p\n")
+subprocess.run(["git", "add", "target.f90"], check=True)
+contextual = format_source(
+    "program p\nuse sharedname\nprint *, stalename\nend program p\n",
+    repo_context_path=target,
+)
+assert "\n   use SharedName\n" in contextual
+assert "stalename" in contextual
+assert "StaleName" not in contextual
+
+raw = b"program p\nprint *, 'x' ! \xff\nend program p\n"
+raw_formatted = format_source(raw)
+assert isinstance(raw_formatted, bytes)
+assert b"\xff" in raw_formatted
+
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    format_source(
+        "program p\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nend program p\n",
+        options=("--line-length=20",),
+    )
+assert any(issubclass(item.category, ForformatWarning) for item in caught)
+
+try:
+    format_source(source, options=("--not-an-option",))
+except ForformatError as error:
+    assert error.returncode == 2
+    assert "invalid option" in error.stderr
+else:
+    raise AssertionError("invalid options must raise ForformatError")
+PY
+)
+
+echo "wheel check: forformat $version installed from $dist passed the CLI and import contracts"

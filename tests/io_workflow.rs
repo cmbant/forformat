@@ -329,6 +329,83 @@ fn stdin_applies_command_line_defines_in_full_mode() {
 }
 
 #[test]
+fn project_context_supplies_declarations_without_discovering_config() {
+    let repo = temp_repo();
+    fs::write(repo.join(".forformat.toml"), b"indent = 8\n").unwrap();
+    fs::write(
+        repo.join("project.f90"),
+        b"module SharedName\nend module SharedName\n",
+    )
+    .unwrap();
+    git_add(&repo);
+
+    let source = b"program p\nuse sharedname\nprint *, 1\nend program p\n";
+    let output = run_stdin(
+        &repo,
+        &["--stdin", "--full", "--no-config", "--project-context", "."],
+        source,
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.stdout,
+        b"program p\n   use SharedName\n   print *, 1\n\nend program p\n"
+    );
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn file_project_context_excludes_the_stale_on_disk_target() {
+    let repo = temp_repo();
+    let target = repo.join("target.f90");
+    fs::write(&target, b"program p\ninteger :: StaleName\nend program p\n").unwrap();
+    fs::write(
+        repo.join("shared.f90"),
+        b"module SharedName\nend module SharedName\n",
+    )
+    .unwrap();
+    git_add(&repo);
+
+    let source = b"program p\nuse sharedname\nprint *, stalename\nend program p\n";
+    let output = run_stdin(
+        &repo,
+        &[
+            "--stdin",
+            "--full",
+            "--no-config",
+            "--project-context",
+            target.to_str().unwrap(),
+        ],
+        source,
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.stdout,
+        b"program p\n   use SharedName\n   print *, stalename\n\nend program p\n"
+    );
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn project_context_rejects_a_non_repository_directory() {
+    let directory = std::env::temp_dir().join(format!(
+        "forformat-non-repository-{}-{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir(&directory).unwrap();
+    let output = run_stdin(
+        &directory,
+        &["--stdin", "--no-config", "--project-context", "."],
+        b"program p\nend program p\n",
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("--project-context requires a valid Git checkout"));
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
 fn isolated_keeps_local_component_resolution_like_stdin() {
     let repo = temp_repo();
     let source = b"module m

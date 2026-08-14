@@ -109,18 +109,33 @@ fn git(args: &[&str], cwd: &Path) -> io::Result<std::process::Output> {
     command.output()
 }
 
+fn git_path(raw: &[u8]) -> io::Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Ok(PathBuf::from(OsString::from_vec(raw.to_vec())))
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(raw.to_vec())
+            .map(OsString::from)
+            .map(PathBuf::from)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    }
+}
+
 /// Find the checkout containing start.
 pub fn repository_root(start: &Path) -> io::Result<Option<PathBuf>> {
     let output = git(&["rev-parse", "--show-toplevel"], start)?;
     if !output.status.success() {
         return Ok(None);
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let root = text.trim();
-    if root.is_empty() {
+    let raw = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+    let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
+    if raw.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(fs::canonicalize(root)?))
+        Ok(Some(fs::canonicalize(git_path(raw)?)?))
     }
 }
 
@@ -138,7 +153,7 @@ pub fn tracked_sources(root: &Path) -> io::Result<Vec<PathBuf>> {
         .split(|byte| *byte == 0)
         .filter(|raw| !raw.is_empty())
     {
-        let relative = PathBuf::from(OsString::from(String::from_utf8_lossy(raw).into_owned()));
+        let relative = git_path(raw)?;
         if validate_extension(&relative).is_ok() {
             paths.push(root.join(relative));
         }
@@ -147,7 +162,7 @@ pub fn tracked_sources(root: &Path) -> io::Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct Source {
     path: PathBuf,
     bytes: Vec<u8>,
@@ -168,30 +183,31 @@ fn resolve_input(path: &Path, root: Option<&Path>) -> PathBuf {
     }
 }
 
-fn read_source(path: &Path, root: Option<&Path>) -> Result<Source, WorkflowError> {
+fn read_source(path: &Path) -> Result<Option<Source>, WorkflowError> {
     validate_extension(path).map_err(WorkflowError::Usage)?;
-    let input = resolve_input(path, root);
-    let canonical = fs::canonicalize(&input).map_err(|error| {
-        if error.kind() == io::ErrorKind::NotFound {
-            WorkflowError::Usage(format!(
-                "Fortran source file does not exist: {}",
-                input.display()
-            ))
-        } else {
-            WorkflowError::Io(error)
-        }
-    })?;
-    let metadata = fs::metadata(&canonical)?;
+    let canonical = match fs::canonicalize(path) {
+        Ok(canonical) => canonical,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(WorkflowError::Io(error)),
+    };
+    let mut file = match File::open(&canonical) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(WorkflowError::Io(error)),
+    };
+    let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(WorkflowError::Usage(format!(
             "Fortran source file is not a regular file: {}",
-            input.display()
+            path.display()
         )));
     }
-    Ok(Source {
-        bytes: fs::read(&canonical)?,
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(Some(Source {
+        bytes,
         path: canonical,
-    })
+    }))
 }
 
 /// Drop repeated paths, keeping the first occurrence and the original order.
@@ -218,16 +234,26 @@ fn display_path(path: &Path, root: Option<&Path>) -> PathBuf {
 
 fn project_context(
     sources: &[Source],
+    indices: &[usize],
+    stdin_source: Option<(&Path, &[u8])>,
     config: &crate::config::FormatConfig,
 ) -> Result<ProjectContext, WorkflowError> {
     // The caller has already read every source. This is the one project
     // analysis pass for the invocation; formatting receives the resulting
     // context rather than rebuilding it per target.
     let mut context = analyze_project(
-        sources
+        indices
             .iter()
+            .map(|&index| &sources[index])
             .map(|source| (source.path.as_path(), source.bytes.as_slice())),
     )?;
+    // A file-valued --project-context makes stdin the current version of that
+    // tracked source. Fold those bytes into every project table after omitting
+    // the disk copy above; the formatter will also analyze them as target-local
+    // facts, which retain their normal highest-priority resolution.
+    if let Some((path, source)) = stdin_source {
+        context.add_source(path, source)?;
+    }
     context.define(&config.defines);
     context.enable_target_local_component_resolution();
     Ok(context)
@@ -271,27 +297,29 @@ type FormattedTarget = (crate::FormatMeta, Option<Vec<u8>>);
 /// Every target is formatted before the caller writes anything, which is what
 /// keeps a failure part-way through from leaving a half-rewritten tree.
 fn format_targets(
-    targets: &[Source],
+    sources: &[Source],
+    target_indices: &[usize],
     context: &ProjectContext,
     config: &crate::config::FormatConfig,
 ) -> Result<Vec<FormattedTarget>, WorkflowError> {
     let workers = std::thread::available_parallelism()
         .map(NonZeroUsize::get)
         .unwrap_or(1)
-        .min(targets.len().max(1));
+        .min(target_indices.len().max(1));
     let next = AtomicUsize::new(0);
     let (sender, receiver) = mpsc::channel();
     let mut slots: Vec<Option<Result<FormattedTarget, WorkflowError>>> =
-        (0..targets.len()).map(|_| None).collect();
+        (0..target_indices.len()).map(|_| None).collect();
     std::thread::scope(|scope| {
         for _ in 0..workers {
             let sender = sender.clone();
             let next = &next;
             scope.spawn(move || loop {
                 let index = next.fetch_add(1, Ordering::Relaxed);
-                let Some(target) = targets.get(index) else {
+                let Some(&source_index) = target_indices.get(index) else {
                     return;
                 };
+                let target = &sources[source_index];
                 let outcome = format_one(target, context, config).map(|result| {
                     let changed = result.bytes != target.bytes;
                     (result.meta, changed.then_some(result.bytes))
@@ -430,7 +458,8 @@ fn unified_diff(path: &Path, old: &[u8], new: &[u8], root: Option<&Path>) -> Vec
 /// Execute one parsed invocation. Return value is the process status for a
 /// successful operation: 0 clean/success, 1 differences found.
 pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
-    if invocation.stdin || (invocation.paths.is_empty() && !invocation.all) {
+    let stdin_mode = invocation.stdin || (invocation.paths.is_empty() && !invocation.all);
+    if stdin_mode && invocation.project_context.is_none() {
         let mut source = Vec::new();
         io::stdin().read_to_end(&mut source)?;
         let config = invocation.config;
@@ -443,6 +472,52 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     let profile = env::var_os("FORFORMAT_PROFILE_IO").is_some();
     let profile_start = Instant::now();
     let cwd = env::current_dir()?;
+    let stdin_source = if stdin_mode {
+        let mut source = Vec::new();
+        io::stdin().read_to_end(&mut source)?;
+        Some(source)
+    } else {
+        None
+    };
+    // A directory-valued project context describes an anonymous stdin buffer.
+    // A file-valued context additionally identifies the tracked file whose
+    // in-memory contents stdin replaces, so its stale on-disk bytes must not
+    // contribute to project analysis.
+    let project_scope = invocation
+        .project_context
+        .as_deref()
+        .map(|path| {
+            let candidate = resolve_input(path, None);
+            let canonical = fs::canonicalize(&candidate).map_err(|error| {
+                WorkflowError::Usage(format!(
+                    "--project-context path does not exist: {} ({error})",
+                    candidate.display()
+                ))
+            })?;
+            let metadata = fs::metadata(&canonical)?;
+            if metadata.is_dir() {
+                return Ok((canonical, None));
+            }
+            if !metadata.is_file() {
+                return Err(WorkflowError::Usage(format!(
+                    "--project-context requires a directory or regular source file: {}",
+                    candidate.display()
+                )));
+            }
+            validate_extension(&candidate).map_err(WorkflowError::Usage)?;
+            let parent = candidate
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let directory = fs::canonicalize(parent)?;
+            let stdin_path = directory.join(
+                candidate
+                    .file_name()
+                    .expect("a regular file must have a file name"),
+            );
+            Ok((directory, Some(stdin_path)))
+        })
+        .transpose()?;
     let all_scope = if invocation.all {
         invocation
             .paths
@@ -469,15 +544,25 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     };
     let root = if let Some(scope) = all_scope.as_deref() {
         repository_root(scope)?
+    } else if let Some((scope, _)) = project_scope.as_ref() {
+        repository_root(scope)?
     } else {
         repository_root(&cwd)?
     };
-    let tracked = if invocation.all || (!invocation.isolated && root.is_some()) {
+    if invocation.project_context.is_some() && root.is_none() {
+        return Err(WorkflowError::Usage(
+            "--project-context requires a valid Git checkout".into(),
+        ));
+    }
+    let tracked = if invocation.all
+        || invocation.project_context.is_some()
+        || (!invocation.isolated && root.is_some())
+    {
         root.as_deref().map(tracked_sources).transpose()?
     } else {
         None
     };
-    let target_paths = if invocation.all {
+    let mut target_paths = if invocation.all {
         let tracked = tracked
             .as_ref()
             .ok_or_else(|| WorkflowError::Usage("--all requires a valid Git checkout".into()))?;
@@ -489,6 +574,8 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
                 .collect(),
             None => tracked.clone(),
         }
+    } else if stdin_mode {
+        Vec::new()
     } else {
         deduplicate(
             invocation
@@ -498,11 +585,19 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
                 .collect::<Vec<_>>(),
         )
     };
-    let project_paths = if invocation.isolated {
+    let mut project_paths = if invocation.isolated {
         // Isolated means no project tables at all. The target is still read
         // and formatted, but its declarations remain local to the formatter,
         // exactly as they are for stdin.
         Vec::new()
+    } else if let Some((_, stdin_path)) = project_scope.as_ref() {
+        tracked
+            .as_ref()
+            .expect("project-context requires tracked sources")
+            .iter()
+            .filter(|path| stdin_path.as_ref() != Some(*path))
+            .cloned()
+            .collect()
     } else if let Some(tracked) = tracked.as_ref() {
         deduplicate(
             tracked
@@ -532,10 +627,30 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     }
     // Read each selected source once. The same in-memory bytes serve both the
     // target formatter and the single project-analysis pass.
-    let loaded: Vec<Source> = all_paths
-        .iter()
-        .map(|path| read_source(path, root.as_deref()))
-        .collect::<Result<_, _>>()?;
+    let explicit_targets: HashSet<&Path> = if invocation.all || stdin_mode {
+        HashSet::new()
+    } else {
+        target_paths.iter().map(PathBuf::as_path).collect()
+    };
+    let mut loaded = Vec::with_capacity(all_paths.len());
+    let mut loaded_index = HashMap::with_capacity(all_paths.len());
+    for path in &all_paths {
+        match read_source(path)? {
+            Some(source) => {
+                loaded_index.insert(path.clone(), loaded.len());
+                loaded.push(source);
+            }
+            None if explicit_targets.contains(path.as_path()) => {
+                return Err(WorkflowError::Usage(format!(
+                    "Fortran source file does not exist: {}",
+                    path.display()
+                )))
+            }
+            None => {}
+        }
+    }
+    target_paths.retain(|path| loaded_index.contains_key(path));
+    project_paths.retain(|path| loaded_index.contains_key(path));
     if profile {
         eprintln!(
             "forformat profile: read={:?} sources={}",
@@ -543,25 +658,24 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
             loaded.len()
         );
     }
-    // `all_paths` is the deduplicated concatenation of the two path lists, so
-    // every target and project path occurs in it verbatim and `loaded[i]` is
-    // the source read for `all_paths[i]`.  One index over that correspondence
-    // replaces a linear search — and a `canonicalize` syscall — per lookup.
-    let loaded_index: HashMap<&Path, usize> = all_paths
+    let target_indices: Vec<usize> = target_paths.iter().map(|path| loaded_index[path]).collect();
+    let project_indices: Vec<usize> = project_paths
         .iter()
-        .enumerate()
-        .map(|(index, path)| (path.as_path(), index))
+        .map(|path| loaded_index[path])
         .collect();
-    let source_for = |path: &Path| {
-        let index = *loaded_index.get(path).expect("selected path was loaded");
-        loaded[index].clone()
-    };
-    let targets: Vec<Source> = target_paths.iter().map(|path| source_for(path)).collect();
-    let project_sources: Vec<Source> = project_paths.iter().map(|path| source_for(path)).collect();
     let context = if invocation.isolated {
         isolated_context(&invocation.config)
     } else {
-        project_context(&project_sources, &invocation.config)?
+        let stdin_project_source = project_scope
+            .as_ref()
+            .and_then(|(_, path)| path.as_deref())
+            .zip(stdin_source.as_deref());
+        project_context(
+            &loaded,
+            &project_indices,
+            stdin_project_source,
+            &invocation.config,
+        )?
     };
     if profile {
         eprintln!(
@@ -570,17 +684,34 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         );
     }
 
+    if stdin_mode {
+        let source = stdin_source
+            .as_deref()
+            .expect("stdin mode must have read stdin");
+        let formatted = if invocation.config.mode == FormatMode::IndentOnly {
+            format_source(source, &invocation.config)?
+        } else {
+            format_source_with_context(source, &context, &invocation.config)?
+        };
+        report_declines(&formatted.meta);
+        write_all_stdout(&formatted.bytes)?;
+        return Ok(0);
+    }
+
     if invocation.stdout {
-        let formatted = format_one(&targets[0], &context, &invocation.config)?;
+        let formatted = format_one(&loaded[target_indices[0]], &context, &invocation.config)?;
         report_declines(&formatted.meta);
         write_all_stdout(&formatted.bytes)?;
         return Ok(0);
     }
 
     let formatting_start = Instant::now();
-    let formatted = format_targets(&targets, &context, &invocation.config)?;
+    let formatted = format_targets(&loaded, &target_indices, &context, &invocation.config)?;
     let mut changed = Vec::new();
-    for ((target, path), (meta, output)) in targets.iter().zip(&target_paths).zip(formatted) {
+    for ((&source_index, path), (meta, output)) in
+        target_indices.iter().zip(&target_paths).zip(formatted)
+    {
+        let target = &loaded[source_index];
         report_declines(&meta);
         let Some(formatted) = output else {
             continue;
@@ -619,7 +750,8 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
 mod tests {
     #[cfg(unix)]
     use super::atomic_replace;
-    use super::validate_extension;
+    use super::{project_context, validate_extension};
+    use crate::{analysis::names::NameSpace, config::FormatConfig};
     #[cfg(unix)]
     use std::fs;
     use std::path::Path;
@@ -628,6 +760,26 @@ mod tests {
     fn section_9_1_valid_extension_is_pure_and_accepts_missing_path() {
         assert!(validate_extension(Path::new("does-not-exist.F90")).is_ok());
         assert!(validate_extension(Path::new("does-not-exist.txt")).is_err());
+    }
+
+    #[test]
+    fn stdin_replacement_is_present_in_the_project_tables() {
+        let replacement = b"module CurrentName\nend module CurrentName\n";
+        let context = project_context(
+            &[],
+            &[],
+            Some((Path::new("target.f90"), replacement)),
+            &FormatConfig::default(),
+        )
+        .unwrap();
+        let local = crate::analysis::analyze_file(b"program p\nend program p\n").unwrap();
+        assert_eq!(
+            context
+                .resolver(&local)
+                .spelling(NameSpace::Module, b"currentname"),
+            Some(b"CurrentName".as_slice())
+        );
+        assert_eq!(context.sources, vec![Path::new("target.f90")]);
     }
 
     #[cfg(unix)]

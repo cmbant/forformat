@@ -36,9 +36,9 @@ to prove:
 - **I2 is now structural.** Full mode emits its final bytes by running the indent-only engine over
   the normalized text, so `indent_only(full(x)) == full(x)` holds by construction rather than by
   testing (`src/format/full.rs`). I1 is still a per-pass obligation.
-- **Verified 2026-08-11:** `tools/check_camb_corpus.sh` reports 58 files, 0 differing, 0
-  non-idempotent in *both* `full` and `indent-only` mode, and the release binary is byte-exact
-  against findent 4.3.7 on all 58 corpus files under the CAMB profile.
+- **Corpus status is generated at runtime.** `tools/check_camb_corpus.sh` reports fixed-point,
+  idempotence, width and decline metrics for whatever external CAMB checkout is supplied; those
+  volatile totals are not part of this normative design.
 - **The corpus alone cannot validate normalization.** CAMB is already a joint fixed point of
   findent and the Python formatter, so formatting it unchanged proves only that the rules are
   *harmless*, not that they are *correct* — an entirely inert pass scores the same. §8 now has a
@@ -253,22 +253,20 @@ Dead public API that can be repurposed or deleted: `scanner::normalized_statemen
 
 ## 3.3 The CAMB corpus — development verification, not test data
 
-The reference corpus is **`CAMB/fortran/` (39 files, 37,973 lines) *and* `CAMB/forutils/`
-(19 files, 11,056 lines)** — 58 files, 49,029 lines, ~1.73 MiB. The two directories must be
-analyzed **together**: forutils supplies the shared utility modules, types and components whose
-declarations determine case resolution in `fortran/`. `forutils` is a git submodule of CAMB and
-is **CRLF throughout**; `fortran/` is LF.
+The reference corpus is **`CAMB/fortran/` and `CAMB/forutils/`**. The two directories must be
+analyzed **together**: forutils supplies shared utility modules, types and components whose
+declarations determine case resolution in `fortran/`. The corpus is an external, temporary
+developer checkout, so its size and revision are intentionally not recorded here.
 
-**The corpus is already a joint strong fixed point.** Verified 2026-08-11:
+**The supplied corpus must be a joint strong fixed point.** Check it with:
 
 ```sh
-cd CAMB && python3 scripts/standardize_fortran.py --all --check   # exit 0, 58 files, 6.7 s
-# and, for each fortran/*.f90 forutils/*.f90:
-findent <CAMB profile args> < "$f" | cmp -s - "$f"                # 48/48 identical
+python3 tools/check_project_mode.py
+sh tools/check_camb_corpus.sh
 ```
 
-So the acceptance target is exact and already green under the old tools: **`full(x) == x`
-byte-for-byte for every corpus file, with project context spanning both directories.**
+The acceptance target is exact: **`full(x) == x` byte-for-byte for every supplied corpus file,
+with project context spanning both directories.**
 
 **What the corpus is not.** It is a developer verification target, not test data. CAMB sources are
 never vendored into this repository, never committed as goldens, and never wired into
@@ -277,16 +275,15 @@ nested git repository, so this is also the path of least resistance.
 
 The workflow on any difference is: **reduce to a minimal snippet → add a unit test or a
 `tests/fixtures/` + manifest case → fix → rerun the corpus check.** The committed suite stays
-small and self-contained while still getting 49k lines of real-world pressure.
+small and self-contained while still getting real-world pressure.
 
-Add `tools/check_camb_corpus.sh <camb-path> <binary>`: format every file with project context,
+`tools/check_camb_corpus.sh <camb-path> <binary>` formats every file with project context,
 report each file whose output differs from its input, plus changed-line counts, maximum output
 line length, and any statement the wrapper declined to wrap. Never write into the CAMB tree.
 
-Corpus characteristics worth knowing: 12 files contain CPP directives; maximum line lengths
-cluster right at the 120-column boundary (results 120, cmbmain 120, equations 122,
-Interpolation 121, MatrixUtils 121), which is good pressure on the wrapper but means the corpus
-has **few** genuinely over-long lines — wrapping needs the generated stress corpus of §8.4.
+The corpus provides real-world CPP, boundary-width and long-line pressure, while the generated
+stress corpus of §8.4 provides deterministic wrapping coverage. Live corpus characteristics come
+from the check scripts rather than this document.
 
 ## 3.4 Python — measured effort, by area
 
@@ -419,7 +416,7 @@ recorded.
 | 12–13 | `normalize_continuations`, `normalize_openmp_continuation_sentinels` | line list |
 | 14–15 | `remove_terminal_procedure_returns`; re-extract if lines were removed | statements |
 | 16 | `rewrap_lines` (gated by `wrap`) | per logical statement |
-| 17 | `normalize_declaration_separator_alignment` — compresses, never pads | line blocks |
+| 17 | `normalize_declaration_separator_alignment` — compresses alignment and supplies owed `::` spaces | line blocks |
 | 18–19 | `normalize_program_unit_spacing`, `limit_blank_lines` | line list |
 | 20–21 | `normalize_output_whitespace`; restore line endings | whole text |
 
@@ -435,10 +432,11 @@ something rediscovered by a failing fixture.
 (6, 7, 14) each force a re-extraction of scope metadata. Any Rust reordering must preserve those
 dependencies.
 
-**Post-layout passes may only shorten lines.** Steps 17–19 run after wrapping. Declaration
-alignment compresses but never pads, precisely so it cannot invalidate a wrap decision. Any
-future post-layout transform that can lengthen a line must move before wrapping or trigger a
-rewrap in the same pass.
+**Post-layout width changes must be measured.** Steps 17–19 run after wrapping. Declaration
+alignment normally compresses authored padding, but a compact `integer::x` gains the spaces owed
+around `::` and can grow by two columns. The wrapper measures that emitted spelling, and the layout
+stage repeats when step 17 changes a width. Any future width-changing post-layout transform must
+join that measurement and relayout contract.
 
 ---
 
@@ -880,7 +878,7 @@ Each gate references the invariants of §1.1 rather than restating them.
 | **D — Real corpus** | `tools/check_camb_corpus.sh` reports zero differing files across `CAMB/fortran/` + `CAMB/forutils/` with shared project context, and every long line is either wrapped or explicitly classified as unwrappable. (I1, I2, I4) |
 | **E — Semantic safety** | Self-contained formatted fixtures pass `gfortran -fsyntax-only`; OpenMP fixtures pass with `-fopenmp`; the formatted CAMB tree builds and its tests pass. (I3, I5) |
 | **F — CLI replacement** | Stream, one-file, multi-file and repository modes all work; check/diff are suitable for CI and pre-commit; `-D` and project casing work in a real build; help text documents mode interactions. |
-| **G — Performance** | Project sources are read and analyzed once per invocation. The full-mode project pass over the 58-file / 49k-line corpus completes **well under 1 s**, against **6.7 s** for `standardize --all --check` today; indent-only throughput does not regress from its current ~3M lines/s. Single-buffer formatting stays fast enough for format-on-save. No production dependency on Python. |
+| **G — Performance** | Project sources are read and analyzed once per invocation. The runtime status report compares project and startup performance; single-buffer formatting remains suitable for format-on-save. No production dependency on Python. |
 
 Gate G's number is the actual motivation for the port: pre-commit and editor latency. Treat it as
 a requirement, not a nice-to-have.

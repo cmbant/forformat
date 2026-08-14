@@ -20,6 +20,7 @@ pub enum Command {
 pub struct Invocation {
     pub config: FormatConfig,
     pub paths: Vec<PathBuf>,
+    pub project_context: Option<PathBuf>,
     pub all: bool,
     pub stdin: bool,
     pub stdout: bool,
@@ -146,6 +147,7 @@ where
     let mut version = false;
     let mut options_ended = false;
     let mut paths = Vec::new();
+    let mut project_context = None;
     let mut all = false;
     let mut stdin = false;
     let mut stdout = false;
@@ -158,9 +160,6 @@ where
             continue;
         }
         if options_ended {
-            if arg.starts_with('-') {
-                return Err(FormatError::InvalidOption(arg));
-            }
             paths.push(PathBuf::from(arg));
             continue;
         }
@@ -286,6 +285,15 @@ where
                 "last-indent" => c.last_indent = true,
                 "last-usable" => c.last_usable = true,
                 "all" => all = true,
+                "project-context" => {
+                    let path = need(&mut value, &mut a)?;
+                    if path.is_empty() {
+                        return Err(FormatError::InvalidOption(
+                            "--project-context requires a path".into(),
+                        ));
+                    }
+                    project_context = Some(PathBuf::from(path));
+                }
                 "stdin" => stdin = true,
                 "stdout" => stdout = true,
                 "isolated" => isolated = true,
@@ -479,6 +487,13 @@ where
         }
         paths.push(PathBuf::from(arg));
     }
+    if project_context.is_some()
+        && (!stdin || !paths.is_empty() || all || stdout || isolated || check || diff)
+    {
+        return Err(FormatError::InvalidOption(
+            "--project-context requires --stdin and cannot be combined with paths, --all, --stdout, --isolated, --check, or --diff".into(),
+        ));
+    }
     if stdin && (all || !paths.is_empty() || stdout || isolated || check || diff) {
         return Err(FormatError::InvalidOption(
             "--stdin cannot be combined with paths, --all, --stdout, --check, --diff, or --isolated".into(),
@@ -523,6 +538,7 @@ where
         Ok(Command::Run(Box::new(Invocation {
             config: c,
             paths,
+            project_context,
             all,
             stdin,
             stdout,
@@ -596,6 +612,7 @@ fn single_dash_long_option_suggestion(arg: &str) -> Option<String> {
             | "normalize-only"
             | "no-config"
             | "openmp"
+            | "project-context"
             | "refactor-end"
             | "refactor-procedures"
             | "start-indent"
@@ -692,6 +709,7 @@ Free-form Fortran formatter.\n\
   -lastindent, -lastusable           print query result instead of source\n\
   <paths>, --all [directory]          format explicit files or all tracked sources\n\
   --stdin                             read source from stdin (default without paths)\n\
+  --project-context=<path>            analyze a Git checkout while formatting stdin; a source path excludes its on-disk copy\n\
   --stdout                            write one file's result to stdout\n\
   --isolated                          do not scan repository sources for case resolution\n\
   --check                             exit 1 if selected files would change\n\
@@ -714,6 +732,7 @@ Fixed-form input/output and automatic format detection are intentionally unsuppo
 #[cfg(test)]
 mod tests {
     use super::{parse, Command};
+    use std::path::PathBuf;
 
     fn run(args: &[&str]) -> crate::config::FormatConfig {
         let mut argv = vec!["forformat".to_string()];
@@ -757,10 +776,36 @@ mod tests {
                 .unwrap(),
             Command::Run(_)
         ));
-        assert!(
-            parse(["forformat".to_string(), "--".to_string(), "-i4".to_string()].into_iter())
-                .is_err()
-        );
+        let terminated =
+            parse(["forformat".to_string(), "--".to_string(), "-i4".to_string()]).unwrap();
+        match terminated {
+            Command::Run(invocation) => assert_eq!(invocation.paths, [PathBuf::from("-i4")]),
+            _ => panic!("expected run"),
+        }
+    }
+
+    #[test]
+    fn project_context_requires_explicit_stdin_and_no_file_workflow() {
+        for args in [
+            &["--project-context", "."][..],
+            &["--stdin", "--project-context", ".", "source.f90"][..],
+            &["--stdin", "--project-context", ".", "--check"][..],
+        ] {
+            assert!(
+                parse(
+                    std::iter::once("forformat".to_string())
+                        .chain(args.iter().map(|arg| (*arg).to_string())),
+                )
+                .is_err(),
+                "{args:?}"
+            );
+        }
+        assert!(parse(
+            ["forformat", "--stdin", "--project-context", "."]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .is_ok());
     }
 
     #[test]

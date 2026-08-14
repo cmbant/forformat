@@ -148,9 +148,10 @@ pub fn normalize(
 
 /// Steps 17-20, run on the laid-out text.
 ///
-/// Every pass here must be non-lengthening, so it cannot invalidate a wrap
-/// decision made earlier in the same run.
-/// Returns whether step 17 changed any line's width — see
+/// A pass here may change width only when wrapping has already measured its
+/// emitted spelling. Step 17 can add the spaces owed around a compact `::` or
+/// compress authored alignment; the caller lays the text out again whenever
+/// that changes a width. Returns whether step 17 changed any line's width — see
 /// [`passes::layout_post::declaration_separator_alignment`] and the caller in
 /// `format::full`, which has to lay the text out again when it did.
 pub fn post_layout(document: &mut Document, config: &FormatConfig) -> Result<bool, FormatError> {

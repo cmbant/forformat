@@ -40,35 +40,23 @@ the perturbation that isolates the rule under test:
 | `blankruns` | spacing and blank-line capping |
 
 The last three are whole-text perturbations (`TEXT_PERTURBATIONS`). They exercise post-layout
-passes that a fixed-point corpus cannot expose. With those passes stubbed, they measure 47 files /
-11427 lines, 48 / 1323, and 48 / 9263; their target is a literal 0 because they do not touch
-identifiers.
+passes that a fixed-point corpus cannot expose. Their target is no disagreement because they do
+not touch identifiers.
 
 Use `keywords`, rather than `case`, to judge per-line rules: `case` also rewrites declared names.
 `format_text` must receive declaration case tables as arguments. The differential reference path
 mirrors the `--stdin` branch of `standardize_fortran.main`; calling `format_text` bare applies
 almost no declared casing and is not a valid comparison.
 
-The current comparison baseline for the 48 files under these globs, using the reference's single
-pass, is:
-
-| Perturbation | Differing files | Differing lines | More than case |
-|---|---|---|---|
-| `case`, `--converge` | 6 | 72 | **0** |
-| every other sweep, `--converge` | 2 | 10 | **0** |
-
-The `case` result consists of 64 kind-suffix lines and 8 declaration-bound lines where Rust applies
-the governing declaration and the reference does not. The other sweeps remain at the 2-file /
-10-line first-run correction floor. The comparison count measures disagreement, not correctness;
-declarations and source adjudicate deliberate divergences.
+Comparison counts are runtime status, not a design constant. The differential script prints the
+live file, line, and classification totals for the supplied corpus. The count measures
+disagreement rather than correctness; declarations and source adjudicate deliberate divergences.
 
 `check_restoration.py` is useful for finding disagreements but cannot decide a case where a
 perturbation changes a declaration without changing its uses. A committed spelling is not evidence
-against the governing declaration. The acceptance condition for every perturbation is 0
-more-than-case differences; currently this holds for all ten perturbations.
-
-I1 (`f(f(x)) == f(x)`) and I2 (`indent_only(full(x)) == full(x)`) hold across all 48 files and all
-480 perturbed inputs. For each difference, assert:
+against the governing declaration. Every perturbation must preserve I1
+(`f(f(x)) == f(x)`) and I2 (`indent_only(full(x)) == full(x)`). For each accepted case-only
+difference, assert:
 
 ```text
 a.lower() == b.lower()
@@ -232,9 +220,10 @@ Generated stress cases cover line lengths 60/80/100/120, default and aligned par
 a safe break exists.
 
 `layout_post.rs` contains declaration-separator alignment, program-unit spacing, blank-line limits,
-and the assertion that no post-layout pass lengthens a line. Alignment compresses and never pads.
-It iterates to a fixed point inside the pass. A detached comment is emitted at the statement
-indent, and `copy_group_without_final_comment` preserves other comments in the group.
+and output-whitespace cleanup. Alignment compresses authored padding, but a compact `::` gains its
+owed space on either side and can grow by two columns. Wrapping measures the step-17 spelling and
+layout repeats when its width changes. A detached comment is emitted at the statement indent, and
+`copy_group_without_final_comment` preserves other comments in the group.
 
 ### File and project workflow
 
@@ -250,9 +239,9 @@ path-update, check, or diff modes. Project sources are read and analyzed once pe
 Pre-commit excludes `forutils/` from rewriting; `standardize --all` rewrites it, and both read it
 for case resolution.
 
-## 2. Current design decisions and checks
+## 2. Design decisions and checks
 
-### Governing declarations and committed-source corrections
+### Governing declarations and the project fixed point
 
 Resolve a use to the declaration that governs it. Omit case application only when that declaration
 cannot be determined. Two locals with different spellings are separate entities when their scopes
@@ -260,21 +249,10 @@ resolve them separately. A type-bound binding and its module procedure are one e
 with the same name are ambiguous when the owner type cannot be resolved; `TypeMaps::resolve_chain`
 is consulted before any fallback.
 
-Project mode reproduces the committed tree except where a declaration settles a spelling against it.
-For example, `model.f90:24` declares `max_Nu`, so the declaration governs the `max_nu` uses below
-it. A correction is documented and never used to justify an unrelated change.
-
-The exact first-run correction set is:
-
-| Authored spelling | Rust spelling | Governing declaration |
-|---|---|---|
-| `max_nu` (4 lines: 3 in `model.f90`, 1 in `equations.f90`) | `max_Nu` | `fortran/model.f90:24`, `integer, parameter :: max_Nu = 5` |
-| `EVout` (2 lines) | `EVOut` | `fortran/equations.f90:703,829`, `type(EvolutionVars) EV, EVOut` |
-| `T%item` (2 lines in `forutils/tests/ObjectLists_tests.f90`) | `T%Item` | `forutils/ObjectLists.f90:90,98,105,121`, `generic :: Item => ...` |
-
-`tools/check_project_mode.py` stores this as `FIRST_RUN_CORRECTIONS` and fails if the observed
-multiset differs in either direction. Project mode therefore reports 3 files, 8 changed lines,
-8 pairs, and 0 more-than-case differences.
+The current developer checkout under `CAMB/fortran` and `CAMB/forutils` is treated as a project
+fixed point. `tools/check_project_mode.py` copies whatever files are present, requires one
+unperturbed project-mode run to leave them byte-identical, and independently compares that result
+with the frozen reference. It records no correction allowance and no corpus revision.
 
 ### Deliberate reference divergences
 
@@ -301,9 +279,9 @@ The bare-program BJL validation file keeps `BJL_RECURRENCE_MAX_L` against the un
 
 | Check | Claim |
 |---|---|
-| `differential.py --perturbation none` | unperturbed stdin output equals the reference, 58/58 |
+| `differential.py --perturbation none` | unperturbed stdin output equals the reference |
 | `differential.py` (ten sweeps) | perturbed input reaches the reference result, with deliberate differences adjudicated |
-| `check_project_mode.py` | project mode matches the committed CAMB tree except for the correction table |
+| `check_project_mode.py` | the current external project corpus is a fixed point and matches the reference |
 | `check_route_equivalence.py` | identical bytes give identical output on every route |
 | `check_invariants.py --oracle` | I1 and I2 under every perturbation |
 | `check_historic_corpus.py` | hand-written Fortran is checked on every comparison axis |
@@ -312,22 +290,9 @@ The bare-program BJL validation file keeps `BJL_RECURRENCE_MAX_L` against the un
 | `check_fixture_syntax.sh` | formatting does not turn a compiling fixture into a non-compiling fixture |
 | `check_camb_corpus.sh` | idempotence and line width; its `differing` column is a fixed-point signal, not a correctness claim |
 
-The current CAMB corpus baseline is 5 files / 20 changed lines and 0 non-idempotent files for the
-stdin-only run. The project baseline is the 3-file / 8-line correction set above.
-
-The historic corpus contains 49,262 lines of hand-written Fortran from the source snapshots
-identified by `3b1b6e08`, `c4b1e072`, and `a1db7a71`. Extract both trees outside the repository;
-never modify `CAMB/` and never name a `CAMB/` path from `src/`, `tests/`, or `benches/`. The current
-project-mode result is 16 differing files and 44 changed pairs: `other` 0, `line-count` 0,
-`spacing` 0, `indent` 1, `continuation` 0, `case` 22, `array-constructor` 14, and
-`comment-content` 7. The structural buckets are zero except the accepted indentation difference;
-the case bucket contains settled name differences.
-
-The current check totals include **12 checked, 28 skipped, 0 failed** for fixture syntax,
-**89 tests, 0 failures, 0 errors** for CAMB's Python suite, and **256 tests passed** across all
-Rust test binaries. Route equivalence is **58/58** with zero differing lines. The differential sweeps
-report `none` 48 files / 2 differing / 10 lines, `keywords` 48 / 3 / 12, `compound` 48 / 2 / 10,
-`spacing` 48 / 2 / 10, and `case` 48 / 7 / 74. Both generator `--check` modes pass.
+Validation totals are deliberately not copied into this design reference. The fixture, corpus,
+differential, route-equivalence, test, and release scripts print their live summaries when run;
+CI logs are the status report for checks that do not require the external CAMB checkout.
 
 ## Known traps
 
@@ -354,8 +319,8 @@ These are durable rules for maintaining the formatter.
 - **A governing declaration must be named before a case difference is classified.** For example,
   `yout(EVout%nvar)` in `CopyScalarVariableArray` is governed by the `EVOut` dummy at
   `equations.f90:702-703`; a committed spelling in another scope is irrelevant.
-- **Case-only differences need an exact baseline.** `FIRST_RUN_CORRECTIONS` enumerates
-  `(file, authored, ours)` triples and fails when a correction grows or disappears.
+- **Case-only differences are still differences.** Project mode has no correction allowance: the
+  unperturbed external corpus must remain byte-identical and agree with the reference.
 - **A build or install result must be observed.** A predicted wheel transcript is not evidence;
   verify that the wheel exists, that installation ran, and that the executable actually used by
   the hook is the intended one.

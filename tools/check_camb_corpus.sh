@@ -44,7 +44,7 @@
 #     python3 tools/check_invariants.py
 #         I1 and I2 over every perturbation; must be zero across the board
 #     python3 tools/check_project_mode.py
-#         project mode reports only the documented first-run corrections
+#         project mode is a fixed point and matches the frozen reference
 set -eu
 
 CAMB=${1:-./CAMB}

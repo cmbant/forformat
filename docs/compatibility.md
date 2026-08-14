@@ -67,24 +67,14 @@ These are full-format policy choices, not indentation compatibility claims. The 
 comment, sentinel, kind-suffix, governing-declaration, valid-literal, and type-bound-procedure cases
 are pinned by the corpus diagnostics or focused fixtures described below.
 
-### First-run project changes
+### Project fixed point
 
-Project mode reproduces the committed tree except where a declaration settles a spelling against
-it. The first run is therefore expected to report three files and eight changed lines:
-
-| Authored spelling | Rust spelling | Governing declaration |
-| --- | --- | --- |
-| `max_nu` (4 lines: 3 in `model.f90`, 1 in `equations.f90`) | `max_Nu` | `fortran/model.f90:24`, `integer, parameter :: max_Nu = 5` |
-| `EVout` (2 lines) | `EVOut` | `fortran/equations.f90:703,829`, `type(EvolutionVars) EV, EVOut` |
-| `T%item` (2 lines in `forutils/tests/ObjectLists_tests.f90`) | `T%Item` | `forutils/ObjectLists.f90:90,98,105,121`, `generic :: Item => ...` |
-
-`tools/check_project_mode.py` carries this table as `FIRST_RUN_CORRECTIONS` and fails if the
-observed set differs from it in either direction — a correction that grows is a regression, and one
-that disappears is a rule that has stopped firing.
-
-The rule is: reproduce the committed tree except where the governing declaration settles a
-spelling against it. A difference that is not settled by the declaration remains authored and is
-not excused by a matching declaration in another scope.
+The external CAMB checkout is a temporary developer verification target. Project mode uses the
+files currently present under its `fortran` and `forutils` directories, with no revision pin or
+case-correction allowance. One unperturbed run must leave those files byte-identical and match the
+frozen reference. A difference that is not settled by the governing declaration remains authored
+and is not excused by a matching declaration in another scope. The fixed-point gate snapshots raw
+bytes; in particular, CRLF-to-LF changes are failures rather than text-mode equivalents.
 
 ## Regression checks
 

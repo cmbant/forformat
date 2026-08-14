@@ -13,7 +13,7 @@ jobs:
       matrix:
         toolchain: ["1.85.0", stable]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ matrix.toolchain }}
@@ -22,6 +22,7 @@ jobs:
       - run: python3 tools/gen_traceability.py --check
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
       - run: cargo test --locked --all-targets
       - run: ./tools/check_fixture_syntax.sh target/debug/forformat
       - run: ./tools/check_fuzz_regression.sh
@@ -31,7 +32,7 @@ jobs:
     name: release and benchmark
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
@@ -40,7 +41,7 @@ jobs:
       - run: ./tools/check_release.sh target/release/forformat | tee target/release-metrics.txt
       - run: ./tools/check_package.sh
       - run: cargo bench --locked --bench throughput
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-measurements
           path: target/release-metrics.txt
@@ -56,7 +57,7 @@ jobs:
           - aarch64-unknown-linux-musl
           - x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
@@ -74,7 +75,7 @@ jobs:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
@@ -88,7 +89,7 @@ jobs:
           artifact=target/repro-a/${{ matrix.target }}/release/forformat
           hash=$(sha256sum "$artifact" | awk '{print $1}')
           printf '%s  %s\n' "$hash" "$(basename "$artifact")" > "$(dirname "$artifact")/forformat.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: forformat-${{ matrix.target }}
           path: |
@@ -102,7 +103,7 @@ jobs:
     env:
       RUSTFLAGS: -C debuginfo=0 -C strip=debuginfo -C link-arg=/Brepro -C link-arg=/DEBUG:NONE
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
@@ -122,7 +123,7 @@ jobs:
           if ($a -ne $b) { throw "reproducible Windows build hash mismatch" }
           "$a  forformat.exe" | Out-File target/repro-a/x86_64-pc-windows-msvc/release/forformat.exe.sha256 -Encoding ascii
           Write-Output $a
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: forformat-x86_64-pc-windows-msvc
           path: |
@@ -135,7 +136,7 @@ jobs:
     needs: [static-artifacts, windows-artifact]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: forformat-*
           path: artifacts

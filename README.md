@@ -7,8 +7,8 @@ in Rust and provides findent-compatible indentation together with an optional fu
 lexical normalization and wrapping long statements.
 
 The repository builds both the `forformat` Rust binary and a Python package that bundles that binary.
-Installing a published Python wheel does not require Rust or a Fortran compiler. `forformat` is a
-command-line formatter, not an importable Python formatting library.
+Installing a published Python wheel does not require Rust or a Fortran compiler. The wheel provides
+both the command and an importable in-memory formatting function.
 
 ## Install
 
@@ -66,6 +66,36 @@ forformat --stdin < src/module.f90 > /tmp/module.f90
 forformat --stdout src/module.f90 > /tmp/module.f90
 ```
 
+For editor integrations that provide source through stdin but need project-wide
+declarations, name the source file explicitly:
+
+```sh
+forformat --stdin --project-context src/module.f90 < src/module.f90
+```
+
+Pass the active file path, rather than only the workspace directory, when the
+editor supports a file-name placeholder. The buffer remains the only formatted
+output, its stdin bytes replace the stale on-disk copy in project analysis,
+and the other tracked Fortran sources supply the remaining declarations. A
+directory is still accepted for anonymous buffers. Select configuration
+independently with `--config` or disable
+discovery with `--no-config`.
+
+Python callers can format text or bytes with the same native executable:
+
+```python
+from forformat import format_source
+
+formatted = format_source(
+    source,
+    options=("--config=/absolute/path/to/.forformat.toml",),
+    repo_context_path="/path/to/checkout/src/module.f90",
+)
+```
+
+The return type matches the input type. The Python API disables automatic
+configuration discovery unless `options` explicitly supplies `--config`.
+
 Use `--check` in CI or pre-commit, and `--diff` to review changes without modifying files:
 
 ```sh
@@ -122,26 +152,19 @@ precedence over the project file; use `--config PATH` to select a file explicitl
 to ignore discovered settings. Workflow controls such as `--all`, `--check`, and `--diff` remain
 command-line-only.
 
-## Rust library
+## Rust crate
 
-The Rust crate also exposes the core formatter for applications that need an in-memory API:
+The Rust crate exposes the core formatter because the binary and repository
+tests are separate crate targets:
 
 ```rust
 let result = forformat::format_source(source, &config)?;
 ```
 
-The supported entry points are `forformat::format_source`, `forformat::format_source_with_context`,
-`forformat::format_to`, and `forformat::format_to_owned`, together with the configuration and result
-types they use (`FormatConfig`, `FormatMode`, `WrapConfig`, `MacroDefine`, `FormatResult`,
-`FormatMeta`, `FormatError`, and `analyze_project`/`ProjectContext`). `FormatConfig` has public
-fields and a `Default` impl, so it is configured with struct-update syntax.
-
-The library is byte-oriented: it preserves source bytes outside the formatting contract, including
-non-UTF-8 bytes in comments and strings.
-
-The remaining modules (`source`, `classify`, `transform`, `format`, `io`, `cli`) are public only
-because the binary, the integration tests and the fuzz targets are separate crates. They are
-implementation details, are not covered by semantic versioning, and change with the pipeline.
+This Rust surface, including its entry points and public types, is an
+implementation interface and is not covered by semantic-versioning guarantees.
+Use the command or Python API for a supported integration boundary. The core is
+byte-oriented and preserves non-UTF-8 bytes outside the formatting contract.
 
 ## Development
 

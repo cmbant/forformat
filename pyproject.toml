@@ -28,7 +28,7 @@ forformat = "forformat_runner.launcher:main"
 Homepage = "https://github.com/cmbant/forformat"
 
 [tool.setuptools]
-packages = ["forformat_runner"]
+packages = ["forformat", "forformat_runner"]
 
 [tool.setuptools.package-data]
 forformat_runner = ["bin/*"]

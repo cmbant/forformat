@@ -22,8 +22,9 @@ pub enum RegionKind {
     StringLiteral,
     /// From `!` to end of line.
     Comment,
-    /// A whole `#`/`??`/`#:` line.  Produced by [`line_regions`], never by the
-    /// byte scanner, because being a directive is a property of the line.
+    /// A whole `#`/`??`/`#:` line. Produced by the physical-line classifier
+    /// ([`crate::source::PhysicalLineKind::Preprocessor`]), never by the byte
+    /// scanner, because being a directive is a property of the line.
     Preprocessor,
     /// `nH` plus the `n` payload bytes.  The payload may be arbitrary bytes,
     /// including quotes and `!`.
