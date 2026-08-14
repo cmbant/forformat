@@ -315,9 +315,9 @@ mod tests {
     }
 
     #[test]
-    fn openmp_near_misses_remain_comments_with_oracle_spacing() {
+    fn openmp_near_misses_remain_comments_and_trim_empty_sentinels() {
         let input = b"program p\n!$\n!$omp parallel\n!$\tcall x\nend program\n";
-        let expected = b"program p\n!$ \n!$omp parallel\n!$ call x\nend program\n";
+        let expected = b"program p\n!$\n!$omp parallel\n!$ call x\nend program\n";
         assert_eq!(
             format_source(input, &indent_only_config()).unwrap().bytes,
             expected

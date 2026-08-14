@@ -764,6 +764,16 @@ end module m
     }
 
     #[test]
+    fn empty_openmp_sentinel_is_trimmed_and_remains_an_indent_fixed_point() {
+        let once = full(|_| {}, b"\n!$ \n");
+        assert_eq!(once, b"\n!$\n");
+        let indent_only = format_source(&once, &FormatConfig::default())
+            .unwrap()
+            .bytes;
+        assert_eq!(indent_only, once);
+    }
+
+    #[test]
     fn full_formatting_reaches_its_fixed_point_in_one_pass() {
         // I1.
         for source in [

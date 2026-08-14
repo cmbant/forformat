@@ -1,0 +1,28 @@
+name: Reusable Rust correctness checks
+
+on:
+  workflow_call:
+
+jobs:
+  checks:
+    name: checks (Rust ${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: ["1.85.0", stable]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: rustfmt, clippy
+      - run: python3 tools/gen_vocab.py --check
+      - run: python3 tools/gen_traceability.py --check
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
+      - run: cargo test --locked --all-targets
+      - run: ./tools/check_fixture_syntax.sh target/debug/forformat
+      - run: ./tools/check_fuzz_regression.sh
+      - run: ./tools/check_cli_contract.sh target/debug/forformat

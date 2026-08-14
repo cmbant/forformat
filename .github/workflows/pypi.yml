@@ -9,8 +9,13 @@ permissions:
   contents: read
 
 jobs:
+  rust-checks:
+    name: Rust correctness checks
+    uses: ./.github/workflows/rust-checks.yml
+
   verify-release:
     name: Verify release
+    needs: rust-checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -26,12 +31,11 @@ jobs:
           set -euo pipefail
           version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)
           test "$GITHUB_REF_NAME" = "v$version"
-      - run: cargo test --locked --all-targets
       - run: ./tools/check_package.sh
 
   build-wheels:
     name: Build Python wheel (${{ matrix.platform }})
-    needs: verify-release
+    needs: [rust-checks, verify-release]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

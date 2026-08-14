@@ -159,15 +159,13 @@ pub fn emit_line_to_with_quote<W: Write>(
             // retaining stale source indentation after `--indent_contains=restart`.
             write_spaces(out, clamp_indent(indent, config.max_indent).max(1))?;
             if let Some(rest) = near_omp {
-                out.write_all(b"!$ ").map_err(FormatError::Write)?;
-                out.write_all(rest).map_err(FormatError::Write)?;
+                write_near_openmp_comment(rest, out)?;
             } else {
                 out.write_all(trim_start(comment))
                     .map_err(FormatError::Write)?;
             }
         } else if let Some(rest) = near_omp {
-            out.write_all(b"!$ ").map_err(FormatError::Write)?;
-            out.write_all(rest).map_err(FormatError::Write)?;
+            write_near_openmp_comment(rest, out)?;
         } else {
             out.write_all(comment).map_err(FormatError::Write)?;
         }
@@ -198,7 +196,6 @@ pub fn emit_line_to_with_quote<W: Write>(
         // OpenMP.  Near-misses remain ordinary comments and never arrive
         // here.
         source = trim_start(source.get(3..).unwrap_or_default());
-        out.write_all(b"!$ ").map_err(FormatError::Write)?;
     }
 
     let mut target = indent;
@@ -227,6 +224,14 @@ pub fn emit_line_to_with_quote<W: Write>(
 
     if let Some(replacement) = replacement {
         source = replacement;
+    }
+
+    if omp {
+        out.write_all(b"!$").map_err(FormatError::Write)?;
+        if trim_end_horizontal(source).is_empty() {
+            return write_newline(buf, index, out);
+        }
+        out.write_all(b" ").map_err(FormatError::Write)?;
     }
 
     let remred = style.remred;
@@ -274,6 +279,15 @@ fn trim_end_horizontal(mut s: &[u8]) -> &[u8] {
         s = &s[..s.len() - 1];
     }
     s
+}
+
+fn write_near_openmp_comment<W: Write>(rest: &[u8], out: &mut W) -> Result<(), FormatError> {
+    out.write_all(b"!$").map_err(FormatError::Write)?;
+    if !rest.is_empty() {
+        out.write_all(b" ").map_err(FormatError::Write)?;
+        out.write_all(rest).map_err(FormatError::Write)?;
+    }
+    Ok(())
 }
 
 fn write_newline<W: Write>(
@@ -400,6 +414,16 @@ mod tests {
         assert_eq!(
             emit_line(&comments, 1, first(6), &style, None),
             b"!$    call x\n"
+        );
+
+        let empty_sentinels = SourceBuffer::new(b"!$\n!$ \n").unwrap();
+        assert_eq!(
+            emit_line(&empty_sentinels, 0, first(0), &style, None),
+            b"!$\n"
+        );
+        assert_eq!(
+            emit_line(&empty_sentinels, 1, first(0), &style, None),
+            b"!$\n"
         );
     }
 
