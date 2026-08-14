@@ -342,10 +342,71 @@ fn format_targets(
         .collect()
 }
 
-fn report_declines(meta: &crate::FormatMeta) {
-    for (line, reason) in &meta.declines {
-        eprintln!("forformat: declined wrap at line {}: {reason:?}", line + 1);
+/// Keep routine formatting invocations useful when a generated source has
+/// hundreds of equally-unwrappable statements.  Five concrete locations are
+/// enough to identify the condition; the remainder are counted below.
+const DECLINE_DIAGNOSTIC_LIMIT: usize = 5;
+
+/// Bounded declined-wrap diagnostics for one CLI invocation.
+///
+/// The formatter deliberately keeps paths out of [`crate::FormatMeta`] so the
+/// library API remains about a source buffer.  The CLI has the path, and adds
+/// it here while combining diagnostics from all formatted targets.
+#[derive(Default)]
+struct DeclineReporter {
+    reported: usize,
+    suppressed: usize,
+    suppressed_inputs: HashSet<String>,
+    suppressed_stdin: bool,
+}
+
+impl DeclineReporter {
+    fn report(&mut self, meta: &crate::FormatMeta, path: Option<&Path>, root: Option<&Path>) {
+        let input = path
+            .map(|path| display_path(path, root).display().to_string())
+            .unwrap_or_else(|| "<stdin>".to_owned());
+        for (line, reason) in &meta.declines {
+            if self.reported < DECLINE_DIAGNOSTIC_LIMIT {
+                eprintln!("{}", decline_message(&input, *line, *reason));
+                self.reported += 1;
+            } else {
+                self.suppressed += 1;
+                self.suppressed_stdin |= path.is_none();
+                self.suppressed_inputs.insert(input.clone());
+            }
+        }
     }
+
+    fn finish(&self) {
+        if let Some(message) = self.summary() {
+            eprintln!("{message}");
+        }
+    }
+
+    fn summary(&self) -> Option<String> {
+        (self.suppressed > 0).then(|| {
+            let inputs = self.suppressed_inputs.len();
+            let input_word = if self.suppressed_stdin {
+                if inputs == 1 {
+                    "input"
+                } else {
+                    "inputs"
+                }
+            } else if inputs == 1 {
+                "file"
+            } else {
+                "files"
+            };
+            format!(
+                "forformat: + {} additional declined-wrap diagnostics in {inputs} {input_word}",
+                self.suppressed
+            )
+        })
+    }
+}
+
+fn decline_message(input: &str, line: usize, reason: crate::format::wrapping::Decline) -> String {
+    format!("forformat: {input}:{}: declined wrap: {reason:?}", line + 1)
 }
 
 fn write_all_stdout(bytes: &[u8]) -> Result<(), WorkflowError> {
@@ -464,7 +525,9 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         io::stdin().read_to_end(&mut source)?;
         let config = invocation.config;
         let result = format_source(&source, &config)?;
-        report_declines(&result.meta);
+        let mut declines = DeclineReporter::default();
+        declines.report(&result.meta, None, None);
+        declines.finish();
         write_all_stdout(&result.bytes)?;
         return Ok(0);
     }
@@ -693,14 +756,18 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         } else {
             format_source_with_context(source, &context, &invocation.config)?
         };
-        report_declines(&formatted.meta);
+        let mut declines = DeclineReporter::default();
+        declines.report(&formatted.meta, None, root.as_deref());
+        declines.finish();
         write_all_stdout(&formatted.bytes)?;
         return Ok(0);
     }
 
     if invocation.stdout {
         let formatted = format_one(&loaded[target_indices[0]], &context, &invocation.config)?;
-        report_declines(&formatted.meta);
+        let mut declines = DeclineReporter::default();
+        declines.report(&formatted.meta, Some(&target_paths[0]), root.as_deref());
+        declines.finish();
         write_all_stdout(&formatted.bytes)?;
         return Ok(0);
     }
@@ -708,11 +775,12 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     let formatting_start = Instant::now();
     let formatted = format_targets(&loaded, &target_indices, &context, &invocation.config)?;
     let mut changed = Vec::new();
+    let mut declines = DeclineReporter::default();
     for ((&source_index, path), (meta, output)) in
         target_indices.iter().zip(&target_paths).zip(formatted)
     {
         let target = &loaded[source_index];
-        report_declines(&meta);
+        declines.report(&meta, Some(path), root.as_deref());
         let Some(formatted) = output else {
             continue;
         };
@@ -728,6 +796,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
             atomic_replace(path, &formatted)?;
         }
     }
+    declines.finish();
     if !invocation.diff {
         for path in &changed {
             println!("{}", display_path(path, root.as_deref()).display());
@@ -750,8 +819,8 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
 mod tests {
     #[cfg(unix)]
     use super::atomic_replace;
-    use super::{project_context, validate_extension};
-    use crate::{analysis::names::NameSpace, config::FormatConfig};
+    use super::{decline_message, project_context, validate_extension, DeclineReporter};
+    use crate::{analysis::names::NameSpace, config::FormatConfig, format::wrapping::Decline};
     #[cfg(unix)]
     use std::fs;
     use std::path::Path;
@@ -760,6 +829,42 @@ mod tests {
     fn section_9_1_valid_extension_is_pure_and_accepts_missing_path() {
         assert!(validate_extension(Path::new("does-not-exist.F90")).is_ok());
         assert!(validate_extension(Path::new("does-not-exist.txt")).is_err());
+    }
+
+    #[test]
+    fn declined_wrap_diagnostics_include_the_input_and_bound_the_summary() {
+        assert_eq!(
+            decline_message("src/example.f90", 41, Decline::NoSafeBreak),
+            "forformat: src/example.f90:42: declined wrap: NoSafeBreak"
+        );
+
+        let mut reporter = DeclineReporter {
+            suppressed: 7,
+            ..Default::default()
+        };
+        reporter
+            .suppressed_inputs
+            .insert("src/example.f90".to_owned());
+        reporter
+            .suppressed_inputs
+            .insert("src/another.f90".to_owned());
+        assert_eq!(
+            reporter.summary().as_deref(),
+            Some("forformat: + 7 additional declined-wrap diagnostics in 2 files")
+        );
+
+        let mut stdin_reporter = DeclineReporter {
+            suppressed: 1,
+            suppressed_stdin: true,
+            ..Default::default()
+        };
+        stdin_reporter
+            .suppressed_inputs
+            .insert("<stdin>".to_owned());
+        assert_eq!(
+            stdin_reporter.summary().as_deref(),
+            Some("forformat: + 1 additional declined-wrap diagnostics in 1 input")
+        );
     }
 
     #[test]

@@ -47,6 +47,10 @@ pub struct ContinuationLayout {
 /// Why a statement was left as it is.  Every long line the formatter declines to
 /// wrap must be explainable, so the corpus check can separate "unwrappable by
 /// design" from "wrapper bug".
+///
+/// Note that a lone over-long string literal is *not* always a decline: see
+/// [`literal_wrap_split`], which relaxes "no token is split" (I5) for exactly
+/// that one case, at a whitespace boundary inside the literal's content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decline {
     /// The statement already fits.
@@ -100,7 +104,7 @@ pub fn wrap_body_with_alignment(
     }
 
     let mut out = Vec::new();
-    let mut rest = body;
+    let mut rest: Vec<u8> = body.to_vec();
     let mut current = layout.first_indent;
     let mut first_break = true;
     let mut paren_state = ParenAlignmentState::default();
@@ -109,7 +113,7 @@ pub fn wrap_body_with_alignment(
         let limit = line_length.saturating_sub(current + 2);
         let mut position = None;
         if first_break {
-            if let Some(candidate) = assignment_wrap_position(rest, limit) {
+            if let Some(candidate) = assignment_wrap_position(&rest, limit) {
                 let remainder = trim_start(&rest[candidate..]);
                 let mut trial_state = paren_state.clone();
                 let next = next_continuation(
@@ -124,11 +128,30 @@ pub fn wrap_body_with_alignment(
                 }
             }
         }
-        let position = position.or_else(|| wrap_position(rest, limit));
-        let Some(position) = position else {
+        let generic = position.or_else(|| wrap_position(&rest, limit));
+        // A generic break that barely fills the line is a poor choice when a
+        // literal split would use the space better — most often a short call
+        // head (`write(*,'(A)') `) ahead of one over-long message literal,
+        // where the only generic candidate is a comma buried in the head.
+        let minimum_fill = (limit as f64 * crate::transform::vocab::MINIMUM_BREAK_FILL) as usize;
+        let generic_fills = generic.is_some_and(|position| position >= minimum_fill);
+        let (line_text, new_rest) = if generic_fills {
+            let position = generic.expect("generic_fills implies Some");
+            (
+                trim_end(&rest[..position]).to_vec(),
+                trim_start(&rest[position..]).to_vec(),
+            )
+        } else if let Some(split) = literal_wrap_split(&rest, limit) {
+            split
+        } else if let Some(position) = generic {
+            (
+                trim_end(&rest[..position]).to_vec(),
+                trim_start(&rest[position..]).to_vec(),
+            )
+        } else {
             return Err(Decline::NoSafeBreak);
         };
-        let mut line = trim_end(&rest[..position]).to_vec();
+        let mut line = line_text;
         line.extend_from_slice(b" &");
         out.push(line);
         current = next_continuation(
@@ -138,11 +161,83 @@ pub fn wrap_body_with_alignment(
             layout.continuation,
             align_paren,
         );
-        rest = trim_start(&rest[position..]);
+        rest = new_rest;
         first_break = false;
     }
-    out.push(rest.to_vec());
+    out.push(rest);
     Ok(out)
+}
+
+/// Split an over-long string literal into two `//`-concatenated pieces at a
+/// whitespace boundary inside its content, when doing so uses the line
+/// better than the best ordinary break.  This is what stands between a lone
+/// over-long literal (or a short head followed by one) and
+/// [`Decline::NoSafeBreak`]: it deliberately relaxes "no token is split"
+/// (I5) for exactly this one case.
+///
+/// `rest` up to the literal's opening quote is kept as an unsplittable
+/// prefix — the caller has already established nothing before it is a
+/// better break. Returns `(first_line, new_rest)` rather than an offset into
+/// `rest`, because the split grows the text by the inserted quote, space
+/// and `//` bytes and so cannot be expressed as a plain slice of the
+/// original.
+///
+/// The inserted `//` is spaced on both sides, matching how the operator-
+/// spacing normalization pass would space a genuine one on the next run —
+/// splitting it unspaced would make the very next pass respace it and,
+/// with a whole extra column consumed, potentially re-wrap it differently,
+/// breaking I1.
+fn literal_wrap_split(rest: &[u8], limit: usize) -> Option<(Vec<u8>, Vec<u8>)> {
+    let tokens = tokenize(rest, &mut LexState::default());
+    let token = tokens
+        .iter()
+        .find(|token| token.kind == TokenKind::String && token.span.end > limit)?;
+    if token.span.start >= limit {
+        return None;
+    }
+    let delim = *token.text.first()?;
+    if token.text.len() < 2 || *token.text.last()? != delim {
+        return None;
+    }
+    let content = &token.text[1..token.text.len() - 1];
+
+    // Room left, after the kept prefix, for the opening quote, the content
+    // kept on this line, the closing quote, and ` //` joining to the next
+    // line.
+    let max_split = limit
+        .saturating_sub(token.span.start + 5)
+        .min(content.len());
+
+    // A doubled delimiter (`''`) is one escaped character; splitting between
+    // its two bytes would turn it into two independent, unescaped quotes.
+    let mut unsafe_after = vec![false; content.len() + 1];
+    let mut i = 0;
+    while i < content.len() {
+        if content[i] == delim {
+            unsafe_after[i + 1] = true;
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+
+    let split = (1..=max_split)
+        .rev()
+        .find(|&position| content[position - 1] == b' ' && !unsafe_after[position])?;
+
+    let mut line = rest[..token.span.start].to_vec();
+    line.push(delim);
+    line.extend_from_slice(&content[..split]);
+    line.push(delim);
+    line.extend_from_slice(b" //");
+
+    let mut new_rest = Vec::with_capacity(content.len() - split + 2 + rest.len() - token.span.end);
+    new_rest.push(delim);
+    new_rest.extend_from_slice(&content[split..]);
+    new_rest.push(delim);
+    new_rest.extend_from_slice(&rest[token.span.end..]);
+
+    Some((line, new_rest))
 }
 
 fn next_continuation(
@@ -504,6 +599,105 @@ mod tests {
                         .unwrap()
                         + literal_start,
             "break at {position} falls inside the literal"
+        );
+    }
+
+    #[test]
+    fn an_over_long_literal_is_split_at_a_space_boundary_via_concatenation() {
+        let body = b"write(*,'(A)') 'Turbine Number  Output Turbine Number      X          Y          Z   OpenFAST Time Step  OpenFAST SubCycles  OpenFAST Input File'";
+        let layout = ContinuationLayout {
+            first_indent: 3,
+            continuation: 6,
+        };
+        let lines = wrap_body(body, layout, 100).unwrap();
+        assert!(lines.len() > 1, "expected a split: {:?}", shown(&lines));
+        for (index, line) in lines.iter().enumerate() {
+            let indent = if index == 0 {
+                layout.first_indent
+            } else {
+                layout.continuation
+            };
+            assert!(
+                indent + line.len() <= 100,
+                "line {index} overruns: {:?}",
+                shown(&lines)
+            );
+        }
+        assert!(
+            lines[0].ends_with(b"' // &"),
+            "not canonically spaced: {:?}",
+            shown(&lines)
+        );
+        assert!(
+            lines[1].starts_with(b"'"),
+            "second half should start directly at its own quote: {:?}",
+            shown(&lines)
+        );
+        // The literal's content, rejoined across the split, is byte-identical
+        // to the original — the split only ever inserts delimiters and the
+        // concatenation operator around an existing space.
+        let head = lines[0].strip_suffix(b" // &").expect("checked above");
+        let open = head.iter().position(|b| *b == b'\'').unwrap();
+        let close = head.len() - 1;
+        let mut content = Vec::new();
+        content.extend_from_slice(&head[open + 1..close]);
+        content.extend_from_slice(&lines[1][1..lines[1].len() - 1]);
+        assert!(String::from_utf8_lossy(&content).contains("Turbine Number  Output Turbine Number"));
+        assert!(String::from_utf8_lossy(&content).ends_with("OpenFAST Input File"));
+    }
+
+    #[test]
+    fn literal_split_never_cuts_a_doubled_quote() {
+        // The doubled `''` sits exactly where a naive space-search might
+        // otherwise land a split; the escape must survive intact regardless.
+        let body = b"call sub('a very long line that keeps going and going and going don''t you know it does')";
+        let layout = ContinuationLayout {
+            first_indent: 0,
+            continuation: 4,
+        };
+        let lines = wrap_body(body, layout, 40).unwrap();
+        let joined = shown(&lines).join("");
+        assert!(
+            !joined.contains("don' // 't"),
+            "split inside the doubled quote: {joined}"
+        );
+        assert!(joined.contains("don''t"), "escape lost: {joined}");
+    }
+
+    #[test]
+    fn literal_split_is_preferred_over_a_poorly_filling_generic_break() {
+        // The only ordinary break candidate here is the comma inside
+        // `write(*,...)`, which barely fills the line; splitting the message
+        // literal instead keeps the call head whole.
+        let body = b"write(*,'(A)') 'Turbine Number  Output Turbine Number      X          Y          Z   OpenFAST Time Step  OpenFAST SubCycles  OpenFAST Input File'";
+        let layout = ContinuationLayout {
+            first_indent: 3,
+            continuation: 6,
+        };
+        let lines = wrap_body(body, layout, 100).unwrap();
+        assert!(
+            shown(&lines)[0].starts_with("write(*, '(A)') '")
+                || shown(&lines)[0].starts_with("write(*,'(A)') '"),
+            "call head was needlessly split: {:?}",
+            shown(&lines)
+        );
+    }
+
+    #[test]
+    fn a_single_unbreakable_word_literal_still_declines() {
+        // No space exists to split at, so this remains an honest decline
+        // rather than an arbitrary mid-word cut.
+        let layout = ContinuationLayout {
+            first_indent: 0,
+            continuation: 4,
+        };
+        assert_eq!(
+            wrap_body(
+                b"call sub('averyveryverylongsinglewordwithnospaceatallanywhereinit')",
+                layout,
+                20
+            ),
+            Err(Decline::NoSafeBreak)
         );
     }
 
