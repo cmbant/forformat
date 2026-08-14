@@ -41,10 +41,12 @@ jobs:
             platform: linux-x86_64
             target: x86_64-unknown-linux-musl
             wheel_platform_tag: manylinux_2_17_x86_64.musllinux_1_2_x86_64
+            cross: true
           - os: ubuntu-24.04-arm
             platform: linux-arm64
             target: aarch64-unknown-linux-musl
             wheel_platform_tag: manylinux_2_17_aarch64.musllinux_1_2_aarch64
+            cross: false
           - os: macos-15-intel
             platform: macos-x86_64
           - os: macos-15
@@ -60,17 +62,25 @@ jobs:
         with:
           toolchain: stable
       - name: Install cross
-        if: matrix.target != ''
+        if: matrix.target != '' && matrix.cross
         uses: taiki-e/install-action@v2
         with:
           tool: cross
+      - name: Install musl toolchain
+        if: matrix.target != '' && !matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup target add ${{ matrix.target }}
       - name: Build release binary
         shell: bash
         run: |
-          if [ -n "${{ matrix.target }}" ]; then
+          if [ -z "${{ matrix.target }}" ]; then
+            cargo build --locked --release
+          elif [ "${{ matrix.cross }}" = "true" ]; then
             cross build --locked --release --target ${{ matrix.target }}
           else
-            cargo build --locked --release
+            cargo build --locked --release --target ${{ matrix.target }}
           fi
       - run: python -m pip install --upgrade build
       - name: Build wheel
