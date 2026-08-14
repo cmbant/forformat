@@ -9,7 +9,7 @@ preserved.
 Supported compatibility options include the global and per-construct indentation controls, start
 indent, continuation policies, labels, includes, OpenMP free-form sentinels, CPP branch snapshots,
 `findentfix:` directives, maximum indentation, `END` refactoring, whitespace reduction, and the
-`last-indent`/`last-usable` queries described in `RUST_CONVERSION_PLAN.md`.
+`last-indent`/`last-usable` queries described in `history/findent-port-plan.md`.
 
 The Rust release intentionally diverges from legacy findent in three ways:
 
@@ -95,7 +95,7 @@ and preservation. When the 4.3.7 reference installation is available, run
 fixtures `progfree.f`, `progfree1.f`, and `progfree-dos.f` with the oracle and reports the
 intentional preservation-boundary differences. Large real-world inputs are verified against the
 external CAMB corpus rather than from checked-in copies; see
-`FORTRAN_COMBINED_RUST_PORT_PLAN.md` for that workflow. The
+`design.md` for that workflow. The
 complete legacy shell suite is not a normal Rust test dependency because it includes fixed-form,
 relabeling, editor-wrapper, and other explicitly excluded features.
 
@@ -152,7 +152,7 @@ checked independently and are covered by the `fortran2023` and `structures` mani
 
 ## Manifest traceability
 
-The checked-in 53-case manifest runner in `tests/manifest.rs` executes cases from
+The checked-in manifest runner in `tests/manifest.rs` executes every case in
 `tests/manifests/core.manifest` without requiring `/opt/findent`. Each case records input, expected
 stdout, expected stderr, status, CLI arguments, oracle provenance, category, support/exclusion
 status, and an allowed-normalization declaration.

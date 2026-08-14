@@ -4,7 +4,9 @@ use crate::{
 };
 use std::path::PathBuf;
 
-pub const VERSION: &str = "forformat 0.1.0";
+/// The `--version` line, taken from the package manifest so a version bump is
+/// a one-line change in `Cargo.toml`.
+pub const VERSION: &str = concat!("forformat ", env!("CARGO_PKG_VERSION"));
 
 pub enum Command {
     Run(Box<Invocation>),

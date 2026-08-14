@@ -39,7 +39,12 @@ expect_diagnostic 2 'forformat: unsupported: fixed-form input/output is not supp
 alias_source=$'program p\nx = 1\nend program\n'
 test "$(printf '%s' "$alias_source" | "$binary" --input_format=free)" = "$(printf '%s' "$alias_source" | "$binary" --input-format=free)"
 
-test "$("$binary" --version)" = "forformat 0.1.0"
+# The expected version comes from cargo, not from a literal, so bumping
+# Cargo.toml is the only edit a release needs. `cargo pkgid` prints
+# `…#forformat@<version>`.
+version=${FORFORMAT_VERSION:-$(cargo pkgid | sed 's/.*[#@]//')}
+test -n "$version"
+test "$("$binary" --version)" = "forformat $version"
 "$binary" --help | grep -F 'Usage: forformat [OPTIONS]' >/dev/null
 test "$(printf '' | "$binary" --last-indent)" = 0
 test "$(printf 'program p\n' | "$binary" --last-usable)" = 1

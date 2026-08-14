@@ -1,8 +1,9 @@
 # Full-mode reference
 
-This document describes the full formatter and the checks used to maintain it. `TODO.md` covers
-indent-only compatibility; this document covers normalization, declaration-driven case handling,
-wrapping, and file/project workflow.
+This document describes the full formatter and the checks used to maintain it: normalization,
+declaration-driven case handling, wrapping, and file/project workflow. [`design.md`](design.md)
+says why the pipeline has this shape; [`compatibility.md`](compatibility.md) owns the indent-only
+findent boundary.
 
 ## 0. How to work in this repository
 

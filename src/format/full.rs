@@ -62,33 +62,58 @@ pub fn format_with_context(
         let declined = reflow_with_context_inner(&mut document, project, &local, config)?;
         // Every long line the wrapper refuses is explainable; the corpus check
         // consumes this to separate "unwrappable by design" from a wrapper bug.
-        let laid_out = engine::format(&document.to_lf_bytes(), config)?;
-        let mut output = Document::from_bytes(&laid_out.bytes);
-        output.newline = document.newline;
-        output.trailing_newline = document.trailing_newline;
-        pipeline::post_layout(&mut output, config)?;
+        let (output, meta) = lay_out(&document, config)?;
         return Ok(FormatResult {
             bytes: output.to_bytes(),
             meta: FormatMeta {
-                last_indent: laid_out.meta.last_indent,
-                last_usable: laid_out.meta.last_usable,
+                last_indent: meta.last_indent,
+                last_usable: meta.last_usable,
                 declines: declined,
             },
         });
     }
 
-    // The layout engine owns every column.  It runs over LF text and its output
-    // is re-wrapped into the document's terminator policy at the end.
-    let laid_out = engine::format(&document.to_lf_bytes(), config)?;
-    let mut output = Document::from_bytes(&laid_out.bytes);
-    output.newline = document.newline;
-    output.trailing_newline = document.trailing_newline;
-    pipeline::post_layout(&mut output, config)?;
-
+    let (output, meta) = lay_out(&document, config)?;
     Ok(FormatResult {
         bytes: output.to_bytes(),
-        meta: laid_out.meta,
+        meta,
     })
+}
+
+/// Run the layout engine and the post-layout passes over the normalized text.
+///
+/// The layout engine owns every column.  It runs over LF text and its output is
+/// re-wrapped into the document's terminator policy here.
+///
+/// Step 17 then runs *after* the engine and can change a line's width, which
+/// silently invalidates the continuation columns the engine chose for that
+/// statement: under `--align-paren` those columns are anchored on the head
+/// line, so compressing a declaration's `::` leaves every continuation of it
+/// stranded to the right of the `[` it was lined up with.  The next run reads
+/// the compressed head, aligns correctly, and I1 fails.  Laying the text out
+/// again — only when step 17 actually moved something, which on a normal file
+/// is rare — costs one engine pass and makes the columns agree with the width
+/// that is emitted.  The second post-layout pass is a fixed point of the first,
+/// so one repeat is enough; the loop bound says so out loud rather than
+/// trusting it.
+fn lay_out(
+    document: &Document,
+    config: &FormatConfig,
+) -> Result<(Document, FormatMeta), FormatError> {
+    let mut source = document.to_lf_bytes();
+    let mut rounds = 2;
+    loop {
+        let laid_out = engine::format(&source, config)?;
+        let mut output = Document::from_bytes(&laid_out.bytes);
+        output.newline = document.newline;
+        output.trailing_newline = document.trailing_newline;
+        let widths_changed = pipeline::post_layout(&mut output, config)?;
+        rounds -= 1;
+        if !widths_changed || rounds == 0 {
+            return Ok((output, laid_out.meta));
+        }
+        source = output.to_lf_bytes();
+    }
 }
 
 /// Step 16: reflow statements that overrun the budget.
@@ -217,10 +242,19 @@ fn reflow_with_context_inner(
                 0
             }),
         };
-        let has_long_physical_line = group.lines.clone().any(|line| {
-            document.lines[line].len() > config.wrap.line_length
-                || laid_out_width(line) > config.wrap.line_length
-        });
+        // Only the laid-out width decides.  The normalized line still carries
+        // the authored indent and the authored `::` run, and both are about to
+        // change: a declaration whose author lined its `::` up in a wide block
+        // reads as 120 columns here and is emitted at 79.  Wrapping it anyway
+        // broke the fixed point in the worst way, because the wrap changes
+        // which lines step 17 groups together and therefore the width the
+        // *next* run measures.  Measuring only what is emitted closes that
+        // loop: leaving the statement alone leaves the block — and so the
+        // measurement — exactly as it was.
+        let has_long_physical_line = group
+            .lines
+            .clone()
+            .any(|line| laid_out_width(line) > config.wrap.line_length);
         if !has_long_physical_line {
             copy_group(document, group, &mut lines);
             continue;
@@ -243,6 +277,15 @@ fn reflow_with_context_inner(
             );
             body = trim(&body).to_vec();
         }
+        // Step 17 does not only pad: on a declaration whose author lined the
+        // `::` up in a much wider block, it *compresses*, and the statement the
+        // wrapper is about to break is then far narrower than the one it read.
+        // Measuring the authored run made an over-long declaration unwrappable
+        // (`NoSafeBreak`: no break left the head inside the budget) while the
+        // emitted, compressed line was both over-long and perfectly breakable —
+        // so the next run wrapped it and I1 failed. `laid_out` already has step
+        // 17 applied, so its run is the one that will be emitted.
+        body = with_laid_out_separator(body, laid_out.lines.get(index));
         // A detached trailing comment belongs to the statement as a whole, not
         // to its last continuation line, so it is written above the statement
         // at the statement's own indent.  The layout engine then places it like
@@ -442,11 +485,43 @@ fn wrap_openmp_directive(line: &[u8], line_length: usize) -> Result<Vec<Vec<u8>>
     Ok(result)
 }
 
+/// Rewrite the whitespace run in front of `body`'s `::` to the run step 17 has
+/// already chosen for the same line, so the wrapper measures and breaks the
+/// text that will be emitted rather than the text that was authored.
+///
+/// Only the run is copied, never the column: `body` is the statement without
+/// its indent, and for a continued declaration it is the joined form, but in
+/// both cases the bytes in front of the `::` are the same ones the laid-out
+/// line carries after its indent.
+fn with_laid_out_separator(body: Vec<u8>, laid_out: Option<&Vec<u8>>) -> Vec<u8> {
+    let Some(laid_out) = laid_out else {
+        return body;
+    };
+    let (Some((at, run, _)), Some((_, laid_out_run, _))) = (
+        crate::transform::passes::layout_post::declaration_separator_info(&body),
+        crate::transform::passes::layout_post::declaration_separator_info(laid_out),
+    ) else {
+        return body;
+    };
+    // A missing space on either side is `declaration_separator_growth`'s
+    // business, not this function's.
+    if run == laid_out_run || run == 0 || laid_out_run == 0 {
+        return body;
+    }
+    let mut result = Vec::with_capacity(body.len() + laid_out_run);
+    result.extend_from_slice(&body[..at - run]);
+    result.resize(result.len() + laid_out_run, b' ');
+    result.extend_from_slice(&body[at..]);
+    result
+}
+
 /// How many bytes step 17 will insert around this statement's `::`.
 ///
-/// `declaration_separator_alignment` only ever compresses the run of spaces in
-/// front of a declaration's separator — except when there is none at all, where
-/// it writes the one space the separator is owed on each side.
+/// `declaration_separator_alignment` never pads one declaration out to a wider
+/// neighbour's column — except when there is no whitespace at all, where it
+/// writes the one space the separator is owed on each side.  Compression is not
+/// this function's business: [`with_laid_out_separator`] has already given
+/// `body` the run that will be emitted.
 fn declaration_separator_growth(body: &[u8]) -> usize {
     let mut quote = 0u8;
     let mut index = 0;

@@ -8,8 +8,16 @@
 //!
 //! Two rules govern any future change here:
 //!
-//! * a pass that can **lengthen** a line must run before wrapping, or trigger a
-//!   rewrap; the post-layout passes are allowed to compress only;
+//! * a pass that changes a line's **width** must either run before wrapping or
+//!   be accounted for by the wrapper.  Step 17
+//!   ([`passes::layout_post::declaration_separator_alignment`]) is the one
+//!   post-layout pass that changes width, in both directions: it adds the
+//!   single space a `::` is entitled to on either side, and it compresses an
+//!   over-wide authored alignment column.  `format::full` pays for both by
+//!   measuring the laid-out, step-17-applied document rather than the authored
+//!   one — see the budget comments there.  Any *new* post-layout pass that
+//!   changes width has to extend that measurement, not assume it does not
+//!   matter;
 //! * a deviation from the Python order must be deliberate and written down,
 //!   not discovered by a failing fixture.
 
@@ -142,12 +150,15 @@ pub fn normalize(
 ///
 /// Every pass here must be non-lengthening, so it cannot invalidate a wrap
 /// decision made earlier in the same run.
-pub fn post_layout(document: &mut Document, config: &FormatConfig) -> Result<(), FormatError> {
-    passes::layout_post::declaration_separator_alignment(document, config)?;
+/// Returns whether step 17 changed any line's width — see
+/// [`passes::layout_post::declaration_separator_alignment`] and the caller in
+/// `format::full`, which has to lay the text out again when it did.
+pub fn post_layout(document: &mut Document, config: &FormatConfig) -> Result<bool, FormatError> {
+    let widths_changed = passes::layout_post::declaration_separator_alignment(document, config)?;
     passes::layout_post::program_unit_spacing(document, config)?;
     passes::layout_post::limit_blank_lines(document, config)?;
     passes::layout_post::output_whitespace(document, config)?;
-    Ok(())
+    Ok(widths_changed)
 }
 
 /// Rebuild the statement view, run one pass, and report what it changed.

@@ -1,11 +1,24 @@
 //! Steps 17-20: passes that run **after** the layout engine has placed every
 //! line.
 //!
-//! The contract for this file is short and absolute: **nothing here may make a
-//! line longer.** Wrapping has already happened, so a pass that pads would
-//! invalidate a decision it cannot revisit.  Declaration alignment therefore
-//! compresses and never pads — that is not an accident of the reference
-//! implementation, it is why the pass is allowed to run here at all.
+//! The contract for this file is short: **a pass here may not change a line's
+//! width unless `format::full` has already measured the change.** Wrapping has
+//! already happened, so a width the wrapper did not see is a decision it cannot
+//! revisit, and the next run would revisit it — which is how I1 breaks.
+//!
+//! Step 17 is the only pass that changes width today, and it does so in both
+//! directions:
+//!
+//! * it never *pads* one declaration out to a wider neighbour's column — the
+//!   block splits instead — but it does insert the single space a `::` is
+//!   entitled to on either side, so `integer::x` grows by up to two columns;
+//! * it *compresses* an authored alignment column down to the block's own
+//!   minimum, which on a hand-aligned block can be fifty columns.
+//!
+//! `format::full` covers both: it runs this pass over the laid-out document
+//! before measuring, and gives the wrapper the separator spelling that will
+//! actually be emitted.  A new width-changing pass here has to extend that
+//! measurement rather than assume the width is settled.
 
 use crate::{
     classify::{classify, StatementKind},
@@ -18,15 +31,25 @@ use crate::{
     },
 };
 
-/// Step 17: compress the whitespace before a declaration's `::` so a block of
-/// declarations lines up.  Compresses only.
+/// Step 17: normalize the whitespace before a declaration's `::` so a block of
+/// declarations lines up on the narrowest column the block allows.
+///
+/// A line is never padded out to a wider neighbour's column — the block splits
+/// instead — but a separator with no whitespace at all is given the one space it
+/// is owed on each side.  See the module docs for what the wrapper has to know
+/// about that.
+///
+/// Returns whether any line's *width* changed, which is what the caller needs
+/// in order to know that the layout engine's continuation columns for those
+/// statements are now stale.
 ///
 /// Port target: `normalize_declaration_separator_alignment`.
 pub fn declaration_separator_alignment(
     document: &mut Document,
     config: &FormatConfig,
-) -> Result<(), FormatError> {
+) -> Result<bool, FormatError> {
     let _ = config;
+    let widths: Vec<usize> = document.lines.iter().map(Vec::len).collect();
     let mut lines = document.lines.clone();
     loop {
         let mut cpp_lines = Vec::with_capacity(lines.len());
@@ -68,6 +91,15 @@ pub fn declaration_separator_alignment(
                     index += 1;
                     continue;
                 }
+                // A continuation belongs to the declaration above it, so it
+                // must not end the block.  Letting it end the block made the
+                // partition depend on where the wrapper chose to break, and the
+                // wrapper's budget depends on the column this pass picks from
+                // the partition — a loop that resolved differently on each run.
+                if index > 0 && continues_previous_line(&original, index) {
+                    index += 1;
+                    continue;
+                }
                 break;
             }
 
@@ -100,7 +132,13 @@ pub fn declaration_separator_alignment(
         lines = updated;
     }
     document.set_lines(lines);
-    Ok(())
+    // The pass never adds or removes a line, so the widths line up one to one.
+    let widths_changed = document
+        .lines
+        .iter()
+        .map(Vec::len)
+        .ne(widths.iter().copied());
+    Ok(widths_changed)
 }
 
 /// Step 18: blank-line policy around program units and `CONTAINS`.
@@ -229,7 +267,7 @@ pub fn limit_blank_lines(
     Ok(())
 }
 
-fn declaration_separator_info(line: &[u8]) -> Option<(usize, usize, usize)> {
+pub(crate) fn declaration_separator_info(line: &[u8]) -> Option<(usize, usize, usize)> {
     let mut quote = 0;
     let mut index = 0;
     while index < line.len() {
@@ -296,6 +334,19 @@ fn normalize_declaration_block(
         line.extend_from_slice(&original[*line_index][suffix_start..]);
         *updated.get_mut(*line_index).expect("block line in range") = line;
     }
+}
+
+/// Whether `lines[index]` continues the statement on the line before it.
+///
+/// Comment and blank lines between the two are transparent, matching the way
+/// the block scan already steps over comments.
+fn continues_previous_line(lines: &[Vec<u8>], index: usize) -> bool {
+    lines[..index]
+        .iter()
+        .rev()
+        .map(|line| trimmed(code_context(line)))
+        .find(|code| !code.is_empty())
+        .is_some_and(|code| code.ends_with(b"&"))
 }
 
 fn code_context(line: &[u8]) -> &[u8] {

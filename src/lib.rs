@@ -4,6 +4,37 @@
 //! spans, recognizes only the structural statements needed for indentation,
 //! and emits the original spelling with leading indentation adjusted and
 //! trailing horizontal whitespace removed.
+//!
+//! # What is stable
+//!
+//! `forformat` is a command-line tool that happens to be built as a library.
+//! The supported surface is small and deliberate:
+//!
+//! * the four entry points — [`format_source`], [`format_source_with_context`],
+//!   [`format_to`], [`format_to_owned`];
+//! * the types they take and return — [`FormatConfig`], [`FormatMode`],
+//!   [`WrapConfig`], [`MacroDefine`], [`FormatResult`], [`FormatMeta`],
+//!   [`FormatError`], and [`analyze_project`] with its [`ProjectContext`].
+//!
+//! [`FormatConfig`] is a plain struct with public fields and a [`Default`]
+//! impl, so it is configured with struct-update syntax rather than a builder:
+//!
+//! ```
+//! use forformat::{FormatConfig, FormatMode};
+//!
+//! let config = FormatConfig {
+//!     mode: FormatMode::IndentOnly,
+//!     ..FormatConfig::default()
+//! };
+//! # let _ = config;
+//! ```
+//!
+//! **Everything else is an implementation detail.** The modules below are
+//! `pub` because the binary, the integration tests and the `cargo-fuzz`
+//! targets are separate crates and need to reach them; they are not a
+//! supported API, they are not covered by semantic versioning, and their
+//! contents change whenever the pipeline does.  Depend on them only if you are
+//! willing to track this crate commit by commit.
 
 pub mod analysis;
 pub mod classify;

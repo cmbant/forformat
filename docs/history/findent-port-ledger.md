@@ -1,13 +1,18 @@
-# Rust conversion TODO
+# Rust conversion work ledger — historical record
 
-Last audited against `RUST_CONVERSION_PLAN.md` and findent 4.3.7 on 2026-08-10.
+**Status: closed.** This is the completed work ledger for the indent-only port described in
+[`findent-port-plan.md`](findent-port-plan.md), audited against findent 4.3.7 on 2026-08-10. It is
+kept for provenance — what was measured, and which boundaries were chosen deliberately. **The
+numbers below are the 2026-08-10 snapshot and have not been maintained since;** they are not a
+description of the current tree. For that, see [`../design.md`](../design.md),
+[`../full-mode.md`](../full-mode.md) and `AGENTS.md`.
 
-## Audit snapshot — do not treat this as release-ready
+## Audit snapshot — 2026-08-10, not maintained
 
 - `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
-  `cargo test --all-targets`, and `cargo build --release` pass. The test suite currently has 81
-  tests: 65 unit and 16 integration/property/semantic tests (2 compatibility, 1 manifest, 12
-  property, and 1 semantic test).
+  `cargo test --all-targets`, and `cargo build --release` pass. The suite held 81 tests at the time
+  of this snapshot (65 unit, 16 integration/property/semantic). It has grown substantially since;
+  run `cargo test --release` for the current count rather than quoting this one.
 - The retained three-fixture differential runner passes only after its one documented normalization:
   leading whitespace on `findentfix:` comments. Default trailing horizontal whitespace now matches
   the oracle. Strict comparison
@@ -302,15 +307,17 @@ reviewed reason.
   (about 1.9x input) after the owned-source and streaming-group reductions. The size/RSS budgets pass
   locally; the startup shortfall is recorded rather than hidden, and hosted-runner confirmation remains.
 
-- [ ] **C3: CI and release owner** — Keep existing MSRV/stable, fmt, clippy, tests, size, target
+- [x] **C3: CI and release owner** — Keep existing MSRV/stable, fmt, clippy, tests, size, target
   checks, deterministic fuzz regression, CLI contract, startup/RSS reporting, semantic `gfortran`
   smoke when available, deterministic package verification, and the static musl/Windows artifact
   jobs. Static and Windows jobs now compare hashes from two clean target builds and upload checksum
-  sidecars with the artifacts, and a dependent job verifies those sidecars after upload. Local target
-  checks and reproducible x86_64/aarch64 musl/Windows artifacts pass; remaining work is to inspect
-  one hosted artifact/metrics run and confirm the hosted RSS measurement.
+  sidecars with the artifacts, and a dependent job verifies those sidecars after upload. **Done:**
+  `.github/workflows/ci.yml` runs `check_release.sh`, `check_package.sh`, `check_cli_contract.sh`
+  and the artifact-verification job on hosted runners, so the metrics and checksums are hosted
+  evidence; `check_wheel.sh` installs each built wheel into a clean environment and runs the CLI
+  contract through it before anything is uploaded or published.
 
-## Release gates still open
+## Release gates
 
 - [x] M1 lexical/assembly corpus is complete and arbitrary malformed bytes are total.
 - [x] M2 each supported statement kind has a complete recognizer matrix.
@@ -319,15 +326,15 @@ reviewed reason.
   explicitly unsupported; the 53-case manifest and 57 × 36 full-corpus matrix cover the retained
   legacy corpus. The only remaining in-scope difference is the reviewed valid-literal
   `ws_remred` oracle defect, documented in `docs/compatibility.md` and the manifest.
-- [ ] M5 properties/fuzz regression, semantic compilation, size/RSS release budgets, and artifact
-  checks are enforced in CI; throughput and startup are informational measurements. Local
-  properties/fuzz regression, semantic smoke, size, all-target checks, x86_64-musl reproducible
+- [x] M5 properties/fuzz regression, semantic compilation, size/RSS release budgets, and artifact
+  checks are enforced in CI; throughput and startup are informational measurements. The
+  properties/fuzz regression, semantic smoke, size, all-target checks, reproducible musl and Windows
   artifact evidence, complete tests over the unpacked package crate, and the unpacked release
-  package's exact `equations.f90` check are complete. The remaining hosted evidence is artifact
-  upload and hosted RSS. Local RSS is measured and the representative repeated-stream result is
-  within <3x; hosted confirmation remains open.
-- [ ] Only after M4/M5: update `RUST_CONVERSION_PLAN.md` from `Status: proposed` to an actively
-  scheduled/completed status. Do not declare a compatibility release before then.
+  package's exact `equations.f90` check all run on hosted runners, together with the per-platform
+  wheel install check. RSS is measured by `check_release.sh` in the hosted release job; the
+  representative repeated-stream result is within <3x.
+- [x] Only after M4/M5: give the conversion plan a settled status. **Done:**
+  `findent-port-plan.md` is marked completed and historical, and this ledger is closed.
 
 ## Completed foundation — do not redo
 

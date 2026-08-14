@@ -26,11 +26,14 @@
 # frozen oracle can resolve its spelling, and both make the same different
 # choice.  It stays here as a signal, but it does not gate.
 #
-# `differing 1` is that signal, and it is expected: Interpolation.f90 has an
-# authored comment indented past its construct.  We follow the oracle and
-# reindent it, so our output differs from the input while *matching* the
-# reference.  Preserving the authored column instead would restate the input at
-# the cost of I2, since indent-only reindents the comment on the next pass.
+# `differing 1` is that signal, and it is expected.  It is currently
+# forutils/tests/ObjectLists_tests.f90: the host scope declares
+# `type(TObjectList) :: L`, and a contained subroutine spells five uses of it
+# `l%ArrayItem(...)`.  We apply the declared spelling, so our output differs
+# from the input — correctly.  Project mode (`--all`) makes the same five
+# corrections, so this is a property of the file, not of the missing context.
+# If the name here changes, confirm the new difference is a declared-case
+# correction and not a defect before updating this note.
 #
 # The claims that do gate are measured elsewhere:
 #

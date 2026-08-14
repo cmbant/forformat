@@ -12,13 +12,18 @@ use crate::{
     format_source, format_source_with_context, FormatResult,
 };
 use std::{
+    collections::{HashMap, HashSet},
     env,
     ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
+    num::NonZeroUsize,
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        mpsc,
+    },
     time::Instant,
 };
 
@@ -189,10 +194,16 @@ fn read_source(path: &Path, root: Option<&Path>) -> Result<Source, WorkflowError
     })
 }
 
+/// Drop repeated paths, keeping the first occurrence and the original order.
+///
+/// The order is what makes diagnostics, diffs and the changed-file listing
+/// reproducible, and the set is what keeps `--all` over a large checkout from
+/// being quadratic in the number of tracked sources.
 fn deduplicate(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
     let mut result = Vec::new();
     for path in paths {
-        if !result.contains(&path) {
+        if seen.insert(path.clone()) {
             result.push(path);
         }
     }
@@ -239,6 +250,68 @@ fn format_one(
         format_source_with_context(&source.bytes, context, config)?
     };
     Ok(result)
+}
+
+/// One formatted target: its metadata, and its bytes only if they differ from
+/// what was read.
+type FormattedTarget = (crate::FormatMeta, Option<Vec<u8>>);
+
+/// Format every target, in parallel, and return one entry per target in target
+/// order.
+///
+/// Formatting is pure once the single project-analysis pass has run, so the
+/// targets are independent. Two things bound the cost of that independence:
+///
+/// * the worker count is `available_parallelism()`, not one thread per file —
+///   `--all` over a large repository would otherwise ask the OS for thousands
+///   of threads at once;
+/// * a target whose output equals its input contributes only its metadata, so
+///   an already-formatted tree does not hold a second copy of itself in memory.
+///
+/// Every target is formatted before the caller writes anything, which is what
+/// keeps a failure part-way through from leaving a half-rewritten tree.
+fn format_targets(
+    targets: &[Source],
+    context: &ProjectContext,
+    config: &crate::config::FormatConfig,
+) -> Result<Vec<FormattedTarget>, WorkflowError> {
+    let workers = std::thread::available_parallelism()
+        .map(NonZeroUsize::get)
+        .unwrap_or(1)
+        .min(targets.len().max(1));
+    let next = AtomicUsize::new(0);
+    let (sender, receiver) = mpsc::channel();
+    let mut slots: Vec<Option<Result<FormattedTarget, WorkflowError>>> =
+        (0..targets.len()).map(|_| None).collect();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            let sender = sender.clone();
+            let next = &next;
+            scope.spawn(move || loop {
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let Some(target) = targets.get(index) else {
+                    return;
+                };
+                let outcome = format_one(target, context, config).map(|result| {
+                    let changed = result.bytes != target.bytes;
+                    (result.meta, changed.then_some(result.bytes))
+                });
+                if sender.send((index, outcome)).is_err() {
+                    return;
+                }
+            });
+        }
+        // The workers hold the only remaining senders, so the receiver ends
+        // exactly when the last one finishes.
+        drop(sender);
+        for (index, outcome) in receiver {
+            slots[index] = Some(outcome);
+        }
+    });
+    slots
+        .into_iter()
+        .map(|slot| slot.expect("format worker panicked"))
+        .collect()
 }
 
 fn report_declines(meta: &crate::FormatMeta) {
@@ -435,22 +508,21 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
             loaded.len()
         );
     }
+    // `all_paths` is the deduplicated concatenation of the two path lists, so
+    // every target and project path occurs in it verbatim and `loaded[i]` is
+    // the source read for `all_paths[i]`.  One index over that correspondence
+    // replaces a linear search — and a `canonicalize` syscall — per lookup.
+    let loaded_index: HashMap<&Path, usize> = all_paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| (path.as_path(), index))
+        .collect();
     let source_for = |path: &Path| {
-        loaded
-            .iter()
-            .find(|source| {
-                source.path == fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-            })
-            .cloned()
+        let index = *loaded_index.get(path).expect("selected path was loaded");
+        loaded[index].clone()
     };
-    let targets: Vec<Source> = target_paths
-        .iter()
-        .map(|path| source_for(path).expect("target was loaded"))
-        .collect();
-    let project_sources: Vec<Source> = project_paths
-        .iter()
-        .map(|path| source_for(path).expect("project source was loaded"))
-        .collect();
+    let targets: Vec<Source> = target_paths.iter().map(|path| source_for(path)).collect();
+    let project_sources: Vec<Source> = project_paths.iter().map(|path| source_for(path)).collect();
     let context = if invocation.isolated {
         isolated_context(&invocation.config)
     } else {
@@ -471,35 +543,23 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     }
 
     let formatting_start = Instant::now();
-    // Formatting is pure after the one project-analysis pass. Run the
-    // independent target buffers concurrently, then retain target order for
-    // diagnostics, diffs, and writes.
-    let formatted: Vec<FormatResult> = std::thread::scope(|scope| {
-        let handles = targets
-            .iter()
-            .map(|target| scope.spawn(|| format_one(target, &context, &invocation.config)))
-            .collect::<Vec<_>>();
-        handles
-            .into_iter()
-            .map(|handle| handle.join().expect("format worker panicked"))
-            .collect::<Result<_, _>>()
-    })?;
+    let formatted = format_targets(&targets, &context, &invocation.config)?;
     let mut changed = Vec::new();
-    for ((target, path), formatted) in targets.iter().zip(&target_paths).zip(formatted) {
-        report_declines(&formatted.meta);
-        if formatted.bytes == target.bytes {
+    for ((target, path), (meta, output)) in targets.iter().zip(&target_paths).zip(formatted) {
+        report_declines(&meta);
+        let Some(formatted) = output else {
             continue;
-        }
+        };
         changed.push(path.clone());
         if invocation.diff {
             write_all_stdout(&unified_diff(
                 path,
                 &target.bytes,
-                &formatted.bytes,
+                &formatted,
                 root.as_deref(),
             ))?;
         } else if !invocation.check {
-            atomic_replace(path, &formatted.bytes)?;
+            atomic_replace(path, &formatted)?;
         }
     }
     if !invocation.diff {

@@ -32,12 +32,22 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Default)]
-struct LineOptions {
+struct LineOptions<'a> {
     preserve_comment_after: bool,
     continued_statement: bool,
     continued_infix: bool,
     continued_declaration: bool,
     continued_named_parameter: bool,
+    /// The groups still open when this line starts, innermost last: `true` for
+    /// a parenthesis, `false` for a bracket.
+    ///
+    /// A named argument's `=` is only a named argument inside `(...)`, and a
+    /// continuation line can both leave and enter groups — `…))], dim=1)`
+    /// closes a bracket and is back inside the call.  Deciding that from the
+    /// previous line alone gets one of the two cases wrong whichever way it is
+    /// answered, so the decision is made at the `=`, from this stack folded
+    /// forward over the line's own tokens.
+    open_groups: &'a [bool],
     /// The statement this line continues is a FORMAT statement.  Its edit
     /// descriptors are not expressions, so `/)` there is a record separator
     /// before a closing parenthesis and not an array-constructor delimiter.
@@ -55,6 +65,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
     let mut continued_statement = false;
     let mut continued_infix = false;
     let mut continued_named_parameter = false;
+    let mut open_groups: Vec<bool> = Vec::new();
     for index in 0..document.lines.len() {
         let kind = cx
             .analysis
@@ -86,6 +97,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             continued_statement = false;
             continued_infix = false;
             continued_named_parameter = false;
+            open_groups.clear();
             continue;
         }
         if kind == PhysicalLineKind::Preprocessor {
@@ -95,6 +107,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             continued_statement = false;
             continued_infix = false;
             continued_named_parameter = false;
+            open_groups.clear();
             continue;
         }
         let preserve_comment_after = preserve_full_comment_spacing(document, index, cx);
@@ -121,6 +134,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 continued_declaration,
                 continued_named_parameter,
                 continued_format,
+                open_groups: &open_groups,
             },
         );
         if let Some(physical) = cx.analysis.buffer.lines.get(index) {
@@ -129,12 +143,16 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 PhysicalLineKind::Code | PhysicalLineKind::FindentFix
             ) {
                 let code = cx.analysis.buffer.code_bytes(physical);
-                let prior_named_parameter = continued_named_parameter;
                 continued_statement = trailing_ampersand(code);
                 continued_infix = trailing_continuation_operand(code);
-                continued_named_parameter = continued_statement
-                    && is_call_group(cx, index)
-                    && (prior_named_parameter || has_unclosed_group(code));
+                // Whether the *statement* has argument lists at all.  Whether a
+                // given `=` is inside one is decided at the `=`, from
+                // `open_groups`.
+                continued_named_parameter = continued_statement && is_call_group(cx, index);
+                fold_open_groups(code, &mut open_groups);
+                if !continued_statement {
+                    open_groups.clear();
+                }
             }
         }
         if line != document.lines[index] {
@@ -202,6 +220,7 @@ fn apply_with_options(
         options.continued_infix,
         options.continued_declaration,
         options.continued_named_parameter,
+        options.open_groups,
         false,
     );
     text = normalize_keyword_spacing_with_state(
@@ -216,7 +235,7 @@ fn apply_with_options(
     let mut text =
         normalize_comment_spacing_with_state(&text, cx, incoming, options.preserve_comment_after);
     if options.continued_statement && options.continued_named_parameter {
-        text = compact_continued_named_argument(&text);
+        text = compact_continued_named_argument(&text, options.open_groups);
     }
     text
 }
@@ -243,6 +262,7 @@ pub fn respace_joined(
         false,
         false,
         false,
+        &[],
         cx.project.target_local_component_resolution,
     );
     text = normalize_keyword_spacing_with_state(
@@ -278,11 +298,13 @@ fn compact_joined_named_arguments(line: &[u8]) -> Vec<u8> {
     edits.finish()
 }
 
-fn compact_continued_named_argument(line: &[u8]) -> Vec<u8> {
+fn compact_continued_named_argument(line: &[u8], open_groups: &[bool]) -> Vec<u8> {
     let tokens = tokenize(line, &mut LexState::default());
+    let inside_paren = inside_paren_at(open_groups, &tokens);
     let mut edits = EditBuffer::new(line);
     for (index, token) in tokens.iter().enumerate() {
-        if token.text != b"=" || !is_continued_named_parameter(&tokens, index) {
+        if token.text != b"=" || !is_continued_named_parameter(&tokens, index, inside_paren[index])
+        {
             continue;
         }
         let Some(previous) = index.checked_sub(1).and_then(|i| tokens.get(i)) else {
@@ -324,6 +346,7 @@ pub fn lowercase_line(
         false,
         false,
         false,
+        &[],
         false,
     )
 }
@@ -339,9 +362,15 @@ fn lowercase_line_with_context(
     continued_infix: bool,
     continued_declaration: bool,
     continued_named_parameter: bool,
+    open_groups: &[bool],
     preserve_identifier_case: bool,
 ) -> Vec<u8> {
     let tokens = tokenize(line, state);
+    let inside_paren = inside_paren_at(open_groups, &tokens);
+    // A declaration continued at the statement's top level is still inside its
+    // entity list; inside a group it is inside an expression, where a keyword
+    // is a keyword.
+    let continued_entity_list = continued_declaration && open_groups.is_empty();
     let mut edits = EditBuffer::new(line);
     let mut spacing = OperatorSpacing::default();
     for (index, token) in tokens.iter().enumerate() {
@@ -369,7 +398,11 @@ fn lowercase_line_with_context(
                             || continued_statement
                                 && !continued_declaration
                                 && continued_named_parameter
-                                && is_continued_named_parameter(&tokens, index));
+                                && is_continued_named_parameter(
+                                    &tokens,
+                                    index,
+                                    inside_paren[index],
+                                ));
                     add_operator_edit(line, &mut edits, token, token.text, !named, &mut spacing);
                     spacing.previous_compact_named = named;
                 } else if is_arithmetic_operator(token.text) {
@@ -404,7 +437,9 @@ fn lowercase_line_with_context(
 
                 let lower = token.text.to_ascii_lowercase();
                 let specifier_argument = is_specifier_keyword_argument(&tokens, index);
-                if is_contextual_declaration_name(line, &tokens, index) && !specifier_argument {
+                if is_contextual_declaration_name(line, &tokens, index, continued_entity_list)
+                    && !specifier_argument
+                {
                     continue;
                 }
                 if vocab::contains(vocab::FORTRAN_KEYWORDS, token.text)
@@ -615,8 +650,18 @@ fn normalize_keyword_spacing_with_state(
                         && horizontal_gap(line, token.span.end, next.span.start)
                     {
                         edits.replace(token.span.end..next.span.start, b" ");
+                        // `end subroutine   name` closes up too, but only when
+                        // a *name* follows: `horizontal_gap` is true of an
+                        // empty gap, so accepting any token turned this into an
+                        // insertion.  Both spellings of the mistake showed up
+                        // as non-fixed points on the first `end` a compound
+                        // rewrite had just produced — `endif  !! c` became
+                        // `end if !! c`, stepping on rule 5's preserved `!!`
+                        // spacing, and `enddo; enddo` became `end do ; enddo`.
                         if let Some(after) = tokens.get(index + 2) {
-                            if horizontal_gap(line, next.span.end, after.span.start) {
+                            if after.kind == TokenKind::Name
+                                && horizontal_gap(line, next.span.end, after.span.start)
+                            {
                                 edits.replace(next.span.end..after.span.start, b" ");
                             }
                         }
@@ -823,11 +868,37 @@ fn trailing_continuation_operand(line: &[u8]) -> bool {
     while previous > 0 && line[previous - 1].is_ascii_whitespace() {
         previous -= 1;
     }
-    previous > 0
-        && matches!(
-            line[previous - 1],
-            b')' | b']' | b'_' | b'.' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'
-        )
+    if previous == 0 {
+        return false;
+    }
+    if matches!(
+        line[previous - 1],
+        b')' | b']' | b'_' | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z'
+    ) {
+        return true;
+    }
+    // A trailing `.` is either a decimal point — `x = 1. &` ends on an operand
+    // — or the closing dot of a dotted operator.  `… .or. &` ends on an
+    // *operator*, so the next line starts a fresh operand and its leading `-`
+    // is unary.  Sniffing the byte alone spaced that minus out, but only on the
+    // run after the wrapper had put it there.
+    line[previous - 1] == b'.' && !ends_with_dotted_operator(&line[..previous])
+}
+
+/// Whether the code ends with a dotted operator such as `.or.`, as opposed to a
+/// decimal point or one of the dotted logical *constants*, which are operands.
+fn ends_with_dotted_operator(code: &[u8]) -> bool {
+    let Some(open) = code[..code.len() - 1]
+        .iter()
+        .rposition(|byte| !byte.is_ascii_alphabetic())
+    else {
+        return false;
+    };
+    if code[open] != b'.' || open + 1 == code.len() - 1 {
+        return false;
+    }
+    let word = &code[open..];
+    !word.eq_ignore_ascii_case(b".true.") && !word.eq_ignore_ascii_case(b".false.")
 }
 
 fn is_leading_continuation_arithmetic(
@@ -1567,22 +1638,35 @@ fn is_specifier_keyword_argument(tokens: &[crate::source::Token<'_>], index: usi
         .is_some_and(|token| token.text == b"=" && is_named_parameter_token(tokens, index + 1))
 }
 
+/// Whether the name at `index` is being *declared* here, and so keeps its
+/// spelling instead of being read as a keyword.
+///
+/// `continued_entity_list` says the line continues a declaration's entity list
+/// at the statement's top level.  The `::` is then on an earlier physical line,
+/// and without this the whole line reads as ordinary code: a component actually
+/// named `TYPE` was lowercased to `type` — but only after the wrapper had moved
+/// it off the first line, so the two runs disagreed.
 fn is_contextual_declaration_name(
     line: &[u8],
     tokens: &[crate::source::Token<'_>],
     index: usize,
+    continued_entity_list: bool,
 ) -> bool {
-    let Some(separator) = tokens[..index].iter().rposition(|token| {
+    let entities_start = match tokens[..index].iter().rposition(|token| {
         token.kind == TokenKind::Operator && token.text == b"::" && token.depth == 0
-    }) else {
-        return false;
+    }) {
+        Some(separator) => separator + 1,
+        // The `::` is on an earlier physical line, so the entity list already
+        // covers this one from its first token.
+        None if continued_entity_list => 0,
+        None => return false,
     };
     // Match `is_contextual_identifier`: a top-level comma starts a new
     // declaration entity, so an initializer on an earlier entity does not
     // affect a later one.  Its initializer scan is character-based rather
     // than depth-filtered, so `=` inside nested parentheses still qualifies.
-    let mut item_start = separator + 1;
-    for (position, token) in tokens.iter().enumerate().take(index).skip(separator + 1) {
+    let mut item_start = entities_start;
+    for (position, token) in tokens.iter().enumerate().take(index).skip(entities_start) {
         if token.kind == TokenKind::Comma && token.depth == 0 {
             item_start = position + 1;
         }
@@ -1614,8 +1698,13 @@ fn is_named_parameter_token(tokens: &[crate::source::Token<'_>], index: usize) -
             || (tokens[index - 2].kind == TokenKind::Comma && tokens[index - 2].depth > 0))
 }
 
-fn is_continued_named_parameter(tokens: &[crate::source::Token<'_>], index: usize) -> bool {
-    index > 0
+fn is_continued_named_parameter(
+    tokens: &[crate::source::Token<'_>],
+    index: usize,
+    inside_paren: bool,
+) -> bool {
+    inside_paren
+        && index > 0
         && tokens[index - 1].kind == TokenKind::Name
         && (index == 1
             || tokens[index - 2].kind == TokenKind::Comma
@@ -1624,18 +1713,52 @@ fn is_continued_named_parameter(tokens: &[crate::source::Token<'_>], index: usiz
                 .all(|token| token.kind == TokenKind::Ampersand))
 }
 
-fn has_unclosed_group(line: &[u8]) -> bool {
+/// Track the groups a line opens and closes, innermost last: `true` for a
+/// parenthesis, `false` for a bracket.
+fn fold_open_groups(line: &[u8], open: &mut Vec<bool>) {
     let mut state = LexState::default();
-    let tokens = tokenize(line, &mut state);
-    let mut depth = 0isize;
-    for token in tokens {
+    for token in tokenize(line, &mut state) {
         match token.kind {
-            TokenKind::LParen | TokenKind::LBracket => depth += 1,
-            TokenKind::RParen | TokenKind::RBracket => depth -= 1,
+            TokenKind::LParen => open.push(true),
+            TokenKind::LBracket => open.push(false),
+            TokenKind::RParen | TokenKind::RBracket => {
+                open.pop();
+            }
             _ => {}
         }
     }
-    depth > 0
+}
+
+/// For each token, whether the innermost group open *at* that token is a
+/// parenthesis.
+///
+/// Named arguments live in `(...)`.  `[...]` is an array constructor: a
+/// `name =` after one of its commas is the next entity of a declaration list,
+/// not a keyword.  Both matter on the same line — `…, b = &` after a `]`
+/// belongs to the declaration list, while `…))], dim=1)` has closed its bracket
+/// and is back inside the call — so this is folded per token rather than
+/// decided once for the line.
+fn inside_paren_at(open_groups: &[bool], tokens: &[crate::source::Token<'_>]) -> Vec<bool> {
+    let mut open = open_groups.to_vec();
+    let mut result = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        match token.kind {
+            TokenKind::LParen => {
+                result.push(open.last().copied().unwrap_or(false));
+                open.push(true);
+            }
+            TokenKind::LBracket => {
+                result.push(open.last().copied().unwrap_or(false));
+                open.push(false);
+            }
+            TokenKind::RParen | TokenKind::RBracket => {
+                open.pop();
+                result.push(open.last().copied().unwrap_or(false));
+            }
+            _ => result.push(open.last().copied().unwrap_or(false)),
+        }
+    }
+    result
 }
 
 fn real_exponent_marker(number: &[u8]) -> Option<usize> {

@@ -111,9 +111,18 @@ The Rust crate also exposes the core formatter for applications that need an in-
 let result = forformat::format_source(source, &config)?;
 ```
 
-The public entry points are `forformat::format_source`, `forformat::format_source_with_context`,
-`forformat::format_to`, and `forformat::format_to_owned`. The library is byte-oriented: it preserves
-source bytes outside the formatting contract, including non-UTF-8 bytes in comments and strings.
+The supported entry points are `forformat::format_source`, `forformat::format_source_with_context`,
+`forformat::format_to`, and `forformat::format_to_owned`, together with the configuration and result
+types they use (`FormatConfig`, `FormatMode`, `WrapConfig`, `MacroDefine`, `FormatResult`,
+`FormatMeta`, `FormatError`, and `analyze_project`/`ProjectContext`). `FormatConfig` has public
+fields and a `Default` impl, so it is configured with struct-update syntax.
+
+The library is byte-oriented: it preserves source bytes outside the formatting contract, including
+non-UTF-8 bytes in comments and strings.
+
+The remaining modules (`source`, `classify`, `transform`, `format`, `io`, `cli`) are public only
+because the binary, the integration tests and the fuzz targets are separate crates. They are
+implementation details, are not covered by semantic versioning, and change with the pipeline.
 
 ## Development
 
@@ -137,10 +146,28 @@ python3 tools/check_invariants.py
 sh tools/check_camb_corpus.sh
 ```
 
-The design, compatibility boundaries, migration notes, and file-workflow details are documented in
-[`docs/compatibility.md`](docs/compatibility.md), [`docs/migration.md`](docs/migration.md), and
-[`docs/file-workflow.md`](docs/file-workflow.md). The formatter's pipeline and idempotence
-invariants are described at the top of [`src/format/full.rs`](src/format/full.rs).
+To check that a built wheel actually works before it is published — the same check both CI
+workflows run on every platform:
+
+```sh
+python -m build --wheel --outdir dist
+sh tools/check_wheel.sh dist
+```
+
+Documentation:
+
+- [`AGENTS.md`](AGENTS.md) — the short orientation, and the checks a change has to pass.
+- [`docs/design.md`](docs/design.md) — why the pipeline has this shape; the design of record.
+- [`docs/full-mode.md`](docs/full-mode.md) — the full-mode rules, standing checks, and known traps.
+- [`docs/compatibility.md`](docs/compatibility.md) — the findent-compatibility boundary and the
+  reviewed divergences.
+- [`docs/migration.md`](docs/migration.md) and [`docs/file-workflow.md`](docs/file-workflow.md) —
+  migration notes and the file/project workflow.
+- [`docs/history/`](docs/history/) — the original port plan and its closed work ledger, kept for
+  provenance.
+
+The formatter's pipeline and idempotence invariants are described at the top of
+[`src/format/full.rs`](src/format/full.rs).
 
 ## Relationship to findent
 

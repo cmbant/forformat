@@ -90,6 +90,311 @@ fn full_mode_fixed_point_and_indent_only_fixed_point_hold_together() {
 }
 
 #[test]
+fn a_declared_name_keeps_its_spelling_on_a_continued_entity_list() {
+    // Reduced from CP2K, which really does declare a component called `TYPE`.
+    // The rule that protects a declared name looks for the `::` on its own
+    // line; once the wrapper moved `TYPE` onto a continuation there was no
+    // `::` to find, so it read as the keyword and was lowercased.
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        wrap: forformat::WrapConfig {
+            enabled: false,
+            ..FormatConfig::default().wrap
+        },
+        ..FormatConfig::default()
+    };
+    for (source, expected) in [
+        (
+            "module m\n   type t\n      integer :: ref_count = -1, &\n         TYPE = -1, other = -1\n   end type t\nend module m\n",
+            "         TYPE = -1, other = -1",
+        ),
+        // An initializer is an expression, not an entity: names in it are
+        // resolved as code.
+        (
+            "module m\n   integer :: a = 1, &\n      b = SIZE(x)\nend module m\n",
+            "      b = size(x)",
+        ),
+        // So is anything inside a group the continuation is still nested in.
+        (
+            "module m\n   integer :: a = f( &\n      TYPE)\nend module m\n",
+            "      type)",
+        ),
+    ] {
+        let once = format_source(source.as_bytes(), &config).unwrap().bytes;
+        let text = String::from_utf8(once.clone()).unwrap();
+        assert!(
+            text.lines().any(|line| line == expected),
+            "expected {expected:?} in\n{text}"
+        );
+        let twice = format_source(&once, &config).unwrap().bytes;
+        assert_eq!(once, twice, "full mode I1 failed for {source:?}");
+    }
+}
+
+#[test]
+fn a_wrapped_declaration_does_not_repartition_its_alignment_block() {
+    // Reduced from SPECFEM3D at `--line-length=80`. The wrapper measures the
+    // laid-out width, which step 17 sets from the alignment block a line is in.
+    // A continuation used to end that block, so wrapping the first declaration
+    // moved every declaration below it into a different block, with a different
+    // column and a different width — and the next run measured that width and
+    // made a different wrapping decision. The loop only closes if the partition
+    // does not depend on where the wrapper broke.
+    let source = "\
+program p
+    integer,                                intent(in)     :: myrank
+    ! local
+    integer                                                :: ievent, ireceiver, nsta_slice, irec_local, NSTA, NEVENT, ier
+    integer                                                :: ispec_selected, islice_selected, idim
+    double precision                                       :: xi_receiver, eta_receiver, gamma_receiver
+    double precision                                       :: x_found,  y_found,  z_found
+    double precision                                       :: x_to_locate, y_to_locate, z_to_locate
+    real(kind=CUSTOM_REAL)                                 :: distance_min_glob,distance_max_glob
+    real(kind=CUSTOM_REAL)                                 :: elemsize_min_glob,elemsize_max_glob
+    real(kind=CUSTOM_REAL)                                 :: x_min_glob,x_max_glob
+    real(kind=CUSTOM_REAL)                                 :: y_min_glob,y_max_glob
+    real(kind=CUSTOM_REAL)                                 :: z_min_glob,z_max_glob
+    integer,                 dimension(NGNOD)              :: iaddx,iaddy,iaddz
+    double precision,        dimension(NGLLX)              :: hxis,hpxis
+end program p
+";
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        wrap: forformat::WrapConfig {
+            line_length: 80,
+            ..FormatConfig::default().wrap
+        },
+        ..FormatConfig::default()
+    };
+    let once = format_source(source.as_bytes(), &config).unwrap().bytes;
+    let twice = format_source(&once, &config).unwrap().bytes;
+    assert_eq!(
+        String::from_utf8_lossy(&once),
+        String::from_utf8_lossy(&twice),
+        "wrapping one declaration changed the block the others are measured in"
+    );
+}
+
+#[test]
+fn a_dotted_operator_before_a_continuation_leaves_the_next_sign_unary() {
+    // Reduced from CP2K at `--indent=8`, where the wrapper breaks after
+    // `.or. &`. Deciding "the previous line ended on an operand" from its last
+    // byte counted the closing `.` of `.or.`, so the leading `-` of the next
+    // line was spaced as if it were binary — one run after the wrapper created
+    // the break.
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        wrap: forformat::WrapConfig {
+            enabled: false,
+            ..FormatConfig::default().wrap
+        },
+        ..FormatConfig::default()
+    };
+    for (source, expected) in [
+        (
+            "program p\nif (a > c .or. &\n   -b > c) then\nx = 1\nend if\nend program p\n",
+            "      -b > c) then",
+        ),
+        // The operand cases this guard has to leave alone: a name, and a
+        // decimal point, both of which really do end on an operand.
+        ("program p\nx = a &\n   - b\nend program p\n", "      - b"),
+        ("program p\nx = 1. &\n   - b\nend program p\n", "      - b"),
+    ] {
+        let once = format_source(source.as_bytes(), &config).unwrap().bytes;
+        let text = String::from_utf8(once.clone()).unwrap();
+        assert!(
+            text.lines().any(|line| line == expected),
+            "expected {expected:?} in\n{text}"
+        );
+        let twice = format_source(&once, &config).unwrap().bytes;
+        assert_eq!(once, twice, "full mode I1 failed for {source:?}");
+    }
+}
+
+#[test]
+fn step_17_relayout_keeps_paren_alignment_on_the_width_it_emits() {
+    // Reduced from CP2K at `--align-paren`. The engine aligns the continuation
+    // under the `[` of the head line; step 17 then compresses that head's `::`
+    // and moves the `[` twenty columns left, stranding the continuation where
+    // the `[` used to be. The next run reads the compressed head and aligns
+    // correctly, so the two runs disagree.
+    let source = "\
+module m
+   character(len=3), DIMENSION(7), &
+      PARAMETER, PUBLIC                     :: periodicity_string = [\"  X\", \"  Y\", \"  Z\", &
+                                                                     \" XY\", \" XZ\", \" YZ\", &
+                                                                     \"XYZ\"]
+end module m
+";
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        align_paren: true,
+        ..FormatConfig::default()
+    };
+    let once = format_source(source.as_bytes(), &config).unwrap().bytes;
+    let twice = format_source(&once, &config).unwrap().bytes;
+    assert_eq!(
+        String::from_utf8_lossy(&once),
+        String::from_utf8_lossy(&twice),
+        "step 17 moved a head line the engine had already aligned against"
+    );
+    // Paren alignment points at something on the line above, so a continuation
+    // can never start past the end of the head it is aligned to. Before the
+    // re-layout the head was compressed to 71 columns and the continuation
+    // stayed at 72 — aligned to a `[` that had moved.
+    let text = String::from_utf8_lossy(&once);
+    let head = text
+        .lines()
+        .find(|line| line.contains("periodicity_string"))
+        .expect("head line");
+    for line in text.lines().filter(|line| line.contains("\" XY\"")) {
+        let indent = line.len() - line.trim_start().len();
+        assert!(
+            indent > 0 && indent <= head.len(),
+            "continuation indent {indent} does not point into the {}-column head",
+            head.len()
+        );
+    }
+}
+
+#[test]
+fn a_declaration_entity_after_an_array_constructor_is_not_a_named_argument() {
+    // Reduced from CP2K. The continuation line carries no statement context, so
+    // `, b =` after a closing `]` looked like a keyword argument and was
+    // compacted to `b=`. Named arguments live in `(...)`; `[...]` is an array
+    // constructor, and after its comma comes the next entity of the
+    // declaration list.
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        wrap: forformat::WrapConfig {
+            enabled: false,
+            ..FormatConfig::default().wrap
+        },
+        ..FormatConfig::default()
+    };
+    for (source, expected) in [
+        (
+            "module m\n   real(kind=dp), parameter :: a = [1.0_dp, &\n      2.0_dp], b = &\n      [3.0_dp, 4.0_dp]\nend module m\n",
+            "      2.0_dp], b = &",
+        ),
+        // The rule this guard narrows still has to do its job inside `(...)`.
+        (
+            "module m\n   real(kind=dp), parameter :: a = f(p=1, &\n      q=2)\nend module m\n",
+            "      q=2)",
+        ),
+        (
+            "program p\ncall f(a=1, &\n   b=2, &\n   c=3)\nend program p\n",
+            "      b=2, &",
+        ),
+        // A continuation can close a bracket and land back inside the call, so
+        // the decision belongs at the `=`, not to the line as a whole.
+        (
+            "program p\ncall g(sum([1, &\n   2, 3]), dim=1)\nend program p\n",
+            "      2, 3]), dim=1)",
+        ),
+    ] {
+        let once = format_source(source.as_bytes(), &config).unwrap().bytes;
+        let text = String::from_utf8(once.clone()).unwrap();
+        assert!(
+            text.lines().any(|line| line == expected),
+            "expected {expected:?} in\n{text}"
+        );
+        let twice = format_source(&once, &config).unwrap().bytes;
+        assert_eq!(once, twice, "full mode I1 failed for {source:?}");
+    }
+}
+
+#[test]
+fn wrapping_measures_the_declaration_separator_step_17_will_emit() {
+    // Reduced from SPECFEM3D at `--line-length=80`. The author lined these
+    // `::` up in a very wide block; step 17 compresses that block, so the line
+    // the wrapper reads is 120 columns and the line it emits is 81. Wrapping
+    // the authored spelling found no break that left the head inside the
+    // budget and declined, and the next run — reading the compressed 81-column
+    // line — wrapped it happily.
+    // The authored `::` sits past column 80, so no break — not even one
+    // immediately after the `::` — leaves the head inside the budget. Step 17
+    // moves it to column 29, where a break after `=` fits.
+    let source = "\
+module m
+   type t
+      logical                                                                     :: dump_model_at_each_iteration = .true.
+      logical                                                                     :: dump_descent_direction_at_each_iteration = .true.
+      !! user-defined taper
+      real(kind=CUSTOM_REAL)                                                      :: xmin_taper, xmax_taper
+   end type t
+end module m
+";
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        wrap: forformat::WrapConfig {
+            line_length: 80,
+            ..FormatConfig::default().wrap
+        },
+        ..FormatConfig::default()
+    };
+    let once = format_source(source.as_bytes(), &config).unwrap().bytes;
+    let twice = format_source(&once, &config).unwrap().bytes;
+    assert_eq!(
+        String::from_utf8_lossy(&once),
+        String::from_utf8_lossy(&twice),
+        "wrapping and step 17 disagreed about the emitted width"
+    );
+    for line in once.split(|byte| *byte == b'\n') {
+        assert!(
+            line.len() <= 80 || String::from_utf8_lossy(line).contains("::"),
+            "line over budget: {}",
+            String::from_utf8_lossy(line)
+        );
+    }
+}
+
+#[test]
+fn end_keyword_spacing_stops_at_the_statement_it_owns() {
+    // Both spellings reduced from SPECFEM3D. A compound rewrite (`endif` ->
+    // `end if`) hands the next pass two tokens where there was one, so the
+    // `end <keyword>` spacing rule saw a line it had not seen before and
+    // reached past the keyword: into rule 5's preserved `!!` gap, and into an
+    // empty gap in front of `;`, which turned a collapse into an insertion.
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        ..FormatConfig::default()
+    };
+    for (source, expected) in [
+        (
+            "program p\nif (x) then\ny = 1\nendif  !! trailing doc\nend program p\n",
+            "   end if  !! trailing doc",
+        ),
+        (
+            "program p\nif (x) then\ny = 1\nend if  !! trailing doc\nend program p\n",
+            "   end if  !! trailing doc",
+        ),
+        (
+            "program p\ndo i = 1, 2\ndo j = 1, 2\ny = 1\nenddo; enddo\nend program p\n",
+            "      end do; enddo",
+        ),
+        (
+            "program p\ndo i = 1, 2\ndo j = 1, 2\ny = 1\nend do; enddo\nend program p\n",
+            "      end do; enddo",
+        ),
+        // The collapse this rule does own must survive the narrowing.
+        (
+            "module m\ncontains\nsubroutine s\ny = 1\nend subroutine    s\nend module m\n",
+            "   end subroutine s",
+        ),
+    ] {
+        let once = format_source(source.as_bytes(), &config).unwrap().bytes;
+        let text = String::from_utf8(once.clone()).unwrap();
+        assert!(
+            text.lines().any(|line| line == expected),
+            "expected {expected:?} in\n{text}"
+        );
+        let twice = format_source(&once, &config).unwrap().bytes;
+        assert_eq!(once, twice, "full mode I1 failed for {source:?}");
+    }
+}
+
+#[test]
 fn full_mode_protected_spans_are_byte_exact() {
     let source = b"program p\ncharacter(len=20) :: s = 'IF  THEN  ' ! body  x = 1\nx = 4Hab  c\n#if defined(X)\nIF (X) THEN\n#endif\nend program p\n";
     let config = FormatConfig {

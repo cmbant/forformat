@@ -1,32 +1,34 @@
-# Combined Rust Fortran Formatter — Port Plan
+# Design of record — full-mode formatting
 
-**Status:** design of record for full-mode formatting. Last verified against the working tree on
-2026-08-11.
+**Status:** the design of record. The port it describes is complete; this document explains *why*
+the code is shaped the way it is, and is the place to record a deliberate change to that shape.
 
-**Document map.** `TODO.md` is the live work queue for indent-only findent-4.3.7 compatibility.
-`RUST_CONVERSION_PLAN.md` is the historical plan for that original port. **This** document owns
-the *design* of full-mode formatting: normalization, project casing, wrapping, file/project
-workflow. `TODO_FULL_MODE.md` is the live work queue for implementing it. Keep facts in exactly
-one of the four.
+**Document map.** `AGENTS.md` is the short version — read it first. **This** document owns the
+*design* of full-mode formatting: normalization, project casing, wrapping, file/project workflow.
+[`full-mode.md`](full-mode.md) is the working reference for the rules and the standing checks.
+[`compatibility.md`](compatibility.md) owns the findent-compatibility boundary, and
+[`history/`](history/) holds the original port plan and its completed work ledger. Keep a fact in
+exactly one of them.
 
-## Implementation status (2026-08-11)
+## Implementation status
 
-The architecture is in place. Chunks A (per-line normalization), B (declaration engine),
-C (case application) and D (structure passes and wrapping integration) have all landed and been
-validated against the frozen oracle. Chunks E, F and G remain, queued in `TODO_FULL_MODE.md`.
+Every phase below has landed. Chunks A (per-line normalization), B (declaration engine), C (case
+application), D (structure passes and wrapping integration), E (post-layout passes) and F/G
+(file and project workflow, release) are all in the tree and validated against the frozen oracle.
 
 | Phase | State |
 |---|---|
 | 0 — oracle and baselines | **done**: `tools/reference/` frozen with hashes, `converge.py`, `tests/reference/convergence-baseline.json` (34 fixtures, no cycles), `docs/traceability.md` (86 rows), `tools/check_camb_corpus.sh` |
-| 1 — mode, config, CLI | **done** for formatting options; file-workflow flags belong to Phase 10 |
+| 1 — mode, config, CLI | **done**: formatting options and the Phase 10 file-workflow flags |
 | 3 — shared lexical infrastructure | **done**: `source/regions.rs`, `source/tokens.rs`, statement provenance, duplicate scanners removed |
 | 4 — simple normalization | **done**: all 19 Chunk A rules landed and differentially validated |
 | 5 — project declaration and case analysis | **done**: resolution, scopes, the scope-ranged declared-name model (B9), every extractor B1-B8/B10, and case application (Chunk C). No perturbation produces a more-than-case difference. Derived-type inheritance (B11) is modelled by walking the `extends` chain — a deliberate divergence, since the oracle reaches the same output through a global fallback that is unsafe under our `(type, component)` keying |
 | 6 — structure-changing cleanup | **done** as Chunk D: lexical joins, redundant-parenthesis removal, terminal `RETURN` removal |
 | 7 — planner/emitter split | **done**: `format/planner.rs` owns every structural decision |
 | 8 — wrapping | **done**: break-point engine plus Chunk D integration — continued-statement rewrap, inline-comment detachment, per-break parenthesis alignment, OpenMP sentinels, decline diagnostics |
-| 9 — post-layout passes | stubs in place, queued as Chunk E |
-| 10-12 | queued as Chunks F and G |
+| 9 — post-layout passes | **done** as Chunk E: `transform/passes/layout_post.rs` — declaration-separator alignment, program-unit spacing, blank-line limits, output whitespace |
+| 10 — file and project workflow | **done** as Chunk F: `io/mod.rs` — path/`--all` selection, one project-analysis pass, bounded parallel formatting, atomic replacement, `--check`/`--diff` |
+| 11-12 — packaging and release | **done** as Chunk G: `cargo package` verification, the CLI contract script, the PyPI wheel workflow with a per-platform install smoke test |
 
 Two things are worth knowing before reading further, because they change what later sections have
 to prove:
@@ -845,7 +847,7 @@ step. Both failures exit 2, with distinct messages.
 findent 4.3.7 treats a single-quoted literal following an alphanumeric token plus whitespace as
 non-string code, so its `remred` heuristic collapses spaces inside a valid Fortran character
 literal (for example `error stop '...  ...'`). Rust preserves the literal, following the option's
-documented "outside strings" contract. Already recorded in `TODO.md`; carry it forward as an
+documented "outside strings" contract. Recorded in `compatibility.md` and the manifest; carry it forward as an
 intentional, fixture-backed divergence and do not regress to match.
 
 ## 9.3 forutils inclusion asymmetry
