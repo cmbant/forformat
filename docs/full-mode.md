@@ -63,6 +63,53 @@ A continuation line has no statement context by itself. `LineOptions::continued_
 such as declaration, named-argument, FORMAT, and open-group state into the per-line chain. When
 wrapping rejoins a statement, the joined text runs through the appropriate rules again.
 
+### Style controls
+
+The full-mode style controls are available as long options, TOML keys, and fields of
+`StyleConfig`. Their defaults preserve the existing output: recognized keywords and intrinsic
+spellings are lowercase, legacy relational operators are modernized, and only binary `*`, `/`,
+and `**` are compact.
+
+`compact-multiplicative` governs binary `*`, `/`, and `**` only. With it enabled
+those operators are compact; with it disabled they have one space on both sides.
+
+The other style switches are independent booleans: `relational-symbols` modernizes legacy dotted
+relational operators, `array-brackets` converts `(/ ... /)` constructors, `split-compound-keywords`
+splits run-together compound keywords, `join-goto` contracts `go to`, `strip-empty-args` removes
+empty `subroutine` definition argument lists, and `remove-redundant-parens` and
+`remove-terminal-return` gate their named cleanup passes. `program-unit-spacing` controls the
+program-unit separator pass; `max-blank-lines` caps ordinary blank runs. `delimiter-spacing`,
+`comment-spacing`, and `continuation-markers` independently control delimiter/comment/continuation
+normalization. A value of `0` disables only the named behavior.
+
+The compact item-leading `=` rule also covers named arguments, declaration and I/O specifiers,
+and `do concurrent(i=1:n)`, including when the item begins on a continuation line. `*` in
+`character*8`, assumed-size declarations, and `write(*, *)`, `/` in `FORMAT` and `(/ ... /)`,
+real-exponent signs, delimiters, and protected regions are not expression-operator spacing.
+Adjacent edits produce at most one space, so `append=.not. ready` stays compact at the equals
+boundary.
+
+`keyword-case` applies to recognized language keywords, intrinsic names, specifiers, intrinsic
+dotted words, and real-literal `e`/`d` markers. It does not change declared or unresolved
+identifiers, macros, components after `%`, user-defined dotted operators, literals, preprocessor
+bytes, or ordinary comment text. `split-compound-keywords=1` performs the existing compound-keyword
+split, while `join-goto=1` contracts `go to` to `goto`. Interior whitespace in recognized multiword
+keyword pairs is always collapsed. With `keyword-case=preserve`, authored letters are retained
+while splitting or joining, so `EnDiF` becomes `EnD iF` and `Go   To 10` becomes `GoTo 10`. Setting
+either boolean to `0` disables only that switch's named behavior; it does not turn the formatter
+into a general byte-preserving mode. The other enabled style controls still apply.
+
+For example:
+
+`x = a*b/c**2 + d` becomes `x = a * b / c ** 2 + d` when
+`--compact-multiplicative=0`.
+
+The per-line gates live in `passes::line_rules`; the line-count gates for redundant parentheses,
+terminal returns, and continuations live in `transform::pipeline`; program-unit spacing and blank
+caps are post-layout passes. This ownership keeps `--indent-only` on its early engine return and
+keeps continuation-sensitive facts in `LineOptions` rather than inferring statement kind from a
+continuation line.
+
 Examples of the intended shapes:
 
 ```fortran
@@ -75,6 +122,9 @@ real :: values = (/ 1, 2 /)        ! becomes: real :: values = [1, 2]
 `FORMAT` edit descriptors keep `/)` because it closes a format list, not an array constructor.
 String literals, Hollerith payloads, preprocessor directives, and comments retain their protected
 contents.
+
+`--max-blank-lines=0` removes program-unit separators even with
+`--program-unit-spacing=1`, because the cap runs after the separator pass.
 
 ## Declaration and case engine
 

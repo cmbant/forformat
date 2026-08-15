@@ -1,5 +1,5 @@
 use crate::{
-    config::{FormatConfig, FormatMode, MacroDefine},
+    config::{FormatConfig, FormatMode, KeywordCase, MacroDefine},
     error::FormatError,
 };
 use std::path::{Path, PathBuf};
@@ -356,6 +356,59 @@ where
                 "line-length" => c.wrap.line_length = parse_num(&need(&mut value, &mut a)?)?,
                 "uppercase-single-l" => c.uppercase_single_l = true,
                 "define" => push_define(&mut c, &need(&mut value, &mut a)?),
+                "keyword-case" => {
+                    c.style.keyword_case = parse_style_choice(
+                        &name,
+                        &need(&mut value, &mut a)?,
+                        &[
+                            ("lower", KeywordCase::Lower),
+                            ("upper", KeywordCase::Upper),
+                            ("preserve", KeywordCase::Preserve),
+                        ],
+                    )?
+                }
+                "relational-symbols" => {
+                    c.style.relational_symbols = parse_bool(&need(&mut value, &mut a)?)?
+                }
+                "array-brackets" => {
+                    c.style.array_brackets = parse_bool(&need(&mut value, &mut a)?)?
+                }
+                "compact-multiplicative" => {
+                    c.style.compact_multiplicative = parse_bool(&need(&mut value, &mut a)?)?
+                }
+                "join-goto" => c.style.join_goto = parse_bool(&need(&mut value, &mut a)?)?,
+                "split-compound-keywords" => {
+                    c.style.split_compound_keywords = parse_bool(&need(&mut value, &mut a)?)?
+                }
+                "strip-empty-args" => {
+                    c.style.strip_empty_args = parse_bool(&need(&mut value, &mut a)?)?
+                }
+                "remove-redundant-parens" => {
+                    c.style.remove_redundant_parens = parse_bool(&need(&mut value, &mut a)?)?
+                }
+                "remove-terminal-return" => {
+                    c.style.remove_terminal_return = parse_bool(&need(&mut value, &mut a)?)?
+                }
+                "program-unit-spacing" => {
+                    c.style.program_unit_spacing = parse_bool(&need(&mut value, &mut a)?)?
+                }
+                "max-blank-lines" => {
+                    let v = need(&mut value, &mut a)?;
+                    c.style.max_blank_lines = if v == "preserve" {
+                        None
+                    } else {
+                        Some(parse_num(&v)?)
+                    };
+                }
+                "delimiter-spacing" => {
+                    c.style.delimiter_spacing = parse_bool(&need(&mut value, &mut a)?)?
+                }
+                "comment-spacing" => {
+                    c.style.comment_spacing = parse_bool(&need(&mut value, &mut a)?)?
+                }
+                "continuation-markers" => {
+                    c.style.continuation_markers = parse_bool(&need(&mut value, &mut a)?)?
+                }
                 "indent-changeteam" => {
                     c.construct_indents.changeteam = parse_num(&need(&mut value, &mut a)?)?
                 }
@@ -625,6 +678,27 @@ fn parse_num(s: &str) -> Result<usize, FormatError> {
         })
 }
 
+fn parse_style_choice<T: Copy>(
+    option: &str,
+    value: &str,
+    choices: &[(&str, T)],
+) -> Result<T, FormatError> {
+    choices
+        .iter()
+        .find(|(allowed, _)| *allowed == value)
+        .map(|(_, parsed)| *parsed)
+        .ok_or_else(|| {
+            let allowed = choices
+                .iter()
+                .map(|(allowed, _)| *allowed)
+                .collect::<Vec<_>>()
+                .join(", ");
+            FormatError::InvalidOption(format!(
+                "--{option} has invalid value `{value}`; allowed values: {allowed}"
+            ))
+        })
+}
+
 /// Point out the common `-all` typo without interfering with findent-style
 /// short options such as `-i4` and `-ifree`.
 fn single_dash_long_option_suggestion(arg: &str) -> Option<String> {
@@ -643,8 +717,13 @@ fn single_dash_long_option_suggestion(arg: &str) -> Option<String> {
             | "align-declarations"
             | "align-paren"
             | "all"
+            | "array-brackets"
             | "check"
+            | "compact-multiplicative"
+            | "comment-spacing"
             | "config"
+            | "continuation-markers"
+            | "delimiter-spacing"
             | "diff"
             | "exclude"
             | "extend-exclude"
@@ -660,17 +739,26 @@ fn single_dash_long_option_suggestion(arg: &str) -> Option<String> {
             | "last-indent"
             | "last-usable"
             | "line-length"
+            | "join-goto"
+            | "keyword-case"
+            | "max-blank-lines"
             | "max-indent"
             | "no-wrap"
             | "normalize-only"
             | "no-config"
             | "openmp"
             | "project-context"
+            | "program-unit-spacing"
             | "refactor-end"
             | "refactor-procedures"
+            | "relational-symbols"
+            | "remove-redundant-parens"
+            | "remove-terminal-return"
+            | "split-compound-keywords"
             | "start-indent"
             | "stdin"
             | "stdout"
+            | "strip-empty-args"
             | "uppercase-single-l"
             | "wrap"
             | "ws-remred"
@@ -775,6 +863,21 @@ Free-form Fortran formatter.\n\
   --normalize-only                   normalization without structural layout\n\
   --wrap[=<0|1>], --no-wrap          reflow over-long statements (full mode)\n\
   --line-length=<n>                  wrapping budget (default 120)\n\
+  --keyword-case=<lower|upper|preserve>\n\
+                                      recognized keyword case (default lower)\n\
+  --relational-symbols=<0|1>         rewrite `.eq.` and friends as `==` (default 1)\n\
+  --array-brackets=<0|1>             rewrite `(/ ... /)` as `[ ... ]` (default 1)\n\
+  --compact-multiplicative=<0|1>     no spaces around binary `*`, `/`, `**` (default 1)\n\
+  --split-compound-keywords=<0|1>    write `endif` as `end if` (default 1)\n\
+  --join-goto=<0|1>                  write `go to` as `goto` (default 1)\n\
+  --strip-empty-args=<0|1>           strip empty SUBROUTINE definition arg lists (default 1)\n\
+  --remove-redundant-parens=<0|1>    remove redundant parentheses (default 1)\n\
+  --remove-terminal-return=<0|1>     remove terminal procedure RETURN (default 1)\n\
+  --program-unit-spacing=<0|1>       canonical blank lines around program units (default 1)\n\
+  --max-blank-lines=<n|preserve>     blank-line cap (default 2)\n\
+  --delimiter-spacing=<0|1>          normalize spaces after delimiters (default 1)\n\
+  --comment-spacing=<0|1>            normalize the gap before a trailing `!` (default 1)\n\
+  --continuation-markers=<0|1>       normalize continuation markers and OpenMP sentinels (default 1)\n\
   -D NAME[=VALUE], --define=...      define a macro name (repeatable)\n\
   --uppercase-single-l               uppercase a lone `l` used as a name\n\
   --config=<path>                    use a project TOML configuration explicitly\n\
@@ -1119,6 +1222,149 @@ mod tests {
         assert!(!run(&["--wrap=0"]).wrap.enabled);
         assert_eq!(run(&["--line-length=100"]).wrap.line_length, 100);
         assert!(run(&["--uppercase-single-l"]).uppercase_single_l);
+    }
+
+    #[test]
+    fn style_options_parse_all_values_and_underscore_spellings() {
+        use crate::config::KeywordCase;
+
+        assert!(run(&[]).style.join_goto);
+        assert!(run(&[]).style.split_compound_keywords);
+
+        let config = run(&[
+            "--keyword_case",
+            "upper",
+            "--relational-symbols=0",
+            "--array_brackets",
+            "0",
+            "--compact-multiplicative=0",
+            "--join_goto=0",
+            "--split-compound-keywords",
+            "0",
+            "--strip_empty_args=0",
+            "--remove-redundant-parens",
+            "0",
+            "--remove_terminal_return=0",
+            "--program-unit-spacing",
+            "0",
+            "--max_blank_lines",
+            "preserve",
+            "--delimiter-spacing=0",
+            "--comment_spacing",
+            "0",
+            "--continuation-markers=0",
+        ]);
+        assert_eq!(config.style.keyword_case, KeywordCase::Upper);
+        assert!(!config.style.relational_symbols);
+        assert!(!config.style.array_brackets);
+        assert!(!config.style.compact_multiplicative);
+        assert!(!config.style.join_goto);
+        assert!(!config.style.split_compound_keywords);
+        assert!(!config.style.strip_empty_args);
+        assert!(!config.style.remove_redundant_parens);
+        assert!(!config.style.remove_terminal_return);
+        assert!(!config.style.program_unit_spacing);
+        assert_eq!(config.style.max_blank_lines, None);
+        assert!(!config.style.delimiter_spacing);
+        assert!(!config.style.comment_spacing);
+        assert!(!config.style.continuation_markers);
+
+        fn style_bool(config: &crate::config::FormatConfig, option: &str) -> bool {
+            match option {
+                "relational-symbols" => config.style.relational_symbols,
+                "array-brackets" => config.style.array_brackets,
+                "compact-multiplicative" => config.style.compact_multiplicative,
+                "join-goto" => config.style.join_goto,
+                "split-compound-keywords" => config.style.split_compound_keywords,
+                "strip-empty-args" => config.style.strip_empty_args,
+                "remove-redundant-parens" => config.style.remove_redundant_parens,
+                "remove-terminal-return" => config.style.remove_terminal_return,
+                "program-unit-spacing" => config.style.program_unit_spacing,
+                "delimiter-spacing" => config.style.delimiter_spacing,
+                "comment-spacing" => config.style.comment_spacing,
+                "continuation-markers" => config.style.continuation_markers,
+                _ => unreachable!(),
+            }
+        }
+        let bools = [
+            "relational-symbols",
+            "array-brackets",
+            "compact-multiplicative",
+            "join-goto",
+            "split-compound-keywords",
+            "strip-empty-args",
+            "remove-redundant-parens",
+            "remove-terminal-return",
+            "program-unit-spacing",
+            "delimiter-spacing",
+            "comment-spacing",
+            "continuation-markers",
+        ];
+        for option in bools {
+            for spelling in [option.to_string(), option.replace('-', "_")] {
+                let zero = format!("--{spelling}=0");
+                let one = format!("--{spelling}=1");
+                assert!(!style_bool(&run(&[zero.as_str()]), option));
+                assert!(style_bool(&run(&[one.as_str()]), option));
+            }
+        }
+
+        assert_eq!(run(&["--max-blank-lines=0"]).style.max_blank_lines, Some(0));
+        assert_eq!(
+            run(&["--max-blank-lines", "7"]).style.max_blank_lines,
+            Some(7)
+        );
+    }
+
+    #[test]
+    fn style_options_report_the_option_bad_value_and_allowed_values() {
+        let result = parse([
+            "forformat".to_string(),
+            "--strip-empty-args=maybe".to_string(),
+        ]);
+        assert!(matches!(
+            result,
+            Err(crate::error::FormatError::InvalidOption(message))
+                if message == "expected 0 or 1, got maybe"
+        ));
+        let result = parse([
+            "forformat".to_string(),
+            "--keyword-case=invalid".to_string(),
+        ]);
+        assert!(matches!(
+            result,
+            Err(crate::error::FormatError::InvalidOption(message))
+                if message.contains("keyword-case")
+                    && message.contains("invalid")
+                    && message.contains("allowed values")
+        ));
+        assert!(matches!(
+            parse(["forformat", "--max-blank-lines=bad"].into_iter().map(str::to_owned)),
+            Err(crate::error::FormatError::InvalidOption(message))
+                if message.contains("bad")
+        ));
+        for option in [
+            "--keyword-case",
+            "--array-brackets",
+            "--compact-multiplicative",
+            "--join-goto",
+            "--split-compound-keywords",
+            "--strip-empty-args",
+            "--relational-symbols",
+            "--remove-redundant-parens",
+            "--remove-terminal-return",
+            "--program-unit-spacing",
+            "--delimiter-spacing",
+            "--comment-spacing",
+            "--continuation-markers",
+            "--max-blank-lines",
+        ] {
+            assert!(matches!(
+                parse(["forformat".to_string(), option.to_string()].into_iter()),
+                Err(crate::error::FormatError::InvalidOption(message))
+                    if message == "missing option value"
+            ));
+        }
     }
 
     #[test]

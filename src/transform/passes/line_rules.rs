@@ -16,6 +16,7 @@
 
 use crate::{
     analysis::{scoped_declared_names, DeclaredNameIndex},
+    config::{KeywordCase, StyleConfig},
     error::FormatError,
     source::{
         regions::{LexState, RegionKind},
@@ -228,8 +229,11 @@ fn apply_with_options(
         line_index,
         incoming,
         options.continued_format,
+        &cx.config.style,
     );
-    text = normalize_write_output_spacing_with_state(&text, cx, incoming);
+    if cx.config.style.delimiter_spacing {
+        text = normalize_write_output_spacing_with_state(&text, cx, incoming);
+    }
     text = normalize_delimiter_spacing_with_state(&text, cx, incoming);
     let mut text = normalize_comment_spacing_with_state(
         &text,
@@ -275,8 +279,9 @@ pub fn respace_joined(
         line_index,
         LexState::default(),
         false,
+        &cx.config.style,
     );
-    text = normalize_delimiter_spacing(&text, cx);
+    text = normalize_delimiter_spacing_with_state(&text, cx, LexState::default());
     compact_joined_named_arguments(&text)
 }
 
@@ -381,16 +386,34 @@ fn lowercase_line_with_context(
             TokenKind::Number => {
                 if let Some(marker) = real_exponent_marker(token.text) {
                     let at = token.span.start + marker;
-                    edits.replace(at..at + 1, &[line[at].to_ascii_lowercase()]);
+                    let marker = match cx.config.style.keyword_case {
+                        KeywordCase::Lower => line[at].to_ascii_lowercase(),
+                        KeywordCase::Upper => line[at].to_ascii_uppercase(),
+                        KeywordCase::Preserve => line[at],
+                    };
+                    edits.replace(at..at + 1, &[marker]);
                 }
             }
             TokenKind::DotOp => {
-                if let Some(operator) = modern_operator(token.text) {
-                    add_operator_edit(line, &mut edits, token, operator, true, &mut spacing);
-                } else if is_spaced_dotted_operator(token.text) {
-                    let lowered = token.text.to_ascii_lowercase();
-                    add_operator_edit(line, &mut edits, token, &lowered, true, &mut spacing);
-                } else if let Some(lowered) = dotted_word_lowering(token.text) {
+                if cx.config.style.relational_symbols {
+                    if let Some(operator) = modern_operator(token.text) {
+                        add_operator_edit(line, &mut edits, token, operator, true, &mut spacing);
+                    } else if is_spaced_dotted_operator(token.text) {
+                        let operator = dotted_case(token.text, cx.config.style.keyword_case);
+                        add_operator_edit(line, &mut edits, token, &operator, true, &mut spacing);
+                    } else if let Some(lowered) =
+                        dotted_word_case(token.text, cx.config.style.keyword_case)
+                    {
+                        edits.replace(token.span.clone(), &lowered);
+                    }
+                } else if modern_operator(token.text).is_some()
+                    || is_spaced_dotted_operator(token.text)
+                {
+                    let operator = dotted_case(token.text, cx.config.style.keyword_case);
+                    add_operator_edit(line, &mut edits, token, &operator, true, &mut spacing);
+                } else if let Some(lowered) =
+                    dotted_word_case(token.text, cx.config.style.keyword_case)
+                {
                     edits.replace(token.span.clone(), &lowered);
                 }
             }
@@ -413,12 +436,17 @@ fn lowercase_line_with_context(
                         || (continued_infix
                             && is_leading_continuation_arithmetic(&tokens, index, token))
                     {
+                        let declaration_star = is_declaration_type_star(&tokens, index, token.text);
                         add_operator_edit(
                             line,
                             &mut edits,
                             token,
                             token.text,
-                            !vocab::contains(vocab::COMPACT_ARITHMETIC_OPERATORS, token.text),
+                            !declaration_star
+                                && binary_operator_spaced(
+                                    token.text,
+                                    cx.config.style.compact_multiplicative,
+                                ),
                             &mut spacing,
                         );
                     } else {
@@ -438,9 +466,10 @@ fn lowercase_line_with_context(
                     continue;
                 }
 
-                let lower = token.text.to_ascii_lowercase();
+                let cased = apply_case(token.text, cx.config.style.keyword_case);
                 let specifier_argument = is_specifier_keyword_argument(&tokens, index);
-                if is_contextual_declaration_name(line, &tokens, index, continued_entity_list)
+                if (is_contextual_declaration_name(line, &tokens, index, continued_entity_list)
+                    || is_old_style_declaration_entity(&tokens, index))
                     && !specifier_argument
                 {
                     continue;
@@ -453,8 +482,8 @@ fn lowercase_line_with_context(
                     )
                     && keyword_in_context(&tokens, index)
                 {
-                    if token.text != lower {
-                        edits.replace(token.span.clone(), &lower);
+                    if token.text != cased {
+                        edits.replace(token.span.clone(), &cased);
                     }
                     continue;
                 }
@@ -475,8 +504,8 @@ fn lowercase_line_with_context(
                     {
                         continue;
                     }
-                    if token.text != lower {
-                        edits.replace(token.span.clone(), &lower);
+                    if token.text != cased {
+                        edits.replace(token.span.clone(), &cased);
                     }
                     continue;
                 }
@@ -541,6 +570,7 @@ pub fn normalize_keyword_spacing(
         line_index,
         LexState::default(),
         false,
+        &StyleConfig::default(),
     )
 }
 
@@ -550,6 +580,7 @@ fn normalize_keyword_spacing_with_state(
     line_index: usize,
     incoming: LexState,
     continued_format: bool,
+    style: &StyleConfig,
 ) -> Vec<u8> {
     let tokens = tokenize(line, &mut incoming.clone());
     let mut edits = EditBuffer::new(line);
@@ -565,7 +596,7 @@ fn normalize_keyword_spacing_with_state(
     // A continuation line of a FORMAT statement carries no `format` keyword of
     // its own, so the statement-level flag is the only thing standing between
     // an edit descriptor like `i5 /)` and a rewrite into `i5]`.
-    if !is_format_statement(&tokens) && !continued_format {
+    if style.array_brackets && !is_format_statement(&tokens) && !continued_format {
         for pair in tokens.windows(2) {
             if pair[0].kind == TokenKind::LParen
                 && pair[1].kind == TokenKind::Operator
@@ -596,26 +627,30 @@ fn normalize_keyword_spacing_with_state(
 
     // `go to` is a word pair rather than a token pair in the generated
     // vocabulary, because its canonical spelling is shorter.
-    for pair in tokens.windows(2) {
-        if pair[0].is_name(b"go")
-            && pair[1].is_name(b"to")
-            && horizontal_gap(line, pair[0].span.end, pair[1].span.start)
-        {
-            edits.replace(pair[0].span.start..pair[1].span.end, b"goto");
+    if style.join_goto {
+        for pair in tokens.windows(2) {
+            if pair[0].is_name(b"go")
+                && pair[1].is_name(b"to")
+                && horizontal_gap(line, pair[0].span.end, pair[1].span.start)
+            {
+                let mut replacement = apply_case(pair[0].text, style.keyword_case);
+                replacement.extend_from_slice(&apply_case(pair[1].text, style.keyword_case));
+                edits.replace(pair[0].span.start..pair[1].span.end, &replacement);
+            }
         }
     }
 
+    // Unlike joining `go to` or splitting compound keywords, collapsing the
+    // interior whitespace of a multiword keyword is unconditional formatting.
     for pair in tokens.windows(2) {
         if pair[0].kind == TokenKind::Name
             && pair[1].kind == TokenKind::Name
             && horizontal_gap(line, pair[0].span.end, pair[1].span.start)
             && is_multiword_keyword_pair(pair[0].text, pair[1].text)
         {
-            let first = pair[0].text.to_ascii_lowercase();
-            let second = pair[1].text.to_ascii_lowercase();
-            let mut replacement = first;
+            let mut replacement = apply_case(pair[0].text, style.keyword_case);
             replacement.push(b' ');
-            replacement.extend_from_slice(&second);
+            replacement.extend_from_slice(&apply_case(pair[1].text, style.keyword_case));
             edits.replace(pair[0].span.start..pair[1].span.end, &replacement);
         }
     }
@@ -623,19 +658,26 @@ fn normalize_keyword_spacing_with_state(
     // Compound keywords are recognized only at the beginning of the physical
     // statement.  In particular, `endif = 1` is an identifier assignment,
     // not an END IF statement.
-    if let Some(first) = first_statement_token(&tokens) {
-        if let Some(replacement) = vocab::lookup_pair(vocab::COMPOUND_KEYWORDS, first.text) {
-            let next = tokens.get(first_statement_index(&tokens) + 1);
-            let assignment = next.is_some_and(|token| token.text == b"=");
-            if !assignment && !declared_names.suppresses_keyword(line_index, first.text, false) {
-                edits.replace(first.span.clone(), replacement.as_bytes());
-                // The compound replacement itself changes `elseif(` into
-                // `else if(`. The token-local `name(` rule inspected the
-                // original `elseif(` token, so it never saw the new `if`.
-                if first.is_name(b"elseif") {
-                    if let Some(paren) = tokens.get(first_statement_index(&tokens) + 1) {
-                        if paren.kind == TokenKind::LParen {
-                            edits.replace(first.span.end..paren.span.start, b" ");
+    if style.split_compound_keywords {
+        if let Some(first) = first_statement_token(&tokens) {
+            if let Some(replacement) = vocab::lookup_pair(vocab::COMPOUND_KEYWORDS, first.text) {
+                let next = tokens.get(first_statement_index(&tokens) + 1);
+                let assignment = next.is_some_and(|token| token.text == b"=");
+                if !assignment && !declared_names.suppresses_keyword(line_index, first.text, false)
+                {
+                    let mut replacement = compound_spelling(first.text, replacement);
+                    if style.keyword_case != KeywordCase::Preserve {
+                        replacement = apply_case(&replacement, style.keyword_case);
+                    }
+                    edits.replace(first.span.clone(), &replacement);
+                    // The compound replacement itself changes `elseif(` into
+                    // `else if(`. The token-local `name(` rule inspected the
+                    // original `elseif(` token, so it never saw the new `if`.
+                    if first.is_name(b"elseif") {
+                        if let Some(paren) = tokens.get(first_statement_index(&tokens) + 1) {
+                            if paren.kind == TokenKind::LParen {
+                                edits.replace(first.span.end..paren.span.start, b" ");
+                            }
                         }
                     }
                 }
@@ -699,8 +741,9 @@ fn normalize_keyword_spacing_with_state(
                 && tokens.get(index + 1).is_some_and(|next| next.text == b":")
             {
                 let colon = tokens[index + 1].span.start;
-                if token.text != b"only" || horizontal_gap(line, token.span.end, colon) {
-                    edits.replace(token.span.start..colon, b"only");
+                let keyword = apply_case(token.text, style.keyword_case);
+                if token.text != keyword || horizontal_gap(line, token.span.end, colon) {
+                    edits.replace(token.span.start..colon, &keyword);
                 }
             }
             // A keyword that introduces a following name is collapsed to one
@@ -837,20 +880,23 @@ fn normalize_keyword_spacing_with_state(
     // Empty SUBROUTINE argument lists are the one shortening rule here.  It
     // is anchored at the line's declaration header and therefore cannot
     // remove a call's empty argument list.
-    for (index, subroutine) in tokens.iter().enumerate() {
-        if !subroutine.is_name(b"subroutine") || index > 0 && tokens[index - 1].is_name(b"end") {
-            continue;
-        }
-        if let (Some(name), Some(open), Some(close)) = (
-            tokens.get(index + 1),
-            tokens.get(index + 2),
-            tokens.get(index + 3),
-        ) {
-            if name.kind == TokenKind::Name
-                && open.kind == TokenKind::LParen
-                && close.kind == TokenKind::RParen
+    if style.strip_empty_args {
+        for (index, subroutine) in tokens.iter().enumerate() {
+            if !subroutine.is_name(b"subroutine") || index > 0 && tokens[index - 1].is_name(b"end")
             {
-                edits.replace(open.span.start..close.span.end, b"");
+                continue;
+            }
+            if let (Some(name), Some(open), Some(close)) = (
+                tokens.get(index + 1),
+                tokens.get(index + 2),
+                tokens.get(index + 3),
+            ) {
+                if name.kind == TokenKind::Name
+                    && open.kind == TokenKind::LParen
+                    && close.kind == TokenKind::RParen
+                {
+                    edits.replace(open.span.start..close.span.end, b"");
+                }
             }
         }
     }
@@ -978,9 +1024,12 @@ pub fn normalize_delimiter_spacing(line: &[u8], cx: &PassContext) -> Vec<u8> {
 
 fn normalize_delimiter_spacing_with_state(
     line: &[u8],
-    _cx: &PassContext,
+    cx: &PassContext,
     incoming: LexState,
 ) -> Vec<u8> {
+    if !cx.config.style.delimiter_spacing {
+        return line.to_vec();
+    }
     let mut text = line.to_vec();
     let tokens = tokenize(&text, &mut incoming.clone());
     if is_declaration_statement(&tokens) {
@@ -1032,7 +1081,9 @@ fn normalize_comment_spacing_with_state(
     preserve_after: bool,
     code_growth: isize,
 ) -> Vec<u8> {
-    let _ = cx;
+    if !cx.config.style.comment_spacing {
+        return line.to_vec();
+    }
     let mut state = incoming;
     let mut comment_start = None;
     state.scan(line, |region| {
@@ -1745,6 +1796,74 @@ fn is_contextual_declaration_name(
     true
 }
 
+/// The declaration-name guard also covers legacy declarations without `::`.
+/// These are common in fixed-to-free converted sources, and treating an entity
+/// called `NAME` as the I/O specifier `name` would make `keyword-case=upper`
+/// rewrite a declared identifier.
+fn is_old_style_declaration_entity(tokens: &[crate::source::Token<'_>], index: usize) -> bool {
+    if !is_declaration_statement(tokens) || top_level_separator(tokens).is_some() {
+        return false;
+    }
+    let first = first_statement_index(tokens);
+    let Some(type_token) = tokens.get(first) else {
+        return false;
+    };
+    let mut entity_start = first + 1;
+    if type_token.is_name(b"double")
+        && tokens
+            .get(entity_start)
+            .is_some_and(|token| token.is_name(b"precision"))
+    {
+        entity_start += 1;
+    } else if matches!(
+        type_token.text.to_ascii_lowercase().as_slice(),
+        b"type" | b"class"
+    ) && tokens
+        .get(entity_start)
+        .is_some_and(|token| token.kind == TokenKind::LParen)
+    {
+        let Some(close) = matching_close(tokens, entity_start) else {
+            return false;
+        };
+        entity_start = close + 1;
+    } else if tokens
+        .get(entity_start)
+        .is_some_and(|token| token.text == b"*")
+    {
+        entity_start += 1;
+        if tokens
+            .get(entity_start)
+            .is_some_and(|token| token.kind == TokenKind::Number)
+        {
+            entity_start += 1;
+        }
+    } else if tokens
+        .get(entity_start)
+        .is_some_and(|token| token.kind == TokenKind::LParen)
+    {
+        let Some(close) = matching_close(tokens, entity_start) else {
+            return false;
+        };
+        entity_start = close + 1;
+    }
+    if !tokens
+        .get(entity_start)
+        .is_some_and(|token| token.kind == TokenKind::Name)
+    {
+        return false;
+    }
+    let mut item_start = entity_start;
+    for (position, token) in tokens.iter().enumerate().take(index).skip(entity_start) {
+        if token.kind == TokenKind::Comma && token.depth == 0 {
+            item_start = position + 1;
+        }
+        if token.kind == TokenKind::Operator && token.text == b"=" && token.depth == 0 {
+            return false;
+        }
+    }
+    index == item_start
+}
+
 fn is_named_parameter_token(tokens: &[crate::source::Token<'_>], index: usize) -> bool {
     index >= 2
         && tokens[index - 1].kind == TokenKind::Name
@@ -1865,18 +1984,48 @@ fn modern_operator(token: &[u8]) -> Option<&'static [u8]> {
 /// dots, so they are lowered through `INTRINSIC_NAMES` like any intrinsic.  A
 /// user-defined operator such as `.MYOP.` is in no table and keeps its spelling.
 /// Returns `None` when nothing would change, so no edit is recorded.
-fn dotted_word_lowering(token: &[u8]) -> Option<Vec<u8>> {
+fn apply_case(bytes: &[u8], case: KeywordCase) -> Vec<u8> {
+    match case {
+        KeywordCase::Lower => bytes.to_ascii_lowercase(),
+        KeywordCase::Upper => bytes.to_ascii_uppercase(),
+        KeywordCase::Preserve => bytes.to_vec(),
+    }
+}
+
+fn compound_spelling(source: &[u8], canonical: &str) -> Vec<u8> {
+    let first_len = canonical
+        .split_once(' ')
+        .map_or(canonical.len(), |(first, _)| first.len());
+    if source.len() < first_len {
+        return canonical.as_bytes().to_vec();
+    }
+    let mut result = source[..first_len].to_vec();
+    result.push(b' ');
+    result.extend_from_slice(&source[first_len..]);
+    result
+}
+
+fn dotted_case(token: &[u8], case: KeywordCase) -> Vec<u8> {
+    let mut result = token.to_vec();
+    if result.len() > 2 {
+        let interior = apply_case(&result[1..result.len() - 1], case);
+        result.splice(1..result.len() - 1, interior);
+    }
+    result
+}
+
+fn dotted_word_case(token: &[u8], case: KeywordCase) -> Option<Vec<u8>> {
     let word = token.strip_prefix(b".")?.strip_suffix(b".")?;
-    if word.is_empty() || !word.iter().any(u8::is_ascii_uppercase) {
+    if word.is_empty() {
         return None;
     }
-    let lowered = word.to_ascii_lowercase();
-    if !vocab::contains(vocab::INTRINSIC_NAMES, &lowered) {
+    let canonical = word.to_ascii_lowercase();
+    if !vocab::contains(vocab::INTRINSIC_NAMES, &canonical) {
         return None;
     }
     let mut out = Vec::with_capacity(token.len());
     out.push(b'.');
-    out.extend_from_slice(&lowered);
+    out.extend_from_slice(&apply_case(word, case));
     out.push(b'.');
     Some(out)
 }
@@ -1915,6 +2064,34 @@ fn is_spaced_operator_token(
 
 fn is_arithmetic_operator(operator: &[u8]) -> bool {
     matches!(operator, b"+" | b"-" | b"*" | b"/" | b"**" | b"//")
+}
+
+/// The one spacing policy shared by ordinary lines and wrapper-rejoined text.
+/// When enabled, only binary `*`, `/`, and `**` are compact; every other
+/// binary arithmetic operator is spaced. When disabled, all are spaced.
+fn binary_operator_spaced(operator: &[u8], compact_multiplicative: bool) -> bool {
+    !(compact_multiplicative && matches!(operator, b"*" | b"/" | b"**"))
+}
+
+// Only the `*` immediately following the leading type keyword is a
+// length separator (`character*10`, `integer*4 function foo()`); the same
+// keyword can also be an ordinary identifier elsewhere on the line (as in
+// `integer = n*2` after `integer :: integer, n`), so the position check is
+// required, not just the keyword and token-kind checks.
+fn is_declaration_type_star(
+    tokens: &[crate::source::Token<'_>],
+    index: usize,
+    operator: &[u8],
+) -> bool {
+    operator == b"*"
+        && index > 0
+        && index - 1 == first_statement_index(tokens)
+        && tokens[index - 1].kind == TokenKind::Name
+        && matches!(
+            tokens[index - 1].text.to_ascii_lowercase().as_slice(),
+            b"character" | b"integer" | b"real" | b"complex" | b"logical"
+        )
+        && tokens[index].depth == 0
 }
 
 fn is_binary_arithmetic_operator(line: &[u8], index: usize, operator: &[u8]) -> bool {

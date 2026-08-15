@@ -170,6 +170,48 @@ gap for the alignment pass to decide instead of collapsing it first — so a han
 width stays aligned even when `--ws-remred` is on. Turning the corresponding alignment option off
 hands that gap back to `--ws-remred` everywhere it occurs.
 
+Full-mode style controls are also available from the command line, Rust API, and project TOML:
+
+| Option / TOML key | Effect when enabled | Values | Default |
+| --- | --- | --- | --- |
+| `keyword-case` | case of recognized keywords and intrinsics | `lower`, `upper`, `preserve` | `lower` |
+| `relational-symbols` | `.eq.` and friends become `==` | `0`, `1` | `1` |
+| `array-brackets` | `(/ ... /)` becomes `[ ... ]` | `0`, `1` | `1` |
+| `compact-multiplicative` | no spaces around binary `*`, `/`, `**` | `0`, `1` | `1` |
+| `join-goto` | `go to` becomes `goto` | `0`, `1` | `1` |
+| `split-compound-keywords` | `endif` becomes `end if` | `0`, `1` | `1` |
+| `strip-empty-args` | drop `()` from `subroutine` definitions | `0`, `1` | `1` |
+| `remove-redundant-parens` | drop safely redundant nested parentheses | `0`, `1` | `1` |
+| `remove-terminal-return` | drop a bare `return` before `end` | `0`, `1` | `1` |
+| `program-unit-spacing` | blank-line separators around program units | `0`, `1` | `1` |
+| `max-blank-lines` | cap on consecutive blank lines | non-negative integer, `preserve` | `2` |
+| `delimiter-spacing` | comma and bracket spacing | `0`, `1` | `1` |
+| `comment-spacing` | gap before a trailing `!` | `0`, `1` | `1` |
+| `continuation-markers` | continuation `&` and OpenMP sentinels | `0`, `1` | `1` |
+
+`--max-blank-lines=0` removes program-unit separators even when
+`--program-unit-spacing=1`, because the blank-line cap runs after separator insertion.
+
+For example:
+
+```toml
+# .forformat.toml
+keyword_case = "upper"
+compact_multiplicative = false
+array_brackets = true
+strip_empty_args = false
+remove_redundant_parens = true
+remove_terminal_return = true
+program_unit_spacing = true
+max_blank_lines = 1
+delimiter_spacing = true
+comment_spacing = true
+continuation_markers = true
+```
+
+These controls affect full and normalize-only normalization; `--indent-only` remains the
+findent-compatible layout contract and ignores style settings.
+
 ### Project context
 
 When explicit paths are supplied, the formatter scans the current Git checkout for free-form

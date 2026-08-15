@@ -4,7 +4,7 @@ use forformat::{
         regions::{map_code, regions, LexState},
         LogicalGroup, RegionKind, SourceBuffer,
     },
-    FormatConfig, FormatMode,
+    FormatConfig, FormatMode, KeywordCase, StyleConfig,
 };
 use std::{fs, path::PathBuf};
 
@@ -12,6 +12,336 @@ fn indent_only_config() -> FormatConfig {
     FormatConfig {
         mode: FormatMode::IndentOnly,
         ..FormatConfig::default()
+    }
+}
+
+fn style_config(style: StyleConfig) -> FormatConfig {
+    FormatConfig {
+        mode: FormatMode::Full,
+        apply_indent: false,
+        wrap: forformat::WrapConfig {
+            enabled: false,
+            ..FormatConfig::default().wrap
+        },
+        style,
+        ..FormatConfig::default()
+    }
+}
+
+#[test]
+fn explicit_default_style_is_the_default_output() {
+    let source = b"EnDiF\nx=a*b/c**2+d-e//suffix\ncall f(kind=8,mask=.not.ready)\nx=(/a,b/)\n";
+    let ordinary = format_source(source, &FormatConfig::default())
+        .unwrap()
+        .bytes;
+    let explicit = format_source(source, &style_config(StyleConfig::default()))
+        .unwrap()
+        .bytes;
+    assert_eq!(ordinary, explicit);
+}
+
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn style_settings_do_not_enter_indent_only() {
+    let mut style = StyleConfig::default();
+    style.keyword_case = KeywordCase::Upper;
+    style.relational_symbols = false;
+    style.compact_multiplicative = false;
+    style.delimiter_spacing = false;
+    style.comment_spacing = false;
+    style.continuation_markers = false;
+    let config = FormatConfig {
+        mode: FormatMode::IndentOnly,
+        style,
+        ..FormatConfig::default()
+    };
+    let source = b"PROGRAM P\nIF (X) THEN\nx=a*b\nEND IF\nEND PROGRAM P\n";
+    assert_eq!(
+        format_source(source, &config).unwrap().bytes,
+        format_source(
+            source,
+            &FormatConfig {
+                mode: FormatMode::IndentOnly,
+                ..FormatConfig::default()
+            }
+        )
+        .unwrap()
+        .bytes
+    );
+}
+
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn style_switches_have_exact_spelling_and_fixed_points() {
+    let source = b"EnDiF\nGo   To 10\nx = A*B/C**2 + D - E // suffix\ny = A*-B\nz = A**-2\ncall f(kind=8, mask=.NOT. READY)\np => TARGET\nx = A .EQ. B\na = .TRUE.\nr = 1.0e-3 + 2.0d+4\ncharacter*8 name\nwrite(*, *)\n";
+
+    let mut style = StyleConfig::default();
+    style.keyword_case = KeywordCase::Preserve;
+    let preserve_case = format_source(source, &style_config(style)).unwrap().bytes;
+    assert!(preserve_case
+        .windows(b"EnD iF".len())
+        .any(|window| window == b"EnD iF"));
+    assert!(preserve_case
+        .windows(b"GoTo 10".len())
+        .any(|window| window == b"GoTo 10"));
+
+    style.keyword_case = KeywordCase::Upper;
+    style.relational_symbols = false;
+    style.compact_multiplicative = false;
+    let upper = format_source(source, &style_config(style)).unwrap().bytes;
+    let upper = String::from_utf8(upper).unwrap();
+    assert!(upper.contains("END IF"));
+    assert!(upper.contains("A * B / C ** 2 + D - E // suffix"));
+    assert!(upper.contains("A .EQ. B"));
+    assert!(upper.contains("1.0E-3 + 2.0D+4"));
+    assert!(upper.contains("CHARACTER*8 name"));
+    assert!(upper.contains("WRITE(*, *)"));
+
+    let mut preserve = StyleConfig::default();
+    preserve.array_brackets = false;
+    preserve.join_goto = false;
+    preserve.split_compound_keywords = false;
+    preserve.strip_empty_args = false;
+    preserve.remove_redundant_parens = false;
+    preserve.remove_terminal_return = false;
+    preserve.program_unit_spacing = false;
+    preserve.max_blank_lines = None;
+    preserve.delimiter_spacing = false;
+    preserve.comment_spacing = false;
+    preserve.continuation_markers = false;
+    let source = b"program p\nsubroutine s()\nx=((a))\nreturn\nend subroutine s\nend program p\n";
+    let once = format_source(source, &style_config(preserve))
+        .unwrap()
+        .bytes;
+    let twice = format_source(&once, &style_config(preserve)).unwrap().bytes;
+    assert_eq!(once, twice);
+    let text = String::from_utf8(once).unwrap();
+    assert!(text.contains("subroutine s()"));
+    assert!(text.contains("x = ((a))"));
+    assert!(text.contains("return"));
+}
+
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn compact_multiplicative_ignores_a_type_keyword_used_as_an_identifier() {
+    // `integer` is both the leading type keyword of the declaration and,
+    // legally, one of the declared names. The star in `integer*4` is a
+    // length separator, but the star in `n*2` is ordinary multiplication
+    // even though the assignment's target spells a type keyword.
+    let mut style = StyleConfig::default();
+    style.compact_multiplicative = false;
+    let source = b"integer :: integer, n\ninteger = n*2\n";
+    let formatted = format_source(source, &style_config(style)).unwrap().bytes;
+    let text = String::from_utf8(formatted).unwrap();
+    assert!(text.contains("integer = n * 2"));
+
+    let declaration_star = b"character*8 name\n";
+    let formatted = format_source(declaration_star, &style_config(style))
+        .unwrap()
+        .bytes;
+    assert_eq!(formatted, declaration_star);
+}
+
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn compound_and_goto_switches_are_independent_and_multiword_spacing_is_unconditional() {
+    let source = b"EnDiF\nGo   To 10\nselect     case (x)\n";
+
+    let mut join_off = StyleConfig::default();
+    join_off.join_goto = false;
+    let join_off = String::from_utf8(
+        format_source(source, &style_config(join_off))
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    assert!(join_off.contains("end if"));
+    assert!(!join_off.contains("goto"));
+    assert!(join_off.contains("select case"));
+
+    let mut split_off = StyleConfig::default();
+    split_off.split_compound_keywords = false;
+    let split_off = String::from_utf8(
+        format_source(source, &style_config(split_off))
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    assert!(split_off.contains("endif"));
+    assert!(split_off.contains("goto 10"));
+    assert!(split_off.contains("select case"));
+
+    let mut both_off = StyleConfig::default();
+    both_off.join_goto = false;
+    both_off.split_compound_keywords = false;
+    let both_off = String::from_utf8(
+        format_source(source, &style_config(both_off))
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    assert!(both_off.contains("endif"));
+    assert!(both_off.contains("select case"));
+}
+
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn delimiter_spacing_can_be_disabled_independently() {
+    let mut style = StyleConfig::default();
+    style.array_brackets = true;
+    style.compact_multiplicative = false;
+    style.delimiter_spacing = false;
+    let output = format_source(b"x=(/a,b/)\nvalue=a*b\n", &style_config(style))
+        .unwrap()
+        .bytes;
+    assert_eq!(output, b"x = [a,b]\nvalue = a * b\n");
+}
+
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn lexical_switches_are_independent() {
+    let source = b"program p\nx=(/a,b/) !comment\nif (a .and. &\n   & b) then\n!$omp parallel\n!$omp end parallel\nend if\nend program p\n";
+
+    let mut comment_off = StyleConfig::default();
+    comment_off.comment_spacing = false;
+    let comment_off = String::from_utf8(
+        format_source(source, &style_config(comment_off))
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    assert!(comment_off.contains("x = [a, b] !comment"));
+    assert!(
+        comment_off.contains("if (a .and. &\n   b) then"),
+        "comment-off output:\n{comment_off}"
+    );
+    assert!(comment_off.contains("!$OMP PARALLEL"));
+
+    let mut delimiter_off = StyleConfig::default();
+    delimiter_off.delimiter_spacing = false;
+    let delimiter_off = String::from_utf8(
+        format_source(source, &style_config(delimiter_off))
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    assert!(delimiter_off.contains("x = [a,b] ! comment"));
+    assert!(delimiter_off.contains("if (a .and. &\n   b) then"));
+    assert!(delimiter_off.contains("!$OMP PARALLEL"));
+
+    let mut continuation_off = StyleConfig::default();
+    continuation_off.continuation_markers = false;
+    let continuation_off = String::from_utf8(
+        format_source(source, &style_config(continuation_off))
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    assert!(continuation_off.contains("x = [a, b] ! comment"));
+    assert!(continuation_off.contains("if (a .and. &\n   & b) then"));
+    assert!(continuation_off.contains("!$omp parallel"));
+}
+
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn blank_line_cap_and_program_unit_preserve_are_independent() {
+    let source = b"program p\nx=1\n\n\n\nend program p\n\n\n\n";
+    let mut style = StyleConfig::default();
+    style.program_unit_spacing = false;
+    style.max_blank_lines = Some(1);
+    let one = format_source(source, &style_config(style)).unwrap().bytes;
+    assert_eq!(one, b"program p\nx = 1\n\nend program p\n");
+
+    style.max_blank_lines = Some(0);
+    let zero = format_source(source, &style_config(style)).unwrap().bytes;
+    assert_eq!(zero, b"program p\nx = 1\nend program p\n");
+
+    style.max_blank_lines = None;
+    let unlimited = format_source(source, &style_config(style)).unwrap().bytes;
+    assert_eq!(unlimited, b"program p\nx = 1\n\n\n\nend program p\n");
+}
+
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn style_profiles_are_fixed_points_across_checked_in_fixtures() {
+    let mut preserve = StyleConfig::default();
+    preserve.keyword_case = KeywordCase::Preserve;
+    preserve.relational_symbols = false;
+    preserve.array_brackets = false;
+    preserve.join_goto = false;
+    preserve.split_compound_keywords = false;
+    preserve.strip_empty_args = false;
+    preserve.remove_redundant_parens = false;
+    preserve.remove_terminal_return = false;
+    preserve.program_unit_spacing = false;
+    preserve.max_blank_lines = None;
+    preserve.delimiter_spacing = false;
+    preserve.comment_spacing = false;
+    preserve.continuation_markers = false;
+
+    let mut upper = StyleConfig::default();
+    upper.keyword_case = KeywordCase::Upper;
+    upper.compact_multiplicative = false;
+
+    let mut preserved_operators = StyleConfig::default();
+    preserved_operators.keyword_case = KeywordCase::Preserve;
+    preserved_operators.relational_symbols = false;
+
+    let mut lexical = StyleConfig::default();
+    lexical.array_brackets = true;
+    lexical.compact_multiplicative = false;
+    lexical.delimiter_spacing = false;
+    lexical.comment_spacing = false;
+    lexical.continuation_markers = false;
+
+    let mut unit_preserve = StyleConfig::default();
+    unit_preserve.program_unit_spacing = false;
+    unit_preserve.max_blank_lines = Some(0);
+
+    let mut unlimited = StyleConfig::default();
+    unlimited.max_blank_lines = None;
+
+    let profiles = [
+        StyleConfig::default(),
+        preserve,
+        upper,
+        preserved_operators,
+        lexical,
+        unit_preserve,
+        unlimited,
+    ];
+    let mut fixtures: Vec<_> = fs::read_dir("tests/fixtures")
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "f90"))
+        .collect();
+    fixtures.sort();
+    for style in profiles {
+        let config = FormatConfig {
+            style,
+            ..FormatConfig::default()
+        };
+        let indent = FormatConfig {
+            mode: FormatMode::IndentOnly,
+            style,
+            ..FormatConfig::default()
+        };
+        for fixture in &fixtures {
+            let source = fs::read(fixture).unwrap();
+            let once = format_source(&source, &config)
+                .unwrap_or_else(|error| panic!("{}: {error}", fixture.display()))
+                .bytes;
+            let twice = format_source(&once, &config)
+                .unwrap_or_else(|error| panic!("{} second pass: {error}", fixture.display()))
+                .bytes;
+            assert_eq!(once, twice, "I1 failed for {}", fixture.display());
+            assert_eq!(
+                format_source(&once, &indent).unwrap().bytes,
+                once,
+                "I2 failed for {}",
+                fixture.display()
+            );
+        }
     }
 }
 

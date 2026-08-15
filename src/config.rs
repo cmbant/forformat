@@ -53,6 +53,54 @@ pub struct MacroDefine {
     pub value: Option<String>,
 }
 
+/// Case policy for recognized Fortran keywords and intrinsic spellings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeywordCase {
+    Lower,
+    Upper,
+    Preserve,
+}
+
+/// Opinionated full-mode normalization choices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StyleConfig {
+    pub keyword_case: KeywordCase,
+    pub relational_symbols: bool,
+    pub array_brackets: bool,
+    pub compact_multiplicative: bool,
+    pub join_goto: bool,
+    pub split_compound_keywords: bool,
+    pub strip_empty_args: bool,
+    pub remove_redundant_parens: bool,
+    pub remove_terminal_return: bool,
+    pub program_unit_spacing: bool,
+    pub max_blank_lines: Option<usize>,
+    pub delimiter_spacing: bool,
+    pub comment_spacing: bool,
+    pub continuation_markers: bool,
+}
+
+impl Default for StyleConfig {
+    fn default() -> Self {
+        Self {
+            keyword_case: KeywordCase::Lower,
+            relational_symbols: true,
+            array_brackets: true,
+            compact_multiplicative: true,
+            join_goto: true,
+            split_compound_keywords: true,
+            strip_empty_args: true,
+            remove_redundant_parens: true,
+            remove_terminal_return: true,
+            program_unit_spacing: true,
+            max_blank_lines: Some(2),
+            delimiter_spacing: true,
+            comment_spacing: true,
+            continuation_markers: true,
+        }
+    }
+}
+
 /// Load formatter settings from the nearest project configuration.
 ///
 /// The standalone format is a top-level TOML table in `.forformat.toml`.
@@ -256,7 +304,7 @@ fn config_key_priority(key: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{config_args, config_key_priority, FormatConfig};
+    use super::{config_args, config_key_priority, FormatConfig, KeywordCase};
     use crate::cli::{parse, Command};
     use std::fs;
 
@@ -315,6 +363,58 @@ mod tests {
         assert!(config_key_priority("indent") < config_key_priority("indent-select"));
         assert_eq!(config.construct_indents.select, 2);
     }
+
+    #[test]
+    fn style_keys_load_from_the_standalone_toml_shape() {
+        let config = config_from_text(
+            "style-options",
+            "keyword_case = 'upper'\nrelational_symbols = false\ncompact_multiplicative = false\narray-brackets = false\njoin-goto = false\nsplit-compound-keywords = false\nstrip_empty_args = false\nremove-redundant-parens = false\nremove_terminal_return = false\nprogram-unit-spacing = false\nmax_blank_lines = 'preserve'\ndelimiter-spacing = false\ncomment_spacing = false\ncontinuation-markers = false\n",
+        );
+        assert_eq!(config.style.keyword_case, KeywordCase::Upper);
+        assert!(!config.style.relational_symbols);
+        assert!(!config.style.compact_multiplicative);
+        assert!(!config.style.array_brackets);
+        assert!(!config.style.join_goto);
+        assert!(!config.style.split_compound_keywords);
+        assert!(!config.style.strip_empty_args);
+        assert!(!config.style.remove_redundant_parens);
+        assert!(!config.style.remove_terminal_return);
+        assert!(!config.style.program_unit_spacing);
+        assert_eq!(config.style.max_blank_lines, None);
+        assert!(!config.style.delimiter_spacing);
+        assert!(!config.style.comment_spacing);
+        assert!(!config.style.continuation_markers);
+    }
+
+    #[test]
+    fn style_keys_load_from_pyproject_and_cli_scalars_override_them() {
+        let directory =
+            std::env::temp_dir().join(format!("forformat-pyproject-dir-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let pyproject = directory.join("pyproject.toml");
+        fs::write(
+            &pyproject,
+            "[tool.forformat]\nkeyword-case = 'upper'\ncompact_multiplicative = false\nstrip_empty_args = false\nmax-blank-lines = 1\n",
+        )
+        .unwrap();
+        let from_pyproject = config_args(&pyproject, Some(&pyproject)).unwrap();
+        let _ = fs::remove_file(&pyproject);
+        let _ = fs::remove_dir(&directory);
+        let mut argv = vec!["forformat".to_string(), "--no-config".to_string()];
+        argv.extend(from_pyproject);
+        argv.extend([
+            "--keyword-case=preserve".to_string(),
+            "--strip-empty-args=1".to_string(),
+            "--max-blank-lines=0".to_string(),
+        ]);
+        let crate::cli::Command::Run(invocation) = parse(argv).unwrap() else {
+            panic!("expected run")
+        };
+        assert_eq!(invocation.config.style.keyword_case, KeywordCase::Preserve);
+        assert!(!invocation.config.style.compact_multiplicative);
+        assert!(invocation.config.style.strip_empty_args);
+        assert_eq!(invocation.config.style.max_blank_lines, Some(0));
+    }
 }
 
 fn config_value(
@@ -363,6 +463,8 @@ pub struct FormatConfig {
     pub wrap: WrapConfig,
     /// Command-line macro definitions, in the order given.
     pub defines: Vec<MacroDefine>,
+    /// Full-mode lexical and structural style choices.
+    pub style: StyleConfig,
     /// Uppercase a lone `l` used as a name, a Python-side option retained for
     /// compatibility with established command-line profiles.
     pub uppercase_single_l: bool,
@@ -431,6 +533,7 @@ impl Default for FormatConfig {
             mode: FormatMode::Full,
             wrap: WrapConfig::default(),
             defines: Vec::new(),
+            style: StyleConfig::default(),
             uppercase_single_l: false,
             indent: 3,
             apply_indent: true,

@@ -47,6 +47,7 @@ use crate::{
     classify::{classify, StatementKind},
     config::FormatConfig,
     error::FormatError,
+    format::preprocessor::{event as cpp_event, PreprocessorEvent},
     source::{regions::comment_start, scanner},
     transform::{
         document::Document,
@@ -310,8 +311,9 @@ impl Pending {
 
     /// How many blank lines to emit, once the separator is consumed.
     ///
-    /// `MAX_SEPARATOR` matches the cap step 19 applies to every other blank
-    /// run, so the two passes cannot disagree and the result is a fixed point.
+    /// This pass emits at most `MAX_SEPARATOR` blank lines. The configured
+    /// step-19 cap may cut that run further immediately afterwards; applying
+    /// the same cap on every run resolves that disagreement and converges.
     fn width(self) -> usize {
         const MAX_SEPARATOR: usize = 2;
         match self {
@@ -340,7 +342,14 @@ pub fn program_unit_spacing(
     for line in &document.lines {
         let cpp_line = cpp_continuation || is_preprocessor_line(line);
         if cpp_line {
-            if pending.is_owed() && !cpp_continuation {
+            // An `end` inside a conditional unit is still followed by the
+            // conditional's `#endif`, not by the next Fortran statement. Keep
+            // its separator pending until that directive has been passed, so
+            // the blank line lands before the following `end module` rather
+            // than between `end subroutine` and `#endif`.
+            let closing_cpp_block =
+                !cpp_continuation && cpp_event(line) == PreprocessorEvent::EndIf;
+            if pending.is_owed() && !cpp_continuation && !closing_cpp_block {
                 if normalized
                     .last()
                     .is_some_and(|previous: &Vec<u8>| !previous.iter().all(u8::is_ascii_whitespace))
@@ -436,7 +445,9 @@ pub fn limit_blank_lines(
     document: &mut Document,
     config: &FormatConfig,
 ) -> Result<(), FormatError> {
-    let _ = config;
+    let Some(max_blank_lines) = config.style.max_blank_lines else {
+        return Ok(());
+    };
     let mut limited = Vec::with_capacity(document.lines.len());
     let mut blank_count = 0;
     let mut cpp_continuation = false;
@@ -452,7 +463,7 @@ pub fn limit_blank_lines(
         if line.iter().any(|byte| !byte.is_ascii_whitespace()) {
             blank_count = 0;
             limited.push(line.clone());
-        } else if blank_count < 2 {
+        } else if blank_count < max_blank_lines {
             blank_count += 1;
             limited.push(line.clone());
         }
@@ -1220,6 +1231,25 @@ mod tests {
         let once = apply_all(source);
         assert_eq!(apply_all(&once), once);
         assert!(once.windows(2).filter(|pair| *pair == b"\n\n").count() >= 2);
+    }
+
+    #[test]
+    fn unit_separator_after_conditional_procedure_end_belongs_before_host_end() {
+        for (if_directive, endif_directive) in
+            [("#if", "#endif"), ("??if", "??endif"), ("#:if", "#:endif")]
+        {
+            let source = format!(
+                "module m\ncontains\n{if_directive} X\nsubroutine s\nend subroutine s\n{endif_directive}\nend module m\n"
+            )
+            .into_bytes();
+            let expected = format!(
+                "module m\n\ncontains\n\n{if_directive} X\nsubroutine s\n\nend subroutine s\n{endif_directive}\n\nend module m\n"
+            )
+            .into_bytes();
+            let once = apply_all(&source);
+            assert_eq!(once, expected, "directive: {endif_directive}");
+            assert_eq!(apply_all(&once), once);
+        }
     }
 
     #[test]

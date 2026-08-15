@@ -108,13 +108,15 @@ pub fn normalize(
     )?);
 
     // Step 7: drop redundant nested parentheses where it is safe.
-    changed = changed.or(with_context(
-        document,
-        project,
-        local,
-        config,
-        passes::structure::remove_redundant_nested_parentheses,
-    )?);
+    if config.style.remove_redundant_parens {
+        changed = changed.or(with_context(
+            document,
+            project,
+            local,
+            config,
+            passes::structure::remove_redundant_nested_parentheses,
+        )?);
+    }
 
     // Step 11: the per-line rule chain, in this exact order.
     changed = changed.or(with_context(
@@ -126,22 +128,26 @@ pub fn normalize(
     )?);
 
     // Steps 12-13: continuation markers and OpenMP sentinels.
-    changed = changed.or(with_context(
-        document,
-        project,
-        local,
-        config,
-        passes::continuations::run,
-    )?);
+    if config.style.continuation_markers {
+        changed = changed.or(with_context(
+            document,
+            project,
+            local,
+            config,
+            passes::continuations::run,
+        )?);
+    }
 
     // Steps 14-15: terminal `RETURN` removal, which changes the line count.
-    let _ = changed.or(with_context(
-        document,
-        project,
-        local,
-        config,
-        passes::structure::remove_terminal_procedure_returns,
-    )?);
+    if config.style.remove_terminal_return {
+        let _ = changed.or(with_context(
+            document,
+            project,
+            local,
+            config,
+            passes::structure::remove_terminal_procedure_returns,
+        )?);
+    }
     Ok(())
 }
 
@@ -158,8 +164,12 @@ pub fn post_layout(document: &mut Document, config: &FormatConfig) -> Result<boo
     // After step 17, because a comment's column is measured from the code it
     // follows and step 17 is what settles where that code ends.
     passes::layout_post::trailing_comment_alignment(document, config)?;
-    passes::layout_post::program_unit_spacing(document, config)?;
-    passes::layout_post::limit_blank_lines(document, config)?;
+    if config.style.program_unit_spacing {
+        passes::layout_post::program_unit_spacing(document, config)?;
+    }
+    if config.style.max_blank_lines.is_some() {
+        passes::layout_post::limit_blank_lines(document, config)?;
+    }
     passes::layout_post::output_whitespace(document, config)?;
     Ok(widths_changed)
 }

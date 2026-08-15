@@ -8,6 +8,10 @@
 //!                   ─► bytes
 //! ```
 //!
+//! Full-mode style choices are consumed by normalization and post-layout
+//! boundaries only.  The indent-only early return remains the compatibility
+//! path and never enters these configurable style passes.
+//!
 //! The order of the last three is the whole design.  Normalization never
 //! chooses a column; the layout engine chooses every column; wrapping runs
 //! before it and only decides *where text breaks*.  Because the final bytes are
