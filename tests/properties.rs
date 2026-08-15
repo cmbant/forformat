@@ -355,6 +355,51 @@ end module m
 }
 
 #[test]
+fn wrapping_measures_every_declaration_separator_a_body_carries() {
+    // Reduced from a CosmoMC-style likelihood module at `--line-length=80`.
+    // The entity has a typed array-constructor initializer, so the body
+    // carries a second `::` — the array constructor's own `type ::` — beside
+    // the declaration's. `declaration_separator_growth` used to stop at the
+    // first `::` it found and return, so it paid step 17's padding for the
+    // declaration's `::` but not for the constructor's: once wrapping put
+    // `[character(7)::...]` on its own physical line, step 17 treated that
+    // `::` as a separator in its own right and padded it too, pushing the
+    // line one column over 80. The next run then saw that over-long line and
+    // rewrapped it differently, breaking I1.
+    let source = "\
+module m
+contains
+   subroutine s
+      character(LEN=7), parameter :: spectrum_names(6) = &
+          [character(7)::'100x100','143x143','217x217','143x217','TE','EE']
+   end subroutine s
+end module m
+";
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        wrap: forformat::WrapConfig {
+            line_length: 80,
+            ..FormatConfig::default().wrap
+        },
+        ..FormatConfig::default()
+    };
+    let once = format_source(source.as_bytes(), &config).unwrap().bytes;
+    let twice = format_source(&once, &config).unwrap().bytes;
+    assert_eq!(
+        String::from_utf8_lossy(&once),
+        String::from_utf8_lossy(&twice),
+        "wrapping and step 17 disagreed about the emitted width"
+    );
+    for line in once.split(|byte| *byte == b'\n') {
+        assert!(
+            line.len() <= 80,
+            "line over budget: {}",
+            String::from_utf8_lossy(line)
+        );
+    }
+}
+
+#[test]
 fn end_keyword_spacing_stops_at_the_statement_it_owns() {
     // Both spellings reduced from SPECFEM3D. A compound rewrite (`endif` ->
     // `end if`) hands the next pass two tokens where there was one, so the

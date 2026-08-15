@@ -519,7 +519,14 @@ fn with_laid_out_separator(body: Vec<u8>, laid_out: Option<&Vec<u8>>) -> Vec<u8>
     result
 }
 
-/// How many bytes step 17 will insert around this statement's `::`.
+/// How many bytes step 17 will insert around this statement's `::` — and,
+/// when the body carries a second one (a `[type ::` array-constructor
+/// spelling in the same declaration), around that one too.  Once wrapping
+/// puts the constructor's `::` on its own physical line,
+/// `declaration_separator_alignment` treats it exactly like a declaration
+/// separator and pads it independently — so a budget that only paid for the
+/// first `::` left the second one unaccounted for, and a break chosen
+/// against the unpadded text landed over budget once step 17 ran.
 ///
 /// `declaration_separator_alignment` never pads one declaration out to a wider
 /// neighbour's column — except when there is no whitespace at all, where it
@@ -529,6 +536,7 @@ fn with_laid_out_separator(body: Vec<u8>, laid_out: Option<&Vec<u8>>) -> Vec<u8>
 fn declaration_separator_growth(body: &[u8]) -> usize {
     let mut quote = 0u8;
     let mut index = 0;
+    let mut growth = 0;
     while index < body.len() {
         let byte = body[index];
         if quote != 0 {
@@ -544,16 +552,17 @@ fn declaration_separator_growth(body: &[u8]) -> usize {
             quote = byte;
             index += 1;
         } else if byte == b'!' {
-            return 0;
+            break;
         } else if body.get(index..index + 2) == Some(b"::") {
             let before = usize::from(index == 0 || !matches!(body[index - 1], b' ' | b'\t'));
             let after = usize::from(!matches!(body.get(index + 2), Some(b' ' | b'\t')));
-            return before + after;
+            growth += before + after;
+            index += 2;
         } else {
             index += 1;
         }
     }
-    0
+    growth
 }
 
 fn reindent(line: &[u8], indent: usize) -> Vec<u8> {
