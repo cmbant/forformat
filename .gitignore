@@ -8,12 +8,6 @@
 /coverage/
 /fuzz/target/
 
-*.f90*
-# Checked-in Fortran snippets under tests are compatibility data, not build
-# products. Keep the broad rule above for local source/output files while
-# allowing the manifest fixtures to ship with the package.
-!/tests/fixtures/*.f90
-
 # Local environment files
 .env
 .env.*
@@ -30,8 +24,7 @@
 .DS_Store
 Thumbs.db
 
-fortran/
-# Python bytecode from the frozen reference tooling
+# Python bytecode
 __pycache__/
 *.pyc
 

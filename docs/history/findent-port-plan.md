@@ -3,7 +3,7 @@
 Status: **completed and superseded — historical record.** This is the plan the indent-only port was
 executed against; it is kept for the rationale behind decisions the code still encodes, and for the
 `§` references that source comments make to it. It is not a work queue. Current design lives in
-[`../design.md`](../design.md); the compatibility boundary lives in
+[`full-mode-port-design.md`](full-mode-port-design.md); the compatibility boundary lives in
 [`../compatibility.md`](../compatibility.md).
 
 Baseline: findent 4.3.7 in `/opt/findent`, BSD-3-Clause, © 2015–2025 Willem Vermin

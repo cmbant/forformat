@@ -5,8 +5,7 @@ use std::{fmt, fs, path::Path};
 /// `IndentOnly` is the findent 4.3.7 contract and stays byte-exact forever
 /// (I6).  `Full` adds normalization and wrapping.  `NormalizeOnly` runs the
 /// text passes without the structural layout, which is how a single
-/// normalization rule is compared against the frozen Python reference while the
-/// port is incomplete.
+/// normalization rule can be tested independently of structural layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FormatMode {
     #[default]
@@ -28,7 +27,7 @@ impl FormatMode {
 /// Line-length policy for the reflow engine.
 ///
 /// `line_length` is a budget, not a guarantee: a statement with no safe break
-/// point is emitted long and reported by the corpus check rather than split
+/// point is emitted long and reported by a decline diagnostic rather than split
 /// unsafely (I5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WrapConfig {
@@ -251,7 +250,7 @@ pub struct FormatConfig {
     /// Command-line macro definitions, in the order given.
     pub defines: Vec<MacroDefine>,
     /// Uppercase a lone `l` used as a name, a Python-side option retained for
-    /// compatibility with the reference formatter.
+    /// compatibility with established command-line profiles.
     pub uppercase_single_l: bool,
     pub indent: usize,
     pub apply_indent: bool,

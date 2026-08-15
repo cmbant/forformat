@@ -1,8 +1,12 @@
 use forformat::{
     format_source, format_to, format_to_owned,
-    source::{regions::regions, LogicalGroup, RegionKind, SourceBuffer},
+    source::{
+        regions::{map_code, regions, LexState},
+        LogicalGroup, RegionKind, SourceBuffer,
+    },
     FormatConfig, FormatMode,
 };
+use std::{fs, path::PathBuf};
 
 fn indent_only_config() -> FormatConfig {
     FormatConfig {
@@ -12,8 +16,8 @@ fn indent_only_config() -> FormatConfig {
 }
 
 #[test]
-fn default_formatting_is_idempotent_on_malformed_and_lexical_corpus() {
-    let corpus: &[&[u8]] = &[
+fn default_formatting_is_idempotent_on_malformed_and_lexical_inputs() {
+    let inputs: &[&[u8]] = &[
         b"",
         b"program p\nif (x) then\nx = 1\nend if\nend program\n",
         b"program p  \n! caf\xe9\nx = \"!;&\"; 4H;! comment\nend program",
@@ -21,7 +25,7 @@ fn default_formatting_is_idempotent_on_malformed_and_lexical_corpus() {
         b"program p\nif (x) then\n",
         &[0, 1, 2, b'\n', 0xff, b'!', b'\n', b')', b'('],
     ];
-    for source in corpus {
+    for source in inputs {
         let config = FormatConfig {
             mode: FormatMode::IndentOnly,
             ..FormatConfig::default()
@@ -549,6 +553,107 @@ fn keyword_case_mutations_preserve_fixture_indent_depth() {
             .expect("case-mutated fixture formats")
             .bytes;
         assert_eq!(indent_columns(&original), indent_columns(&mutated));
+    }
+}
+
+#[test]
+fn case_and_spacing_mutations_of_every_fixture_are_fixed_points() {
+    let mut fixtures: Vec<PathBuf> =
+        fs::read_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "f90"))
+            .collect();
+    fixtures.sort();
+
+    for fixture in fixtures {
+        let source = fs::read(&fixture).unwrap();
+        for (name, mutated) in [
+            ("case", mutate_fixture(&source, Mutation::Case)),
+            ("spacing", mutate_fixture(&source, Mutation::Spacing)),
+        ] {
+            let once = format_source(&mutated, &FormatConfig::default())
+                .unwrap_or_else(|error| panic!("{name} mutation of {}: {error}", fixture.display()))
+                .bytes;
+            let twice = format_source(&once, &FormatConfig::default())
+                .unwrap_or_else(|error| {
+                    panic!("second {name} pass of {}: {error}", fixture.display())
+                })
+                .bytes;
+            assert_eq!(
+                once,
+                twice,
+                "I1 failed for {name} mutation of {}",
+                fixture.display()
+            );
+            assert_eq!(
+                format_source(&once, &indent_only_config()).unwrap().bytes,
+                once,
+                "I2 failed for {name} mutation of {}",
+                fixture.display()
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Mutation {
+    Case,
+    Spacing,
+}
+
+fn mutate_fixture(source: &[u8], mutation: Mutation) -> Vec<u8> {
+    let mut state = LexState::default();
+    let mut output = Vec::with_capacity(source.len());
+    for line in source.split_inclusive(|byte| *byte == b'\n') {
+        let first = line
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .map_or(b'\n', |index| line[index]);
+        if first == b'#' {
+            output.extend_from_slice(line);
+            state = LexState::default();
+            continue;
+        }
+        output.extend(map_code(line, &mut state, |code, output| match mutation {
+            Mutation::Case => uppercase_code_identifiers(code, output),
+            Mutation::Spacing => remove_code_spacing(code, output),
+        }));
+    }
+    output
+}
+
+fn uppercase_code_identifiers(code: &[u8], output: &mut Vec<u8>) {
+    let mut index = 0;
+    while index < code.len() {
+        if code[index].is_ascii_alphabetic() || code[index] == b'_' {
+            let start = index;
+            index += 1;
+            while index < code.len() && (code[index].is_ascii_alphanumeric() || code[index] == b'_')
+            {
+                index += 1;
+            }
+            output.extend(code[start..index].iter().map(u8::to_ascii_uppercase));
+        } else {
+            output.push(code[index]);
+            index += 1;
+        }
+    }
+}
+
+fn remove_code_spacing(code: &[u8], output: &mut Vec<u8>) {
+    let is_spacing_target =
+        |byte: u8| matches!(byte, b'-' | b'+' | b'*' | b'/' | b'=' | b'<' | b'>' | b',');
+    for (index, &byte) in code.iter().enumerate() {
+        if (byte == b' ' || byte == b'\t')
+            && (index > 0 && is_spacing_target(code[index - 1])
+                || code
+                    .get(index + 1)
+                    .is_some_and(|next| is_spacing_target(*next)))
+        {
+            continue;
+        }
+        output.push(byte);
     }
 }
 

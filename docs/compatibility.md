@@ -46,46 +46,42 @@ and wrapping; its reviewed differences from the reference are collected here:
   3.0_DL
   ```
 
-  The reference emits `3.0_dl` on that final continuation line. The eight-line `constants.f90`
-  split in the case sweep is the same reference inconsistency; it is retained as an adjudicated
-  divergence, not normalized away by the comparison harness.
+  The legacy normalizer emits `3.0_dl` on that final continuation line. The eight-line
+  `constants.f90` split is retained as an adjudicated divergence, not normalized away.
 - An exponent kind suffix follows its own governing declaration even when the exponent token was
   perturbed to uppercase. Thus a declaration `dp` governs `1.E100_DP` as `_dp`; the reference's
   two-line `constants.f90` continuation defect is retained as an adjudicated divergence.
-- The reference and Rust agree byte-for-byte on the resolved governing-declaration cases: owner-keyed
+- The findent-oracle and Rust agree byte-for-byte on the resolved governing-declaration cases: owner-keyed
   type-bound bindings and old-style/typed local entities.
-- Top-level program-unit parameters are in the Python reference's file scope, and Rust now applies
-  the same governing-declaration rule. In particular, the bare-program BJL validation file keeps
+- Top-level program-unit parameters use file scope, and Rust applies the governing-declaration rule.
+  In particular, the bare-program BJL validation file keeps
   `BJL_RECURRENCE_MAX_L` against the unrelated module's `BJL_recurrence_MAX_L`; the focused
   comparison is byte-identical.
 - Conditional `!$` sentinels retain the authored sentinel boundary spacing while their Fortran-like
   body is normalized, including declaration-driven identifier casing.
-- `--ws_remred` on a valid literal leaves the literal bytes intact. The reference's heuristic can
+- `--ws_remred` on a valid literal leaves the literal bytes intact. A legacy heuristic can
   treat the quote after `error stop` as code and reduce spaces inside that literal.
 
 These are full-format policy choices, not indentation compatibility claims. The array-constructor,
 comment, sentinel, kind-suffix, governing-declaration, valid-literal, and type-bound-procedure cases
-are pinned by the corpus diagnostics or focused fixtures described below.
+are pinned by checked-in fixtures and focused tests described below.
 
-### Project fixed point
+### Fixture fixed point
 
-The external CAMB checkout is a temporary developer verification target. Project mode uses the
-files currently present under its `fortran` and `forutils` directories, with no revision pin or
-case-correction allowance. One unperturbed run must leave those files byte-identical and match the
-frozen reference. A difference that is not settled by the governing declaration remains authored
-and is not excused by a matching declaration in another scope. The fixed-point gate snapshots raw
-bytes; in particular, CRLF-to-LF changes are failures rather than text-mode equivalents.
+Project-mode behavior is exercised by checked-in multi-file fixtures. A run must leave fixture bytes
+stable, and a difference that is not settled by the governing declaration remains authored rather
+than borrowing a spelling from another scope. The fixed-point checks compare raw bytes; in
+particular, CRLF-to-LF changes are failures rather than text-mode equivalents.
 
 ## Regression checks
 
 The in-tree suite covers byte handling, newline preservation, compact `END` forms, semicolon
 statements, keyword identifiers, `findentfix`, CPP branch restoration, labeled `DO`, idempotence,
-and preservation. When the 4.3.7 reference installation is available, run
+and preservation. When findent 4.3.7 is available, run
 `tools/differential_free.sh target/release/forformat`; it compares the retained non-fixed legacy
 fixtures `progfree.f`, `progfree1.f`, and `progfree-dos.f` with the oracle and reports the
 intentional preservation-boundary differences. Large real-world inputs are verified against the
-external CAMB corpus rather than from checked-in copies; see
-`design.md` for that workflow. The
+checked-in fixtures rather than an external tree. The
 complete legacy shell suite is not a normal Rust test dependency because it includes fixed-form,
 relabeling, editor-wrapper, and other explicitly excluded features.
 
@@ -107,24 +103,22 @@ The remaining shell-suite differences are classified rather than hidden:
   trailing-horizontal-whitespace normalization; and
 - test 24's malformed continued-string case is the documented conservative whitespace divergence.
 
-The full `test24` parenthesis-alignment corpus is also checked in. Its only intentional difference
+The full `test24` parenthesis-alignment fixture set is also checked in. Its only intentional difference
 is the two-line alignment of a deliberately malformed continued string whose quote state spans
 the physical group; Rust keeps the quote-aware interpretation instead of aligning parentheses
 inside that literal. The valid nested-parenthesis and label-left rows remain byte-exact.
 
 There is one intentional oracle divergence in full mode for multi-line `(/ ... /)` array
-constructors. The reference changes the opening `(/` to `[` but does not reach a closing `/)` on a
-later physical line, producing mismatched delimiters such as `[ 1.38e-13, ... 7.87e-10/)`. Rust
-rewrites the complete statement and emits `[ ... ]`, which is valid Fortran and matches the output
-committed by CAMB. `tests/fixtures/array_constructor_multiline.f90` pins this behavior; the
-historic-corpus diagnostic reports it as `array-constructor` rather than `other`.
+constructors. The legacy normalizer can change the opening `(/` to `[` without reaching a closing
+`/)` on a later physical line. Rust rewrites the complete statement and emits `[ ... ]`, which is
+valid Fortran. `tests/fixtures/array_constructor_multiline.f90` pins this behavior.
 
 Comment bodies are formatted only when the narrow commented-assignment recognizer can prove that
 the text begins with a simple identifier/member (or a single non-nested parenthesized subscript)
 followed by `=`; prose, URLs, tables, directives, banners, markers, and nested/otherwise uncertain
-expressions are left alone. This is an intentional reasonable-boundary rule: the reference
-respaces seven nested or non-Fortran expressions that Rust declines, so those seven pairs remain an
-accepted `comment-content` divergence rather than being normalized out of the diagnostic.
+expressions are left alone. This is an intentional reasonable-boundary rule: the legacy normalizer
+respaces several nested or non-Fortran expressions that Rust declines, so those pairs remain an
+accepted `comment-content` divergence.
 
 OpenMP-style conditional sentinels retain their authored spacing after the `!$` marker while their
 Fortran body receives ordinary keyword and declaration-case normalization. Thus `!$  IF (X) THEN`
@@ -134,7 +128,7 @@ exact.
 
 The governing declaration also resolves `DarkEnergyQuintessence.f90`: its procedure-local result
 declaration `Vofphi` (backed by the `procedure :: Vofphi` binding) governs the `VofPhi` definition
-and named END. Rust emits `Vofphi`; the reference's same-file spelling-conflict veto does not.
+and named END. Rust emits `Vofphi`; the legacy same-file spelling-conflict veto does not.
 
 Tests 26 and 27's legacy `doit` calls pass the human-readable case description as an option and are
 therefore not executable differential commands as written. Their direct free-form features were
@@ -174,7 +168,7 @@ status, and an allowed-normalization declaration.
 | Nested legacy STRUCTURE/UNION/MAP | `structures` |
 | Legacy split `su broutine` recovery and comma-prefixed external END fallback | `legacy_split_procedure`, `legacy_orphan_procedure_end` |
 | Nested parenthesis alignment and label-left interaction | `align_nested`, `align_nested_label_right` |
-| Full Test026/Test027 parenthesis corpus and malformed-string boundary | `align_legacy_full`, `align_legacy_full_label0` |
+| Full Test026/Test027 parenthesis fixtures and malformed-string boundary | `align_legacy_full`, `align_legacy_full_label0` |
 | Compatibility audit regressions: first-item parenthesis target, CONTAINS frame retention, abstract-interface END guard | `compat_regressions` |
 | Shared-label `DO` closure across nested CPP branches | `labeled_cpp_do` |
 | Consolidated free-form legacy construct matrix | `legacy_free_matrix` |
@@ -207,4 +201,4 @@ literal unchanged; `ws_remred_valid_literal` records this oracle defect explicit
 COCO (`??`) and FYPP (`#:`) directive recognition is currently retained only for safe grouping and
 branch continuation. They are not part of the first compatibility release's supported semantic
 contract; CPP behavior is the supported preprocessor feature. Full COCO/FYPP behavior is deferred
-until it has a fixture corpus and a separate compatibility decision.
+until it has checked-in fixtures and a separate compatibility decision.

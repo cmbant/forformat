@@ -253,7 +253,7 @@ fn prefixed_procedure(source: &[u8], words: &[Vec<u8>]) -> Option<(StatementKind
     if words.first().is_some_and(|x| x == b"end") {
         return None;
     }
-    // The legacy free-form corpus contains `su broutine` in an
+    // The legacy free-form fixtures contain `su broutine` in an
     // editor-like interoperability example. findent 4.3.7 still treats the
     // split keyword as a procedure boundary, so preserve that narrow
     // recovery without accepting arbitrary misspellings as structural.

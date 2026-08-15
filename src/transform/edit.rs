@@ -67,8 +67,8 @@ impl<'a> EditBuffer<'a> {
     }
 
     /// The number of edits dropped as out of range or overlapping.  Nonzero
-    /// here means a rule is confused; the corpus check reports it rather than
-    /// letting it silently alter output.
+    /// here means a rule is confused; diagnostics report it rather than letting
+    /// it silently alter output.
     pub fn skipped(&self) -> usize {
         self.skipped
     }

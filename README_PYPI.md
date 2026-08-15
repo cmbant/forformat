@@ -91,7 +91,7 @@ Command-line options override project settings. `--config PATH` selects a specif
 
 ### Example profile
 
-This profile mirrors the indentation settings used by CAMB. The final
+This profile demonstrates an explicit four-space indentation configuration. The final
 `--indent-contains=restart` setting is intentional; options may be written with hyphens or
 underscores.
 

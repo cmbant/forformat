@@ -60,8 +60,8 @@ pub fn format_with_context(
 
     if config.wrap.enabled {
         let declined = reflow_with_context_inner(&mut document, project, &local, config)?;
-        // Every long line the wrapper refuses is explainable; the corpus check
-        // consumes this to separate "unwrappable by design" from a wrapper bug.
+        // Every long line the wrapper refuses is explainable; the diagnostic
+        // separates "unwrappable by design" from a wrapper bug.
         let (output, meta) = lay_out(&document, config)?;
         return Ok(FormatResult {
             bytes: output.to_bytes(),
@@ -121,8 +121,8 @@ fn lay_out(
 /// The first-line indent and the continuation column both come from the layout
 /// plan, so a user who changes `-k` or turns on `--align-paren` changes where
 /// wrapped lines start *and* the width the wrapper had to work with, together.
-/// A literal `indent + 4` here — which is what the reference formatter uses —
-/// would silently disagree with the engine the moment either option moved.
+/// A literal `indent + 4` here would silently disagree with the engine the
+/// moment either option moved.
 pub fn reflow(
     document: &mut Document,
     config: &FormatConfig,
@@ -827,8 +827,8 @@ end module m
         assert_eq!(String::from_utf8_lossy(&again), text);
     }
 
-    /// The four ways step 16 used to need a second run to settle, each taken
-    /// from the `cosmomc`/`CAMB` corpus.  They share one shape: something the
+    /// The four ways step 16 used to need a second run to settle. They share
+    /// one shape: something the
     /// pipeline does *after* the wrapper measured the text — normalization
     /// widening it, the layout engine moving it, step 17 padding a `::` —
     /// pushed a line past the budget that the next run then rewrapped.
@@ -839,13 +839,12 @@ end module m
             // statement over the budget (`source/EstCovmat.f90`).
             b"module m\ncontains\nsubroutine s\n    if (Feedback >1 ) write(*,*) &\n     ' Parameter '//trim(BaseParams%UsedParamNameOrNumber(i))//' is weakly constrained, neglect correlations'\nend subroutine s\nend module m\n",
             // The layout engine moves the directive right, and the sentinel has
-            // to be repeated on the wrapped line (`camb/fortran/results.f90`).
+            // to be repeated on the wrapped line.
             b"module m\ncontains\nsubroutine s\ndo i = 1, n\ndo j = 1, n\n!$OMP PARALLEL DO DEFAULT(SHARED), SCHEDULE(STATIC), PRIVATE(zpeak, sigma_z, zpeakstart, zpeakend, nu_i, Win)\ndo k = 1, n\nx = 1\nend do\nend do\nend do\nend subroutine s\nend module m\n",
             // Step 17 gives `::` the space the wrapper had not paid for
-            // (`source/szcounts.f90`).
+            // because step 17 gives `::` its owed space.
             b"module m\ncontains\nsubroutine s\nreal (dl):: dif_old,dif,max,min,dlm,binz,m_min,m_max,mp,yp,zp,thp,xk1,xk2,xk3,yk1,yk2,yk3,fact,qmin,qmax,dlogy\nend subroutine s\nend module m\n",
-            // A detached trailing comment above a dedented `else if`
-            // (`camb/fortran/MathUtils.f90`).
+            // A detached trailing comment above a dedented `else if`.
             b"module m\ncontains\nsubroutine s\nif (fb == zero) then\nxzero = b\nelseif (fa*(fb/abs(fb))<zero) then  ! check that f(ax) and f(bx) have different signs\nc = a\nend if\nend subroutine s\nend module m\n",
         ];
         for source in cases {
@@ -922,8 +921,7 @@ end module project_names\n";
 
     /// `/)` closes a FORMAT statement's edit-descriptor list; only an array
     /// constructor's `/)` becomes `]`.  On a continuation line there is no
-    /// `format` keyword to see, so the statement-level fact has to be carried
-    /// there (`camb/forutils/Interpolation.f90`).
+    /// `format` keyword to see, so the statement-level fact has to be carried.
     #[test]
     fn a_continued_format_statement_keeps_its_slash_before_the_paren() {
         let source = b"module m\ncontains\nsubroutine s\n9060 format ('    NXD =', i5, ',  NYD =', i5, ',  NXI =', i5, &\n    ',  NYI =', i5 /)\nend subroutine s\nend module m\n";

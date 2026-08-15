@@ -23,6 +23,13 @@ fn protected(source: &[u8]) -> (Vec<Vec<u8>>, Vec<Vec<u8>>, Vec<Vec<u8>>) {
             if continued_literal && region.range.start == 0 {
                 payload = payload.trim_ascii_start();
             }
+            // The final whitespace pass removes horizontal whitespace at the
+            // end of every physical line. If an unterminated literal reaches
+            // that boundary, those bytes are layout whitespace rather than a
+            // stable literal payload for this malformed-input property.
+            if region.kind == RegionKind::StringLiteral && region.range.end == line.len() {
+                payload = payload.trim_ascii_end();
+            }
             match region.kind {
                 RegionKind::StringLiteral => literals.push(payload.to_vec()),
                 RegionKind::Hollerith => hollerith.push(payload.to_vec()),

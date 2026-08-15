@@ -6,12 +6,6 @@ set -eu
 
 cd "$(dirname "$0")/.."
 
-echo "== gen_vocab.py --check =="
-python3 tools/gen_vocab.py --check
-
-echo "== gen_traceability.py --check =="
-python3 tools/gen_traceability.py --check
-
 echo "== cargo fmt --check =="
 cargo fmt --check
 

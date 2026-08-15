@@ -4,7 +4,7 @@
 [`findent-port-plan.md`](findent-port-plan.md), audited against findent 4.3.7 on 2026-08-10. It is
 kept for provenance — what was measured, and which boundaries were chosen deliberately. **The
 numbers below are the 2026-08-10 snapshot and have not been maintained since;** they are not a
-description of the current tree. For that, see [`../design.md`](../design.md),
+description of the current tree. For that, see [`full-mode-port-design.md`](full-mode-port-design.md),
 [`../full-mode.md`](../full-mode.md) and `AGENTS.md`.
 
 ## Audit snapshot — 2026-08-10, not maintained

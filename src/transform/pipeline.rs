@@ -1,8 +1,7 @@
 //! The normalization pass order.
 //!
-//! The order is not a design choice we are free to make: it is the frozen
-//! Python reference's `format_text` (`standardize_fortran.py:3887-4006`), and
-//! the dependencies between passes are real.  Case replacement runs *before*
+//! The order is part of the format contract, and the dependencies between
+//! passes are real. Case replacement runs *before*
 //! the lexical joins, and every pass that changes the line count forces the
 //! statement and scope view to be rebuilt (§5.2 of the port plan).
 //!
@@ -169,8 +168,8 @@ pub fn post_layout(document: &mut Document, config: &FormatConfig) -> Result<boo
 ///
 /// Rebuilding before every pass is deliberately simple rather than clever: a
 /// pass that needs no context pays a parse it does not use, but no pass can
-/// ever read a stale one.  Passes that measurably matter can take a cached
-/// context later, once the corpus check can prove the two agree.
+/// ever read a stale one. Passes that measurably matter can take a cached
+/// context later, once focused tests can prove the two agree.
 fn with_context<F>(
     document: &mut Document,
     project: &ProjectContext,

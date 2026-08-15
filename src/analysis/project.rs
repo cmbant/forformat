@@ -21,7 +21,7 @@ pub struct ProjectContext {
     pub cases: CaseTables,
     /// File-wide symbol declarations, excluding procedure locals.
     pub file_symbols: CaseMap,
-    /// Generic aliases excluded from the reference type-procedure table.
+    /// Generic aliases kept separate from ordinary type-procedure names.
     pub generic_type_procedures: CaseMap,
     /// Generic type-bound names keyed by their owner type.
     pub generic_bound_type_procedures: super::names::ComponentCaseMap,

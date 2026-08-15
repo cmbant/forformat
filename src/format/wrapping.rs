@@ -5,14 +5,12 @@
 //! * the **wrapper** decides *where* a statement breaks;
 //! * the **layout plan** decides *where the next physical line begins*.
 //!
-//! The reference Python formatter conflates the two — it hard-codes
-//! `indent + 4` for continuations, which happens to agree with the CAMB
-//! profile's `--indent_continuation=4` and would silently disagree the moment
-//! anyone passed a different `-k`.  Here the continuation column always comes
-//! from [`ContinuationLayout`], which the planner fills in.
+//! A fixed `indent + 4` continuation would silently disagree the moment anyone
+//! passed a different `-k`. The continuation column always comes from
+//! [`ContinuationLayout`], which the planner fills in.
 //!
-//! What *is* ported from Python is the ranking of candidate break points, which
-//! encodes real taste about where a human would split an expression.
+//! The ranking of candidate break points encodes real taste about where a human
+//! would split an expression.
 
 use crate::format::continuation::ParenAlignmentState;
 use crate::source::{
@@ -45,11 +43,11 @@ pub struct ContinuationLayout {
 }
 
 /// Why a statement was left as it is.  Every long line the formatter declines to
-/// wrap must be explainable, so the corpus check can separate "unwrappable by
+/// wrap must be explainable, so diagnostics can separate "unwrappable by
 /// design" from "wrapper bug".
 ///
 /// Note that a lone over-long string literal is *not* always a decline: see
-/// [`literal_wrap_split`], which relaxes "no token is split" (I5) for exactly
+/// `literal_wrap_split`, which relaxes "no token is split" (I5) for exactly
 /// that one case, at a whitespace boundary inside the literal's content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decline {

@@ -65,6 +65,32 @@ fn checked_in_manifest_covers_success_and_rejection_paths() {
     }
 }
 
+#[test]
+fn fixed_form_rejection_contract() {
+    let argv = ["forformat", "-ifixed"].into_iter().map(str::to_owned);
+    match cli::parse(argv) {
+        Err(error) => assert_eq!(
+            format_error(error),
+            "forformat: unsupported: fixed-form input/output is not supported\n"
+        ),
+        Ok(_) => panic!("expected fixed-form rejection, got Ok"),
+    }
+}
+
+#[test]
+fn unknown_option_rejection_contract() {
+    let argv = ["forformat", "--not-an-option"]
+        .into_iter()
+        .map(str::to_owned);
+    match cli::parse(argv) {
+        Err(error) => assert_eq!(
+            format_error(error),
+            "forformat: invalid option: --not-an-option\n"
+        ),
+        Ok(_) => panic!("expected unknown-option rejection, got Ok"),
+    }
+}
+
 fn format_error(error: FormatError) -> String {
     format!("forformat: {error}\n")
 }

@@ -17,7 +17,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
 
 /// Step 12: normalize continuation markers.
 ///
-/// The reference strips a *leading* `&` from continuation lines.  Rust keeps
+/// The normalizer strips a *leading* `&` from continuation lines. Rust keeps
 /// that rule for pre-existing markers and never emits one, which is what makes
 /// findent's `-K` (`--indent_ampersand`) inert on already-formatted source
 /// rather than contradictory: `-K` governs where an existing leading `&` sits,
@@ -62,9 +62,8 @@ pub fn normalize_continuations(
 ///
 /// A continued directive needs a repeated `!$OMP` on each physical line with
 /// valid `&` markers, and the available width has to account for the sentinel.
-/// Note that `--openmp=0` in the CAMB profile disables findent's OpenMP
-/// *indentation* while directive *text* normalization stays on: two concerns,
-/// two config fields, never one flag.
+/// Note that `--openmp=0` disables OpenMP *indentation* while directive *text*
+/// normalization stays on: two concerns, two config fields, never one flag.
 ///
 /// Port target: `normalize_openmp_continuation_sentinels`,
 /// `join_openmp_directive`, `wrap_openmp_directive`.
@@ -375,7 +374,7 @@ fn normalize_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
     normalize_openmp_clause_separators(&spaced)
 }
 
-/// Match the reference's narrow OpenMP clause rule: `DEFAULT(X) PRIVATE(Y)`
+/// Match the narrow OpenMP clause rule: `DEFAULT(X) PRIVATE(Y)`
 /// becomes `DEFAULT(X), PRIVATE(Y)`, while adjacent tokens without whitespace
 /// remain authored.  This runs only on `!$OMP` bodies, never on `!$` lines.
 fn normalize_openmp_clause_separators(body: &[u8]) -> Vec<u8> {

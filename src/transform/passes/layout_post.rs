@@ -779,7 +779,7 @@ fn scope_header(code: &[u8]) -> bool {
 
 /// Step 20: trailing horizontal whitespace and the final newline.
 ///
-/// This matches the reference formatter's pre-commit-style EOF policy: an
+/// This matches the formatter's pre-commit-style EOF policy: an
 /// empty input stays empty, while every non-empty input ends in exactly one
 /// newline.  The newline sequence itself remains the document's dominant one.
 pub fn output_whitespace(
@@ -1095,14 +1095,14 @@ mod tests {
 
     #[test]
     fn declaration_alignment_never_adds_padding_to_short_lines() {
-        let source = b"type(c_ptr) :: cptr\ntype(CAMBParams), pointer :: PType\nclass(TPythonInterfacedClass), pointer :: P\n\nclass(CAMBParams), target :: this\ntype(CAMBParams), pointer :: p\n";
+        let source = b"type(c_ptr) :: cptr\ntype(ModelParams), pointer :: PType\nclass(InterfaceClass), pointer :: P\n\nclass(ModelParams), target :: this\ntype(ModelParams), pointer :: p\n";
         let output = apply_all(source);
         assert!(output
             .windows(b"type(c_ptr) :: cptr".len())
             .any(|w| w == b"type(c_ptr) :: cptr"));
         assert!(output
-            .windows(b"type(CAMBParams), pointer :: PType".len())
-            .any(|w| w == b"type(CAMBParams), pointer :: PType"));
+            .windows(b"type(ModelParams), pointer :: PType".len())
+            .any(|w| w == b"type(ModelParams), pointer :: PType"));
         assert!(!output
             .windows(b"type(c_ptr)     :: cptr".len())
             .any(|w| w == b"type(c_ptr)     :: cptr"));

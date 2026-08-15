@@ -95,8 +95,8 @@ END SUBROUTINE S\n";
 
 #[test]
 fn external_macro_case_is_exact() {
-    let source = include_bytes!("fixtures/python_external_macro.f90");
-    let expected = include_bytes!("fixtures/python_external_macro.out");
+    let source = include_bytes!("fixtures/external_macro_define.f90");
+    let expected = include_bytes!("fixtures/external_macro_define.out");
     let config = FormatConfig {
         mode: FormatMode::Full,
         defines: vec![forformat::MacroDefine {

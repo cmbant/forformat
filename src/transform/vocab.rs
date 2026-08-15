@@ -1,8 +1,4 @@
-//! Fortran vocabularies, generated from the frozen Python reference.
-//!
-//! DO NOT EDIT BY HAND.  Regenerate with `python3 tools/gen_vocab.py`, which
-//! reads `tools/reference/standardize_fortran.py`
-//! (sha256 `14223363f92c189005cc793329725d25fa09e673909084ba243cf3ebf3e8cb26`).
+//! Hand-maintained Fortran vocabularies used by full-mode normalization.
 //!
 //! Everything here is lowercase and sorted so lookups are a branch-predictable
 //! binary search with no allocation and no hash map in the hot path.
@@ -525,7 +521,7 @@ pub static PARENTHESIZED_STATEMENT_NAMES: &[&str] = &[
     "write",
 ];
 
-/// Arithmetic operators the reference formatter writes without surrounding spaces.
+/// Arithmetic operators written without surrounding spaces.
 ///
 /// Sorted, lowercase, and looked up with [`contains`].
 pub static COMPACT_ARITHMETIC_OPERATORS: &[&str] = &["*", "**", "/"];
@@ -592,7 +588,7 @@ pub static MODERN_OPERATOR: &[(&str, &str)] = &[
     ("ne", "/="),
 ];
 
-/// The reference formatter's default line-length budget.
+/// The formatter's default line-length budget.
 pub const MAX_LINE_LENGTH: usize = 120;
 
 /// A wrapped line must fill at least this fraction of its budget, otherwise the

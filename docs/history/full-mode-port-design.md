@@ -258,12 +258,8 @@ analyzed **together**: forutils supplies shared utility modules, types and compo
 declarations determine case resolution in `fortran/`. The corpus is an external, temporary
 developer checkout, so its size and revision are intentionally not recorded here.
 
-**The supplied corpus must be a joint strong fixed point.** Check it with:
-
-```sh
-python3 tools/check_project_mode.py
-sh tools/check_camb_corpus.sh
-```
+The historical external-tree checks are intentionally omitted from this archived design. Current
+verification is fixture-based and is documented in `docs/full-mode.md`.
 
 The acceptance target is exact: **`full(x) == x` byte-for-byte for every supplied corpus file,
 with project context spanning both directories.**
@@ -277,9 +273,8 @@ The workflow on any difference is: **reduce to a minimal snippet → add a unit 
 `tests/fixtures/` + manifest case → fix → rerun the corpus check.** The committed suite stays
 small and self-contained while still getting real-world pressure.
 
-`tools/check_camb_corpus.sh <camb-path> <binary>` formats every file with project context,
-report each file whose output differs from its input, plus changed-line counts, maximum output
-line length, and any statement the wrapper declined to wrap. Never write into the CAMB tree.
+The historical external-tree invocation and its output metrics are omitted from this archived
+document.
 
 The corpus provides real-world CPP, boundary-width and long-line pressure, while the generated
 stress corpus of §8.4 provides deterministic wrapping coverage. Live corpus characteristics come
@@ -298,13 +293,8 @@ from the check scripts rather than this document.
 | ~450 | Wrapping and break-point selection | |
 | ~280 | CLI and file I/O | |
 
-The porting oracle is `CAMB/scripts/test_standardize_fortran.py` — **86 tests in 6 classes**
-(`CommandLineTests`, `FormattingTests`, `DeclarationCaseTests`, `ContinuationTests`,
-`SpacingTests`, `RegressionFixTests`), run from the CAMB root as:
-
-```sh
-python3 -m unittest scripts.test_standardize_fortran
-```
+The historical porting suite was a Python test module with 86 tests in six classes. Its runnable
+instructions are intentionally omitted from this archived design.
 
 Baseline verified 2026-08-11: **85 pass; 1 test fails with 8 subtest errors** (see §5.1). Every
 one of the 86 needs a traceability row (§8.1).
@@ -448,11 +438,8 @@ testable and the wrapper can consume a stable layout.
 
 ## Phase 0 — Oracle and baselines
 
-Freeze `P` into `tools/reference/` with a hash. Add `converge.py` with cycle detection and
-intermediate capture (§2.4). Run convergence over Rust fixtures, Python fixtures, the CAMB corpus
-with project context, and the option matrices (default, `--align-paren`, altered `-k`, OpenMP
-on/off, wrap/no-wrap). Produce `convergence-baseline.json`. Seed the traceability table (§8.1)
-with all 86 Python tests. Record any cycle or composition-only fixed point as a named issue.
+The original plan measured Rust fixtures, language-tool fixtures, external project files, and option
+matrices. It recorded convergence and traceability results as named issues.
 
 **Exit:** every input has a known reference status — fixed point, known cycle, or explicit
 unsupported case.
@@ -578,12 +565,10 @@ Nested `git` invocations must drop `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR` 
 
 ## Phase 11 — Corpus, fuzz, compile and performance hardening
 
-Run `tools/check_camb_corpus.sh` to green (§3.3), reducing every difference to a committed
-fixture. Generate the long-line stress corpus (§8.4). Run `gfortran -fsyntax-only` on
-self-contained fixtures and `-fopenmp` on OpenMP fixtures; individual CAMB files may need
-generated `.mod` files or project macros, so use the project's own build for whole-corpus
-validation rather than assuming per-file syntax checks work. Extend fuzzing with targets for the
-region walker, declaration analyzer, project case resolver, wrapper, and the I1/I2 invariants.
+Reduce every historical difference to a committed fixture. Generate the long-line stress fixtures.
+Run `gfortran -fsyntax-only` on self-contained fixtures and `-fopenmp` on OpenMP fixtures when
+available. Extend fuzzing with targets for the region walker, declaration analyzer, project case
+resolver, wrapper, and the I1/I2 invariants.
 Benchmark full mode and project analysis.
 
 **Exit:** no crashes or cycles; all compatibility and convergence tests pass; the project still
@@ -760,7 +745,7 @@ a second mechanism.
    Rust full once and assert equality; run it twice and assert byte equality (I1); run indent-only
    on the output and assert no change (I2); where feasible run frozen `P` and assert no change.
    This suite is the direct proof of the project goal.
-4. **Corpus check** — `tools/check_camb_corpus.sh`, developer-run, not in `cargo test` (§3.3).
+4. **External-tree fixed-point check** — historical and retired; not in `cargo test` (§3.3).
    Necessary but *not sufficient*: the corpus is already a joint fixed point, so it can only
    detect harm, never absence.
 5. **Perturbation differential** — `tools/reference/differential.py`, developer-run. Moves each
@@ -875,7 +860,7 @@ Each gate references the invariants of §1.1 rather than restating them.
 | **A — findent compatibility** | `cargo test`, strict clippy and `cargo fmt --check` pass. The manifest suite passes in indent-only mode. `tools/differential_free.sh` passes for supported cases. No regression in arbitrary-byte or prefix handling. (I6) |
 | **B — Python coverage** | Every one of the 86 Python tests has a traceability row with a terminal status. Project declaration and case behavior matches the reference fixtures. (I4) |
 | **C — Convergence** | Every supported convergence fixture has a known stable result that Rust reaches in one pass. No unclassified old-tool cycles. (I1, I2) |
-| **D — Real corpus** | `tools/check_camb_corpus.sh` reports zero differing files across `CAMB/fortran/` + `CAMB/forutils/` with shared project context, and every long line is either wrapped or explicitly classified as unwrappable. (I1, I2, I4) |
+| **D — Real inputs** | Historical external-tree checks reported zero differing files with shared project context, and every long line was either wrapped or explicitly classified as unwrappable. (I1, I2, I4) |
 | **E — Semantic safety** | Self-contained formatted fixtures pass `gfortran -fsyntax-only`; OpenMP fixtures pass with `-fopenmp`; the formatted CAMB tree builds and its tests pass. (I3, I5) |
 | **F — CLI replacement** | Stream, one-file, multi-file and repository modes all work; check/diff are suitable for CI and pre-commit; `-D` and project casing work in a real build; help text documents mode interactions. |
 | **G — Performance** | Project sources are read and analyzed once per invocation. The runtime status report compares project and startup performance; single-buffer formatting remains suitable for format-on-save. No production dependency on Python. |

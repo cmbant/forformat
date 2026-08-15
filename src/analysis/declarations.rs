@@ -33,20 +33,19 @@ use std::collections::{HashMap, HashSet};
 pub struct FileFacts {
     /// Spellings this file declares, per name space.
     pub cases: CaseTables,
-    /// The reference's file-wide symbol declarations, excluding procedure
+    /// File-wide symbol declarations, excluding procedure
     /// locals.  This is distinct from `cases.symbols`, which is also used by
     /// the scope pass and therefore contains local declaration evidence.
     pub file_symbols: CaseMap,
-    /// Generic bindings are tracked separately because the reference's
-    /// type-procedure case table contains explicit PROCEDURE bindings, not
-    /// GENERIC aliases.
+    /// Generic bindings are tracked separately from explicit PROCEDURE
+    /// bindings, not GENERIC aliases.
     pub generic_type_procedures: CaseMap,
     /// Generic bindings keyed by owner type. These are project evidence for
     /// uses in other files; the target file's own generic spelling is resolved
     /// from its local declaration namespace.
     pub generic_bound_type_procedures: super::names::ComponentCaseMap,
-    /// Derived-type definitions only (not TYPE(...) use sites). The reference
-    /// also exposes these through its ordinary symbol declaration table.
+    /// Derived-type definitions only (not TYPE(...) use sites). These also
+    /// contribute to the ordinary symbol declaration table.
     pub declared_types: CaseMap,
     /// Macro names defined by `#define` in this file.
     pub macros: CaseMap,
@@ -66,7 +65,7 @@ struct UseAssociation {
     names: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
-/// The two declaration name sets consulted by the reference keyword pass.
+/// The two declaration name sets consulted by keyword lowering.
 ///
 /// These are intentionally not derived from [`FileFacts::cases`].  The case
 /// tables are file/project-wide because the later case pass needs that view;
@@ -180,8 +179,8 @@ impl DeclaredNameIndex {
     }
 
     /// The unique spelling contributed by any enclosing file scope, without
-    /// requiring that scope to be visible at `line`.  This is the file-local
-    /// equivalent of the reference's `symbol_cases`: it includes sibling
+    /// requiring that scope to be visible at `line`. This is the file-local
+    /// equivalent of the project-wide symbol view: it includes sibling
     /// module declarations, but never procedure-body locals.
     pub fn file_declared_anywhere(&self, name: &[u8]) -> DeclaredSpelling<'_> {
         self.case_in_maps(self.file_declared_names.iter(), name)
@@ -725,8 +724,8 @@ pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
             .and_then(|scope| scopes.scopes[scope].name.as_deref())
             .map(|name| name.to_ascii_lowercase());
         // Interface bodies are procedure signatures, not module variables.
-        // The reference nevertheless sends their headers and declarations
-        // through extract_procedure_cases, so keep their dummies and RESULT
+        // Interface headers and declarations use the procedure-local path, so
+        // keep their dummies and RESULT
         // names in the procedure-local tables.
         for statement in &group.statements {
             if let Some((child, parent)) = type_definition_parent(&statement.text) {
@@ -866,7 +865,7 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
     // procedure's own CONTAINS, plus header dummy/result names and SELECT
     // TYPE aliases.  Choose the innermost procedure for each physical line;
     // enclosing procedure locals are intentionally not unioned here because
-    // that is what `active_procedure_at` does in the reference.
+    // that is what `active_procedure_at` defines for this pass.
     let mut locals_by_scope = vec![CaseMap::default(); scopes.scopes.len()];
     // The innermost scope that owns each line's local declarations. A `BLOCK`
     // owns its own, so a declaration inside one is not attributed to the host
@@ -1060,8 +1059,8 @@ fn owns_locals(kind: ScopeKind) -> bool {
     is_procedure_scope(kind) || kind == ScopeKind::Construct
 }
 
-/// The subset of declaration extraction used by the reference's
-/// `_declared_variable_names`.  It excludes derived-type declarations and
+/// The subset of declaration extraction used for ordinary variable names. It
+/// excludes derived-type declarations and
 /// procedure bindings, which are declarations in other namespaces.
 fn declared_variable_names(text: &[u8]) -> Vec<Vec<u8>> {
     let tokens = tokenize(text, &mut LexState::default());
@@ -1368,7 +1367,7 @@ fn entity_declaration(
                 match (owner, &declared_type) {
                     (Some(owner), declared) => {
                         facts.cases.components.insert(owner, token.text);
-                        // The reference's module-variable summary also feeds
+                        // Module-variable declarations also feed
                         // ordinary symbol cases with components declared in a
                         // module specification part.  Keep that evidence in
                         // the symbol table as well as the typed component
@@ -1599,7 +1598,7 @@ fn scope_names(
                 cases.symbols.insert(name);
                 file_symbols.insert(name);
             }
-            // The reference's declaration summary feeds derived-type names
+            // The declaration summary feeds derived-type names
             // into its ordinary symbol table as well as the type-specific
             // table. Type(...) use sites therefore obey the same
             // current-file-over-project rule as other declared symbols.
@@ -1786,7 +1785,7 @@ fn selector_type(text: &[u8], types: &TypeMaps, procedure: Option<&[u8]>) -> Opt
         links.push(link.text);
         index += 2;
     }
-    // The reference does not infer a SELECT TYPE alias through an indexed
+    // Do not infer a SELECT TYPE alias through an indexed
     // component (`P%SourceWindows(i)%Window`).  Keeping that alias untyped is
     // important: a later member such as `RedWin%RedShift` must retain its
     // authored spelling when no exact owner is known.
@@ -2073,11 +2072,12 @@ mod tests {
 
     #[test]
     fn define_directives_contribute_macro_spellings() {
-        let facts =
-            facts(b"#define CAMB_DEBUG 1\n#  define Has_Fun(x) (x)\n#undef NOPE\nprogram p\nend\n");
+        let facts = facts(
+            b"#define FEATURE_FLAG 1\n#  define Has_Fun(x) (x)\n#undef NOPE\nprogram p\nend\n",
+        );
         assert_eq!(
-            facts.macros.get(b"camb_debug"),
-            Some(b"CAMB_DEBUG".as_slice())
+            facts.macros.get(b"feature_flag"),
+            Some(b"FEATURE_FLAG".as_slice())
         );
         assert_eq!(facts.macros.get(b"has_fun"), Some(b"Has_Fun".as_slice()));
         assert!(!facts.macros.contains(b"nope"));
@@ -2089,7 +2089,7 @@ mod tests {
             b"module M\n\
               type :: LimberRec\n\
                 real(dl), dimension(:), allocatable :: Source\n\
-                type(CAMBparams) :: Params\n\
+                type(ModelParams) :: Params\n\
               contains\n\
                 procedure :: Run\n\
               end type LimberRec\n\
@@ -2107,15 +2107,15 @@ mod tests {
         assert_eq!(facts.cases.symbols.get(b"data"), Some(b"Data".as_slice()));
         assert_eq!(facts.cases.symbols.get(b"count"), Some(b"Count".as_slice()));
         assert_eq!(
-            facts.cases.types.get(b"cambparams"),
-            Some(b"CAMBparams".as_slice())
+            facts.cases.types.get(b"modelparams"),
+            Some(b"ModelParams".as_slice())
         );
         assert_eq!(
             facts
                 .types
                 .component_types
                 .get(&(b"limberrec".to_vec(), b"params".to_vec())),
-            Some(&b"cambparams".to_vec())
+            Some(&b"modelparams".to_vec())
         );
     }
 
@@ -2133,14 +2133,14 @@ mod tests {
         let mut types = TypeMaps::default();
         types
             .variable_types
-            .insert(b"state".to_vec(), b"cambdata".to_vec());
+            .insert(b"state".to_vec(), b"modeldata".to_vec());
         types.component_types.insert(
-            (b"cambdata".to_vec(), b"params".to_vec()),
-            b"cambparams".to_vec(),
+            (b"modeldata".to_vec(), b"params".to_vec()),
+            b"modelparams".to_vec(),
         );
         assert_eq!(
             types.resolve_chain(b"State", &[b"Params"]),
-            Some(b"cambparams".to_vec())
+            Some(b"modelparams".to_vec())
         );
         assert_eq!(types.resolve_chain(b"state", &[b"missing"]), None);
         assert_eq!(types.resolve_chain(b"unknown", &[]), None);

@@ -16,14 +16,11 @@ cargo test tests::malformed_digit_prefixes_do_not_mutate_label_or_construct_stat
 
 # Keep the libFuzzer targets exercised in CI.  The corpus is deliberately
 # bounded: this is a smoke/property pass, while longer campaigns remain a
-# developer activity.  Every target gets real input from the fixture corpus;
-# the final two also see the historic CAMB shapes when that checkout exists.
+# developer activity.  Every target gets real input from the checked-in
+# fixture corpus.
 seed_corpus=$(mktemp -d)
 trap 'rm -rf "$seed_corpus"' EXIT
 cp tests/fixtures/*.f90 "$seed_corpus/"
-if test -d CAMB/fortran; then
-    find CAMB/fortran CAMB/forutils -type f -name '*.f90' -exec cp {} "$seed_corpus/" \;
-fi
 for target in regions declarations project wrapper properties; do
     target_corpus="$seed_corpus"
     if test "$target" = properties; then

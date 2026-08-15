@@ -214,7 +214,7 @@ impl ComponentCaseMap {
     }
 }
 
-/// The five independent name spaces the reference formatter tracks.
+/// The five independent name spaces used by case resolution.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CaseTables {
     /// `MODULE` names and the names in `USE` statements.
@@ -225,7 +225,7 @@ pub struct CaseTables {
     pub types: CaseMap,
     /// Derived-type component names.
     ///
-    /// The reference keys its authoritative component table by
+    /// The authoritative component table is keyed by
     /// `(type_name, component_name)`.  Case application uses TypeMaps to
     /// identify that owner type and stays inert when a chain is unresolved,
     /// rather than guessing from a name-only component entry.
@@ -362,9 +362,9 @@ impl<'a> CaseResolver<'a> {
     /// True when a name space that can shadow a keyword declares this name,
     /// however spelled.  An intrinsic must not override such a name (I4).
     ///
-    /// Type-bound procedures are deliberately excluded.  They are only ever
+    /// Type-bound procedures are deliberately excluded. They are only ever
     /// reached through `%` or as the target of a binding, both of which have
-    /// their own guards, and the reference keeps them out of the name set that
+    /// their own guards, and keyword lowering keeps them out of the name set that
     /// suppresses keyword lowering — `test_type_bound_procedures_only_supply_
     /// component_case` asserts exactly that.  Including them meant a single
     /// `procedure :: Close => …` stopped `close(unit)` being lowercased
@@ -372,7 +372,7 @@ impl<'a> CaseResolver<'a> {
     ///
     /// File-wide declaration predicate retained for the identifier case pass.
     ///
-    /// The keyword normalizer does not use this method: its reference path is
+    /// The keyword normalizer does not use this method: it uses
     /// `declared_names_at(line)`, with a separate active-procedure local set.
     /// Keeping this predicate here preserves the existing Chunk C contract
     /// until case application gets its own scope-aware lookup.
@@ -395,14 +395,14 @@ mod tests {
     #[test]
     fn one_spelling_is_unique_and_two_are_ambiguous() {
         let mut map = CaseMap::new();
-        map.insert(b"CAMBdata");
-        assert_eq!(map.get(b"cambdata"), Some(b"CAMBdata".as_slice()));
-        map.insert(b"CAMBdata");
-        assert_eq!(map.get(b"CAMBDATA"), Some(b"CAMBdata".as_slice()));
-        map.insert(b"CAMBData");
-        assert_eq!(map.get(b"cambdata"), None);
-        assert!(map.is_ambiguous(b"cambdata"));
-        assert!(map.contains(b"cambdata"));
+        map.insert(b"ModelData");
+        assert_eq!(map.get(b"modeldata"), Some(b"ModelData".as_slice()));
+        map.insert(b"ModelData");
+        assert_eq!(map.get(b"MODELDATA"), Some(b"ModelData".as_slice()));
+        map.insert(b"ModelDATA");
+        assert_eq!(map.get(b"modeldata"), None);
+        assert!(map.is_ambiguous(b"modeldata"));
+        assert!(map.contains(b"modeldata"));
     }
 
     #[test]
@@ -464,7 +464,7 @@ mod tests {
         local.symbols.insert(b"Size");
         let project = CaseTables::default();
         let mut macros = CaseMap::new();
-        macros.insert(b"CAMB_DEBUG");
+        macros.insert(b"FEATURE_FLAG");
 
         let resolver = CaseResolver {
             local: &local,
@@ -472,8 +472,8 @@ mod tests {
             macros: &macros,
         };
         assert_eq!(
-            resolver.spelling(NameSpace::Symbol, b"camb_debug"),
-            Some(b"CAMB_DEBUG".as_slice())
+            resolver.spelling(NameSpace::Symbol, b"feature_flag"),
+            Some(b"FEATURE_FLAG".as_slice())
         );
         // Declared locally, so the intrinsic spelling must not win.
         assert_eq!(resolver.identifier(b"SIZE"), Some(b"Size".as_slice()));

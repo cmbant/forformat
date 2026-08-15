@@ -12,7 +12,7 @@ has no separate pre-commit exclusion mode; keeping the all-files mode faithful
 to the reference is the least surprising choice, while explicit positional paths let
 a hook select only its staged fortran/ files.
 
-`--all` accepts an optional directory: `forformat --all ./camb`. In that form the directory's Git
+`--all` accepts an optional directory: `forformat --all ./src`. In that form the directory's Git
 checkout is discovered, configuration is loaded relative to that directory, and only tracked
 free-form sources beneath it are selected. Without the directory, the current checkout retains
 the original behavior.

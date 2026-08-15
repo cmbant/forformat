@@ -60,12 +60,12 @@ impl AssociateFrame {
 
 /// Steps 1-3: apply the spelling of every known macro name.
 ///
-/// Sources of macro names, in the order the reference collects them:
+/// Sources of macro names, in collection order:
 /// `-D NAME[=VALUE]` from the command line, then every `#define NAME` in the
 /// project.  Both are already gathered into `ProjectContext::macros`; what is
 /// missing is the replacement itself, in unquoted code only.
 ///
-/// Port target: `standardize_fortran.py:3900-3920` and `CPP_DEFINE`.
+/// Macro replacement is limited to unquoted Fortran code and preserves directive definitions.
 pub fn macros(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
     if cx.project.macros.is_empty() {
         return Ok(Changed::No);
@@ -116,8 +116,7 @@ pub fn macros(document: &mut Document, cx: &PassContext) -> Result<Changed, Form
 /// `%` resolved through the type maps, type-bound procedure names, and plain
 /// symbols everywhere else.
 ///
-/// Port target: `replace_declared_cases` and `_case_for_file`
-/// (`standardize_fortran.py:1589`).
+/// This is the declared-case pass for the formatter's scoped name tables.
 pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
     let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
     // An implicit function result is declared in the procedure's local
@@ -234,7 +233,7 @@ fn source_span(
 
 /// Classify one identifier occurrence and return its canonical spelling.
 ///
-/// The order mirrors the reference: macro names are already handled by the
+/// The order mirrors the normalization contract: macro names are already handled by the
 /// preceding pass; USE and named END sites have dedicated spaces; `%` sites
 /// are component/type-bound-procedure occurrences; TYPE()/CLASS() names are
 /// type occurrences; everything else is a symbol.  An unresolved component
@@ -332,7 +331,7 @@ fn classify_spelling(
     }
 
     // A kind selector in an intrinsic type-spec (REAL(DP), COMPLEX(DP), ...)
-    // is an ordinary declared parameter in the reference, not a derived-type
+    // is an ordinary declared parameter, not a derived-type
     // name.  This also reaches legacy declarations without `::`.
     if is_intrinsic_kind_name(tokens, index) {
         return file_symbol_spelling(
@@ -353,7 +352,7 @@ fn classify_spelling(
     // scope: `yout(EVout%nvar)` inside a procedure whose dummy list declares
     // `EVOut` becomes `EVOut`, exactly as the same use would in a statement one
     // line below.  Retaining the authored root instead reproduces the committed
-    // CAMB tree, which is the one thing that cannot justify a rule.
+    // An authored spelling from another scope cannot justify a rule.
 
     if preceded_by_percent(tokens, index) {
         let procedure = active_procedure(cx.scopes, line);
@@ -372,7 +371,7 @@ fn classify_spelling(
         );
         let Some(owner_type) = owner_type else {
             // The typed component table cannot safely reproduce the
-            // reference's (type, component) key when the use-site chain is
+            // authoritative (type, component) key when the use-site chain is
             // unresolved. A genuinely undetermined governing declaration is
             // inert; it must not fall through to keyword or symbol casing.
             return None;
@@ -717,7 +716,7 @@ fn file_symbol_spelling(
     }
     if !query.associate_alias && declared_names.file_declared_anywhere(name).is_declared() {
         // Program-unit specification names are visible in the file but are
-        // not part of the reference's project symbol table. Preserve the
+        // not part of the project symbol table. Preserve the
         // authored use rather than borrowing a same-named module component.
         return None;
     }
@@ -1180,7 +1179,7 @@ fn member_owner_type(
     // A target-file root type is authoritative even when its later component
     // link cannot be resolved. Falling back to a project-wide type for that
     // same root would invent an owner (and therefore a component spelling)
-    // that the reference leaves authored.
+    // that the normalizer leaves authored.
     if local
         .types
         .resolve_chain_with_locals(procedure, root, &[])
@@ -1456,11 +1455,11 @@ contains\n\
 procedure :: ReadFilename\n\
 end type TSettingIni\n\
 end module settings\n";
-        let source = b"program CosmoMC\n\
+        let source = b"program ExampleApp\n\
 use settings\n\
 type(TSettingIni) :: Ini\n\
 x = Ini%ReadFileName('file_root')\n\
-end program CosmoMC\n";
+end program ExampleApp\n";
         let project = analyze_project([
             (Path::new("settings.f90"), declarations.as_slice()),
             (Path::new("driver.f90"), source.as_slice()),
@@ -1480,21 +1479,21 @@ end program CosmoMC\n";
     #[test]
     fn use_associated_module_variables_resolve_component_owners() {
         let results = b"module results\n\
-type :: CAMBdata\n\
-integer :: CAMB_PK\n\
-end type CAMBdata\n\
+type :: ModelData\n\
+integer :: MODEL_PK\n\
+end type ModelData\n\
 end module results\n";
         let gauge = b"module GaugeInterface\n\
 use results\n\
-class(CAMBdata), pointer :: State\n\
+class(ModelData), pointer :: State\n\
 end module GaugeInterface\n";
         let unrelated = b"module unrelated\n\
 type :: Other\n\
-integer :: CAMB_Pk\n\
+integer :: MODEL_Pk\n\
 end type Other\n\
 type(Other) :: State\n\
 end module unrelated\n";
-        let source = b"module CAMBmain\n\
+        let source = b"module ExampleMain\n\
 use GaugeInterface\n\
 use GaugeInterface, only: Active => State\n\
 contains\n\
@@ -1502,15 +1501,15 @@ subroutine OtherWork(State)\n\
 type(Other) :: State\n\
 end subroutine OtherWork\n\
 subroutine MakeNonlinearSources\n\
-x = State%CAMB_Pk\n\
-x = Active%CAMB_Pk\n\
+x = State%MODEL_Pk\n\
+x = Active%MODEL_Pk\n\
 end subroutine MakeNonlinearSources\n\
-end module CAMBmain\n";
+end module ExampleMain\n";
         let project = analyze_project([
             (Path::new("results.f90"), results.as_slice()),
             (Path::new("equations.f90"), gauge.as_slice()),
             (Path::new("unrelated.f90"), unrelated.as_slice()),
-            (Path::new("cmbmain.f90"), source.as_slice()),
+            (Path::new("examplemain.f90"), source.as_slice()),
         ])
         .unwrap();
         assert_eq!(project.types.resolve_chain(b"State", &[]), None);
@@ -1518,14 +1517,14 @@ end module CAMBmain\n";
             declared(document, context).unwrap()
         });
         assert!(output
-            .windows(b"State%CAMB_PK".len())
-            .any(|window| window == b"State%CAMB_PK"));
+            .windows(b"State%MODEL_PK".len())
+            .any(|window| window == b"State%MODEL_PK"));
         assert!(!output
-            .windows(b"State%CAMB_Pk".len())
-            .any(|window| window == b"State%CAMB_Pk"));
+            .windows(b"State%MODEL_Pk".len())
+            .any(|window| window == b"State%MODEL_Pk"));
         assert!(output
-            .windows(b"Active%CAMB_PK".len())
-            .any(|window| window == b"Active%CAMB_PK"));
+            .windows(b"Active%MODEL_PK".len())
+            .any(|window| window == b"Active%MODEL_PK"));
     }
 
     #[test]
@@ -1709,15 +1708,15 @@ end type TSourceWindow\n\
 type :: TRedWin\n\
 class(TSourceWindow), pointer :: Window\n\
 end type TRedWin\n\
-type :: CAMBdata\n\
+type :: ModelData\n\
 type(TRedWin), allocatable :: Redshift_W(:)\n\
-end type CAMBdata\n\
+end type ModelData\n\
 type :: Other\n\
 integer :: WrongCase\n\
 end type Other\n\
 contains\n\
 subroutine Work(State, OtherState)\n\
-class(CAMBdata) :: State\n\
+class(ModelData) :: State\n\
 type(Other) :: OtherState\n\
 AssocBlock: associate(UnTyped => UnknownCall(1, 2), RedWin => State%Redshift_W(1))\n\
 call RedWin%window%window_F_A()\n\

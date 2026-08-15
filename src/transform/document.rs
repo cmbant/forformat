@@ -1,10 +1,8 @@
 //! The mutable text a full-mode pass operates on.
 //!
-//! The reference Python formatter works on a list of lines and re-derives
-//! statement structure whenever a pass changes the line count.  Keeping that
-//! shape is deliberate: it makes each ported pass comparable against its Python
-//! original one function at a time, which is the only practical way to land
-//! ~1,100 lines of spacing rules without a semantic oracle.
+//! Full mode works on a list of lines and re-derives statement structure
+//! whenever a pass changes the line count. Keeping that shape makes each pass
+//! independently testable while the Rust analyzer remains deliberately shallow.
 //!
 //! What is *not* inherited is indentation: passes never decide a column.  The
 //! findent layout engine is run over the normalized text at the end, so

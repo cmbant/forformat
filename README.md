@@ -169,8 +169,7 @@ byte-oriented and preserves non-UTF-8 bytes outside the formatting contract.
 ## Development
 
 The main implementation is under `src/`; the Python wheel launcher is under `forformat_runner/`.
-Tests and golden fixtures are in `tests/`. The frozen Python reference and differential tools are
-in `tools/reference/`.
+Tests and golden fixtures are in `tests/`.
 
 Run the normal local checks with:
 
@@ -180,26 +179,22 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 ```
 
-For changes to full-mode normalization, wrapping, or layout, also run the invariant and corpus
-checks when the CAMB verification checkout is available:
-
-```sh
-python3 tools/check_invariants.py
-sh tools/check_camb_corpus.sh
-```
+For changes to full-mode normalization, wrapping, or layout, also run
+`./tools/check_fuzz_regression.sh` and the relevant focused Rust properties.
 
 To check that a built wheel actually works before it is published — the same check both CI
 workflows run on every platform:
 
 ```sh
 python -m build --wheel --outdir dist
-sh tools/check_wheel.sh dist
+bash tools/check_wheel.sh dist
 ```
 
 Documentation:
 
 - [`AGENTS.md`](AGENTS.md) — the short orientation, and the checks a change has to pass.
-- [`docs/design.md`](docs/design.md) — why the pipeline has this shape; the design of record.
+- [`docs/history/full-mode-port-design.md`](docs/history/full-mode-port-design.md) — historical
+  port design and rationale.
 - [`docs/full-mode.md`](docs/full-mode.md) — the full-mode rules, standing checks, and known traps.
 - [`docs/compatibility.md`](docs/compatibility.md) — the findent-compatibility boundary and the
   reviewed divergences.

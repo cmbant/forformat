@@ -200,7 +200,7 @@ fn all_directory_scope_uses_only_the_nested_repo_and_its_config() {
     )
     .unwrap();
     git_add(&parent);
-    let repo = parent.join("camb");
+    let repo = parent.join("nested");
     fs::create_dir(&repo).unwrap();
     Command::new("git")
         .args(["init", "-q"])
@@ -218,7 +218,7 @@ fn all_directory_scope_uses_only_the_nested_repo_and_its_config() {
         vec![repo.join("source.f90")]
     );
 
-    let output = run(&parent, &["--indent-only", "--all", "./camb"]);
+    let output = run(&parent, &["--indent-only", "--all", "./nested"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("source.f90"));
     assert_eq!(
@@ -270,48 +270,59 @@ fn check_diff_and_query_mode_have_real_process_statuses() {
 #[test]
 fn stdin_and_file_routes_produce_identical_bytes_for_the_same_source() {
     let repo = temp_repo();
-    let source = b"program p\n!$ nthread = OMP_GET_MAX_THREADS()\nend program p\n";
-    fs::write(repo.join("source.f90"), source).unwrap();
-    let args = [
-        "--full",
-        "--indent=4",
-        "--indent_module=0",
-        "--indent_procedure=0",
-        "--start_indent=4",
-        "--indent_contains=0",
-        "--openmp=0",
-        "--indent_contains=restart",
-        "--indent_select=4",
-        "--indent_case=4",
-        "--indent_interface=0",
-        "--indent_continuation=4",
-        "--indent_ampersand",
-    ];
-    let stdin = run_stdin(&repo, &args, source);
-    let file = run(
-        &repo,
-        &[
-            "--full",
-            "--stdout",
-            "--isolated",
-            "--indent=4",
-            "--indent_module=0",
-            "--indent_procedure=0",
-            "--start_indent=4",
-            "--indent_contains=0",
-            "--openmp=0",
-            "--indent_contains=restart",
-            "--indent_select=4",
-            "--indent_case=4",
-            "--indent_interface=0",
-            "--indent_continuation=4",
-            "--indent_ampersand",
-            "source.f90",
-        ],
-    );
-    assert_eq!(stdin.status.code(), Some(0));
-    assert_eq!(file.status.code(), Some(0));
-    assert_eq!(stdin.stdout, file.stdout);
+    let mut fixtures: Vec<_> =
+        fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "f90"))
+            .collect();
+    fixtures.sort();
+
+    for fixture in fixtures {
+        let source = fs::read(&fixture).unwrap();
+        fs::write(repo.join("source.f90"), &source).unwrap();
+        git_add(&repo);
+
+        let stdin = run_stdin(&repo, &["--full", "--no-config"], &source);
+        let isolated = run(
+            &repo,
+            &[
+                "--full",
+                "--no-config",
+                "--stdout",
+                "--isolated",
+                "source.f90",
+            ],
+        );
+        let project = run(&repo, &["--full", "--no-config", "--stdout", "source.f90"]);
+        assert_eq!(stdin.status.code(), Some(0), "stdin: {}", fixture.display());
+        assert_eq!(
+            isolated.status.code(),
+            Some(0),
+            "isolated: {}\n{}",
+            fixture.display(),
+            String::from_utf8_lossy(&isolated.stderr)
+        );
+        assert_eq!(
+            project.status.code(),
+            Some(0),
+            "project: {}\n{}",
+            fixture.display(),
+            String::from_utf8_lossy(&project.stderr)
+        );
+        assert_eq!(
+            stdin.stdout,
+            isolated.stdout,
+            "stdin vs isolated: {}",
+            fixture.display()
+        );
+        assert_eq!(
+            stdin.stdout,
+            project.stdout,
+            "stdin vs project: {}",
+            fixture.display()
+        );
+    }
     let _ = fs::remove_dir_all(repo);
 }
 

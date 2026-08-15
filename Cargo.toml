@@ -7,11 +7,8 @@ description = "A standalone free-form Fortran formatter"
 license = "BSD-3-Clause"
 repository = "https://github.com/cmbant/forformat"
 
-# An explicit allow-list, not an `exclude`.  The CAMB and cosmomc corpora are
-# developer verification targets checked out beside the source and deliberately
-# never vendored; they are untracked rather than gitignored, so `cargo package`
-# swept ~1800 of their files into the crate.  Listing what ships means a new
-# corpus or scratch directory cannot silently join the archive.
+# An explicit allow-list, not an `exclude`. Listing what ships prevents a new
+# scratch directory from silently joining the package archive.
 #
 # `include` bypasses .gitignore rather than composing with it, so these are
 # matched by extension: a bare `/tools/**` re-admits the `__pycache__/*.pyc`

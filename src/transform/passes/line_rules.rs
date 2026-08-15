@@ -1,7 +1,6 @@
 //! Step 11: the per-line rule chain.
 //!
-//! Python order (`standardize_fortran.py:3950-3970`), which is also the order
-//! here and must not be permuted:
+//! Normalization order, which must not be permuted:
 //!
 //! 1. `lowercase_line` — keyword case, operator modernization, real exponent
 //!    markers, project case application;
@@ -76,7 +75,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             .unwrap_or(PhysicalLineKind::Code);
         if let Some(body_start) = openmp_clause_body_start(&document.lines[index]) {
             // `!$ use ...` is a directive comment whose Fortran-like clause
-            // text is normalized by the reference.  Exact `!$OMP` bodies use
+            // text is normalized by the formatter. Exact `!$OMP` bodies use
             // their separate uppercase-directive rule and remain untouched
             // here.
             let body = apply_with_options(
@@ -331,9 +330,8 @@ fn compact_continued_named_argument(line: &[u8], open_groups: &[bool]) -> Vec<u8
 /// component after `%`.  A variable called `data`, `type` or `precision` is a
 /// real thing and keeps its spelling.
 ///
-/// This is the byte-oriented port of `lowercase_line` (`standardize_fortran.py:
-/// 2276`).  Every replacement is made against a token span; the source is
-/// never reconstructed from a lossy token spelling.
+/// Every replacement is made against a token span; the source is never
+/// reconstructed from a lossy token spelling.
 pub fn lowercase_line(
     line: &[u8],
     cx: &PassContext,
@@ -468,7 +466,7 @@ fn lowercase_line_with_context(
                     || vocab::contains(vocab::FORTRAN_SPECIFIERS, token.text)
                 {
                     // PRECISION is both an intrinsic and the second word of
-                    // DOUBLE PRECISION.  As in the reference, a bare
+                    // DOUBLE PRECISION. A bare
                     // variable named precision is not inferred to be a word
                     // of the language.
                     if token.is(b"precision")
@@ -492,9 +490,8 @@ fn lowercase_line_with_context(
     edits.finish()
 }
 
-/// Words that are keywords only in a particular shape, from `lowercase_keyword`
-/// (`standardize_fortran.py:1995-2016`).  Outside that shape they are ordinary
-/// identifiers and must keep their spelling: `BIND(C, name=...)` is not the
+/// Words that are keywords only in a particular shape. Outside that shape they
+/// are ordinary identifiers and must keep their spelling: `BIND(C, name=...)` is not the
 /// `bind(c)` language binding, and a `precision` that no `double` precedes is
 /// somebody's variable.
 fn keyword_in_context(tokens: &[crate::source::Token], index: usize) -> bool {
@@ -526,8 +523,8 @@ fn keyword_in_context(tokens: &[crate::source::Token], index: usize) -> bool {
 
 /// Rule 2: keyword and layout spacing.
 ///
-/// Port target: `_normalize_keyword_spacing_code` (`standardize_fortran.py:2397`)
-/// — `COMMON /blk/`, `(/ .. /)` to `[ .. ]` outside `FORMAT`, `go to` to
+/// The spacing rule handles `COMMON /blk/`, `(/ .. /)` to `[ .. ]` outside
+/// `FORMAT`, `go to` to
 /// `goto`, multiword keyword pairs, compound keywords ([`vocab::COMPOUND_KEYWORDS`]),
 /// `end x`, `do while (`, `dimension(`, `if (`, `type(`, `select type (`,
 /// [`vocab::PARENTHESIZED_STATEMENT_NAMES`], empty `subroutine s()`, `only:`,
@@ -692,7 +689,7 @@ fn normalize_keyword_spacing_with_state(
                     }
                 }
             }
-            // `ONLY :` becomes `only:`.  The reference lowercases here, in the
+            // `ONLY :` becomes `only:`. Lowercasing happens here, in the
             // spacing rule, and not in `lowercase_keyword` — which preserves it,
             // because `USE, INTRINSIC :: m, ONLY: x` puts the word after a `::`
             // and so inside the declaration-name guard.  Doing the case change
@@ -1842,7 +1839,7 @@ fn modern_operator(token: &[u8]) -> Option<&'static [u8]> {
     }
 }
 
-/// The lowercase spelling of a dotted word the reference recognizes, when it
+/// The lowercase spelling of a recognized dotted word, when it
 /// differs from what is written.
 ///
 /// `.TRUE.` and `.FALSE.` reach `lowercase_keyword` as the bare word between the
@@ -1950,7 +1947,7 @@ fn exponent_before(line: &[u8], index: usize) -> bool {
 
 /// Carries one bit of left-to-right context between adjacent operator edits.
 ///
-/// The reference builds its output with a single accumulator and asks "did I
+/// The pass builds its output with a single accumulator and asks "did I
 /// already write a space?" before padding the next operator.  Span edits have no
 /// such accumulator, so two adjacent operators each pad their own side and
 /// `a=.not.b` comes out as `a =  .not. b`.  Recording where the previous edit
@@ -2170,7 +2167,7 @@ mod tests {
     fn adjacent_operators_are_padded_once_not_twice() {
         // Regression: `=` and `.not.` each padded their own side, because span
         // edits cannot see what a neighbouring edit already wrote.  The
-        // reference emits exactly one space between them.
+        // the formatter emits exactly one space between them.
         assert_eq!(normalized(b"a = .not. b\n"), "a = .not. b\n");
         assert_eq!(normalized(b"a=.not.b\n"), "a = .not. b\n");
         assert_eq!(normalized(b"a =.not. b\n"), "a = .not. b\n");
@@ -2243,8 +2240,7 @@ mod tests {
 
     #[test]
     fn context_sensitive_keywords_are_only_keywords_in_their_own_shape() {
-        // These match `lowercase_keyword`'s guards; the CAMB corpus contains the
-        // `BIND(C, name=...)` case, which is not the `bind(c)` binding.
+        // `BIND(C, name=...)` is not the `bind(c)` language binding.
         assert_eq!(
             normalized(b"real(dl) function f(a) BIND(C, name='exported')\n"),
             "real(dl) function f(a) BIND(C, name='exported')\n"
@@ -2320,7 +2316,7 @@ mod tests {
     }
 
     #[test]
-    fn chunk_a_keyword_and_delimiter_rules_match_the_reference_shapes() {
+    fn keyword_and_delimiter_rules_match_expected_shapes() {
         let source = b"ENDIF\n\
 ELSEIF  ( X )\n\
 BLOCKDATA\n\
@@ -2340,6 +2336,75 @@ WRITE( UNIT = 1 , FMT = 2 )'x'\n";
             "end if\nelse if (X)\nblock data\ngoto 10\ndouble precision :: X\nif (X) then\nselect type is (X)\ndo while (X)\ncommon /blk/ x\nsubroutine s\nx = [1, 2]\nformat((/1, 2 /))\nwrite(unit=1, fmt=2) 'x'\n"
         );
         assert_eq!(normalized(once.as_bytes()), once);
+    }
+
+    #[test]
+    fn concatenation_spacing_survives_a_continuation_line() {
+        let source = b"call MpiStop('SP(k) cannot be combined with HMCode_A_baryon/' &\n\
+    // 'HMCode_eta_baryon baryonic corrections in HMCode 2015/2016')\n";
+        assert_eq!(normalized(source), String::from_utf8_lossy(source));
+    }
+
+    #[test]
+    fn go_to_is_compacted_after_a_continuation_join() {
+        let source = b"GO &\n  TO 10\n";
+        let document = Document::from_bytes(source);
+        let project = ProjectContext::empty();
+        let local = analyze_file(source).unwrap();
+        let config = FormatConfig::default();
+        let analysis = document.analyze().unwrap();
+        let scopes = ScopeTree::build(&analysis);
+        let context = PassContext {
+            config: &config,
+            project: &project,
+            local: &local,
+            analysis: &analysis,
+            scopes: &scopes,
+        };
+        let declared_names = crate::analysis::scoped_declared_names(&analysis, &scopes);
+        assert_eq!(
+            super::respace_joined(b"GO TO 10", &context, &declared_names, 0),
+            b"goto 10"
+        );
+    }
+
+    #[test]
+    fn post_f2008_keywords_are_lowercased_and_spaced() {
+        let source = b"IMPURE  ELEMENTAL FUNCTION f(x)\n\
+PURE   ELEMENTAL SUBROUTINE s\n\
+CONTIGUOUS :: x\n\
+CRITICAL(STAT = istat)\n\
+CHANGE   TEAM(newteam)\n\
+SELECT  RANK(a)\n\
+RANK  DEFAULT\n\
+FORM  TEAM(n, team, STAT=istat)\n\
+SYNC  ALL(STAT=istat)\n\
+SYNC   TEAM(team)\n\
+EVENT  POST(event)\n\
+EVENT WAIT(event, UNTIL_COUNT =n)\n\
+FAIL  IMAGE\n\
+LOCK(lockvar, ACQUIRED_LOCK = acquired)\n\
+UNLOCK(lockvar)\n\
+DO  CONCURRENT(i=1:n) LOCAL_INIT(x) SHARED(y) REDUCE(+:z)\n";
+        assert_eq!(
+            normalized(source),
+            "impure elemental function f(x)\n\
+pure elemental subroutine s\n\
+contiguous :: x\n\
+critical(stat=istat)\n\
+change team (newteam)\n\
+select rank (a)\n\
+rank default\n\
+form team (n, team, stat=istat)\n\
+sync all(stat=istat)\n\
+sync team (team)\n\
+event post(event)\n\
+event wait(event, until_count=n)\n\
+fail image\n\
+lock(lockvar, acquired_lock=acquired)\n\
+unlock(lockvar)\n\
+do concurrent(i=1:n) local_init(x) shared(y) reduce(+:z)\n"
+        );
     }
 
     #[test]
@@ -2371,7 +2436,7 @@ WRITE( UNIT = 1 , FMT = 2 )'x'\n";
     }
 
     #[test]
-    fn dimension_and_write_output_spacing_matches_the_reference_shape() {
+    fn dimension_and_write_output_spacing_matches_expected_shape() {
         let source = b"integer, dimension (:) :: values\nwrite(*, *)'Warning...'\nwrite(unit, '(1I6,4E15.6)')il, value\nwrite(unit, '(1I6,4E15.6)')\nwrite(unit, '(1I6,4E15.6)') &\nwrite(unit, '(1I6,4E15.6)' ) ! no output item\nprint *, \"write(*)'literal'\"\n! write(*)'comment'\n";
         assert_eq!(
             normalized(source),
