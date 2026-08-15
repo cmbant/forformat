@@ -8,6 +8,12 @@ pub enum FormatError {
     Write(std::io::Error),
 }
 
+impl FormatError {
+    pub fn is_broken_pipe(&self) -> bool {
+        matches!(self, Self::Write(error) if error.kind() == std::io::ErrorKind::BrokenPipe)
+    }
+}
+
 impl fmt::Display for FormatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

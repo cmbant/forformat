@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 from pathlib import Path
 
 from setuptools import setup
@@ -24,23 +25,59 @@ def cargo_version() -> str:
     return match.group(1)
 
 
+def _release_directory() -> Path:
+    target_dir = Path(os.environ.get("CARGO_TARGET_DIR", "target"))
+    if not target_dir.is_absolute():
+        target_dir = ROOT / target_dir
+    target = os.environ.get("CARGO_BUILD_TARGET")
+    if target:
+        target_dir /= target
+    return target_dir / "release"
+
+
+def _build_release_binary() -> Path:
+    cargo = os.environ.get("CARGO") or "cargo"
+    command = [cargo, "build", "--locked", "--release"]
+    target = os.environ.get("CARGO_BUILD_TARGET")
+    if target:
+        command.extend(("--target", target))
+    try:
+        subprocess.run(command, cwd=ROOT, check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError(
+            "could not build the forformat release binary with Cargo. "
+            "Install Rust and Cargo, or set FORFORMAT_BINARY to a prebuilt executable."
+        ) from exc
+    return _release_directory()
+
+
 def binary_path() -> Path:
     configured = os.environ.get("FORFORMAT_BINARY")
-    candidates = [Path(configured)] if configured else []
-    candidates.extend(
-        ROOT / path
-        for path in (
-            "target/release/forformat",
-            "target/release/forformat.exe",
+    if configured:
+        candidate = Path(configured)
+        if candidate.is_file():
+            return candidate
+        raise RuntimeError(
+            f"FORFORMAT_BINARY does not point to a file: {candidate}. "
+            "Set it to a prebuilt executable or unset it to build with Cargo."
         )
-    )
+
+    release_directory = _release_directory()
+    candidates = [release_directory / name for name in ("forformat", "forformat.exe")]
     for candidate in candidates:
         if candidate.is_file():
             return candidate
+
+    release_directory = _build_release_binary()
+    candidates = [release_directory / name for name in ("forformat", "forformat.exe")]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+
     searched = ", ".join(str(candidate) for candidate in candidates)
     raise RuntimeError(
-        "forformat wheel builds require a prebuilt release binary; "
-        f"searched {searched}. Run `cargo build --locked --release` first or set FORFORMAT_BINARY."
+        "Cargo completed but did not produce a forformat release binary; "
+        f"searched {searched}. Install Rust and Cargo, or set FORFORMAT_BINARY to a prebuilt executable."
     )
 
 

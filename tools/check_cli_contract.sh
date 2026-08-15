@@ -49,6 +49,18 @@ test "$("$binary" --version)" = "forformat $version"
 test "$(printf '' | "$binary" --last-indent)" = 0
 test "$(printf 'program p\n' | "$binary" --last-usable)" = 1
 
+broken_pipe_source="$contract_tmp/broken_pipe.f90"
+for _ in {1..20000}; do
+    printf 'x = 1\n'
+done >"$broken_pipe_source"
+set +e
+"$binary" --stdout "$broken_pipe_source" 2>"$contract_tmp/broken_pipe.stderr" |
+    head -n 1 >"$contract_tmp/broken_pipe.stdout"
+pipe_status=${PIPESTATUS[0]}
+set -e
+test "$pipe_status" -eq 0
+test ! -s "$contract_tmp/broken_pipe.stderr"
+
 set +e
 "$binary" -ifree < tests/fixtures/legacy_free_matrix.f90 | head -c 1 >/dev/null
 pipe_status=${PIPESTATUS[0]}

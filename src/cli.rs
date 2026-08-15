@@ -27,6 +27,77 @@ pub struct Invocation {
     pub isolated: bool,
     pub check: bool,
     pub diff: bool,
+    /// Patterns from `--exclude`, which *replaces* [`DEFAULT_EXCLUDES`] rather
+    /// than adding to it. `None` means the option was never given.
+    pub exclude: Option<Vec<String>>,
+    /// Patterns from `--extend-exclude`, added to whichever set `exclude`
+    /// selected.
+    pub extend_exclude: Vec<String>,
+}
+
+/// Sources excluded when no `--exclude` is given.
+///
+/// This is empty on purpose. Ruff and black need opinionated defaults because
+/// they walk the filesystem and would otherwise descend into `.venv` and
+/// friends; forformat selects files with `git ls-files`, so a file only reaches
+/// the formatter because someone chose to track it. Skipping a tracked source
+/// by default would contradict what `--all` says it does.
+///
+/// The layering is still modelled, so a default added here would behave the way
+/// the two options are documented: `--exclude` drops it, `--extend-exclude`
+/// keeps it.
+pub const DEFAULT_EXCLUDES: &[&str] = &[];
+
+impl Invocation {
+    /// The exclusion patterns actually in force.
+    ///
+    /// `--exclude` replaces the defaults and `--extend-exclude` adds to
+    /// whichever set survived that, matching how ruff and black layer the same
+    /// pair of options.
+    pub fn exclude_patterns(&self) -> Vec<String> {
+        let base = match self.exclude.as_deref() {
+            Some(patterns) => patterns.to_vec(),
+            None => DEFAULT_EXCLUDES.iter().map(|s| s.to_string()).collect(),
+        };
+        base.into_iter()
+            .chain(self.extend_exclude.iter().cloned())
+            .collect()
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct ConfigSelection {
+    no_config: bool,
+    explicit: Vec<String>,
+}
+
+impl ConfigSelection {
+    fn resolve(&self) -> Result<(bool, Option<PathBuf>), FormatError> {
+        let mut explicit = None;
+        for path in &self.explicit {
+            if path.is_empty() || path.starts_with('-') {
+                return Err(FormatError::InvalidOption(
+                    "--config requires a path".to_string(),
+                ));
+            }
+            if explicit.replace(PathBuf::from(path)).is_some() {
+                return Err(FormatError::InvalidOption(
+                    "--config may be specified only once".to_string(),
+                ));
+            }
+        }
+        if self.no_config && explicit.is_some() {
+            return Err(FormatError::InvalidOption(
+                "--config cannot be combined with --no-config".to_string(),
+            ));
+        }
+        Ok((self.no_config, explicit))
+    }
+}
+
+struct ParsedCommand {
+    command: Command,
+    config_selection: ConfigSelection,
 }
 
 pub fn parse<I>(args: I) -> Result<Command, FormatError>
@@ -36,19 +107,30 @@ where
 {
     let args: Vec<String> = args.into_iter().collect();
     let preliminary = parse_inner(args.clone())?;
-    if matches!(preliminary, Command::Help | Command::Version) {
-        return Ok(preliminary);
+    if matches!(preliminary.command, Command::Help | Command::Version) {
+        return Ok(preliminary.command);
     }
-    let (no_config, explicit_config) = config_selection(&args)?;
-    let config_args = if no_config {
+    let (no_config, explicit_config) = preliminary.config_selection.resolve()?;
+    let mut config_args = if no_config {
         Vec::new()
     } else {
         let cwd = std::env::current_dir().map_err(|error| {
             FormatError::InvalidOption(format!("cannot determine current directory: {error}"))
         })?;
-        let start = config_start(&preliminary, &cwd);
+        let start = config_start(&preliminary.command, &cwd);
         crate::config::config_args(&start, explicit_config.as_deref())?
     };
+    // Config args are merged by prepending them to argv, which makes the
+    // command line win for scalar options and accumulate for repeatable ones.
+    // `--exclude` must not accumulate: it selects a set rather than adding to
+    // one, so giving it on the command line discards the config file's
+    // `exclude` the way it discards the built-in defaults. `--extend-exclude`
+    // is the additive spelling and keeps accumulating. `preliminary` is a parse
+    // of the command line alone, so it answers "was `--exclude` given there?"
+    // using the real option grammar rather than a second-guessing rescan.
+    if matches!(&preliminary.command, Command::Run(invocation) if invocation.exclude.is_some()) {
+        config_args.retain(|arg| !arg.starts_with("--exclude="));
+    }
     let mut combined = Vec::with_capacity(1 + config_args.len() + args.len());
     combined.push(
         args.first()
@@ -57,7 +139,7 @@ where
     );
     combined.extend(config_args);
     combined.extend(args.into_iter().skip(1));
-    parse_inner(combined)
+    Ok(parse_inner(combined)?.command)
 }
 
 fn config_start(command: &Command, cwd: &Path) -> PathBuf {
@@ -76,66 +158,7 @@ fn config_start(command: &Command, cwd: &Path) -> PathBuf {
     cwd.to_path_buf()
 }
 
-fn config_selection(args: &[String]) -> Result<(bool, Option<PathBuf>), FormatError> {
-    let mut no_config = false;
-    let mut explicit = None;
-    let mut options_ended = false;
-    let mut values = args.iter().skip(1);
-    while let Some(arg) = values.next() {
-        if arg == "--" {
-            options_ended = true;
-            continue;
-        }
-        if options_ended {
-            continue;
-        }
-        let Some(long) = arg.strip_prefix("--") else {
-            continue;
-        };
-        let (name, inline_value) = match long.split_once('=') {
-            Some((name, value)) => (name, Some(value)),
-            None => (long, None),
-        };
-        let name = name.replace('_', "-").to_ascii_lowercase();
-        if name == "no-config" {
-            no_config = true;
-        } else if name == "config" && inline_value.is_some() {
-            let path = inline_value.unwrap();
-            if path.is_empty() {
-                return Err(FormatError::InvalidOption(
-                    "--config requires a path".to_string(),
-                ));
-            }
-            if explicit.replace(PathBuf::from(path)).is_some() {
-                return Err(FormatError::InvalidOption(
-                    "--config may be specified only once".to_string(),
-                ));
-            }
-        } else if name == "config" {
-            let path = values.next().ok_or_else(|| {
-                FormatError::InvalidOption("--config requires a path".to_string())
-            })?;
-            if path.is_empty() || path.starts_with('-') {
-                return Err(FormatError::InvalidOption(
-                    "--config requires a path".to_string(),
-                ));
-            }
-            if explicit.replace(PathBuf::from(path)).is_some() {
-                return Err(FormatError::InvalidOption(
-                    "--config may be specified only once".to_string(),
-                ));
-            }
-        }
-    }
-    if no_config && explicit.is_some() {
-        return Err(FormatError::InvalidOption(
-            "--config cannot be combined with --no-config".to_string(),
-        ));
-    }
-    Ok((no_config, explicit))
-}
-
-fn parse_inner<I>(args: I) -> Result<Command, FormatError>
+fn parse_inner<I>(args: I) -> Result<ParsedCommand, FormatError>
 where
     I: IntoIterator<Item = String>,
     I::IntoIter: Iterator<Item = String>,
@@ -143,6 +166,7 @@ where
     let mut a = args.into_iter();
     let _program = a.next();
     let mut c = FormatConfig::default();
+    let mut config_selection = ConfigSelection::default();
     let mut help = false;
     let mut version = false;
     let mut options_ended = false;
@@ -154,6 +178,8 @@ where
     let mut isolated = false;
     let mut check = false;
     let mut diff = false;
+    let mut exclude: Option<Vec<String>> = None;
+    let mut extend_exclude = Vec::new();
     while let Some(arg) = a.next() {
         if arg == "--" {
             options_ended = true;
@@ -224,9 +250,10 @@ where
             };
             match name.as_str() {
                 "config" => {
-                    let _ = need(&mut value, &mut a)?;
+                    let path = need(&mut value, &mut a)?;
+                    config_selection.explicit.push(path);
                 }
-                "no-config" => {}
+                "no-config" => config_selection.no_config = true,
                 "indent" => {
                     let v = need(&mut value, &mut a)?;
                     if v == "none" {
@@ -299,6 +326,19 @@ where
                 "isolated" => isolated = true,
                 "check" => check = true,
                 "diff" => diff = true,
+                "exclude" | "extend-exclude" => {
+                    let pattern = need(&mut value, &mut a)?;
+                    if pattern.is_empty() {
+                        return Err(FormatError::InvalidOption(format!(
+                            "--{name} requires a non-empty glob"
+                        )));
+                    }
+                    if name == "exclude" {
+                        exclude.get_or_insert_with(Vec::new).push(pattern);
+                    } else {
+                        extend_exclude.push(pattern);
+                    }
+                }
                 // Mode selection.  `indent-only` must be matched before the
                 // generic `indent-*` construct arm below, which would otherwise
                 // read it as a construct name.
@@ -476,7 +516,7 @@ where
                 }
                 'R' => {
                     c.refactor_end = true;
-                    c.uppercase_end = value == "R" || value == "r" && arg == "-RR"
+                    c.uppercase_end = value == "R"
                 }
                 _ => return Err(FormatError::InvalidOption(arg)),
             }
@@ -531,21 +571,32 @@ where
         ));
     }
     if help {
-        Ok(Command::Help)
+        Ok(ParsedCommand {
+            command: Command::Help,
+            config_selection,
+        })
     } else if version {
-        Ok(Command::Version)
+        Ok(ParsedCommand {
+            command: Command::Version,
+            config_selection,
+        })
     } else {
-        Ok(Command::Run(Box::new(Invocation {
-            config: c,
-            paths,
-            project_context,
-            all,
-            stdin,
-            stdout,
-            isolated,
-            check,
-            diff,
-        })))
+        Ok(ParsedCommand {
+            command: Command::Run(Box::new(Invocation {
+                config: c,
+                paths,
+                project_context,
+                all,
+                stdin,
+                stdout,
+                isolated,
+                check,
+                diff,
+                exclude,
+                extend_exclude,
+            })),
+            config_selection,
+        })
     }
 }
 
@@ -595,6 +646,8 @@ fn single_dash_long_option_suggestion(arg: &str) -> Option<String> {
             | "check"
             | "config"
             | "diff"
+            | "exclude"
+            | "extend-exclude"
             | "full"
             | "include-left"
             | "indent-ampersand"
@@ -714,6 +767,8 @@ Free-form Fortran formatter.\n\
   --isolated                          do not scan repository sources for case resolution\n\
   --check                             exit 1 if selected files would change\n\
   --diff                              print unified diffs and exit 1 if changed\n\
+  --exclude=<glob>                    exclude tracked sources from --all and project scanning (repeatable)\n\
+  --extend-exclude=<glob>             add to the exclusions instead of replacing them (repeatable)\n\
   Query modes cannot be combined with path-update, --check, or --diff.\n\
   --indent-only                      findent-compatible indentation only\n\
   --full                             full formatting: normalization and wrapping (default)\n\
@@ -731,7 +786,7 @@ Fixed-form input/output and automatic format detection are intentionally unsuppo
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, Command};
+    use super::{parse, parse_inner, Command, DEFAULT_EXCLUDES};
     use std::path::PathBuf;
 
     fn run(args: &[&str]) -> crate::config::FormatConfig {
@@ -740,6 +795,83 @@ mod tests {
         match parse(argv).unwrap() {
             Command::Run(invocation) => invocation.config,
             _ => panic!("expected a formatting command"),
+        }
+    }
+
+    fn selection(args: &[&str]) -> Result<(bool, Option<PathBuf>), crate::error::FormatError> {
+        let mut argv = vec!["forformat".to_string()];
+        argv.extend(args.iter().map(|arg| (*arg).to_string()));
+        parse_inner(argv).and_then(|parsed| parsed.config_selection.resolve())
+    }
+
+    #[test]
+    fn config_selection_uses_the_parser_value_grammar() {
+        let consumed = parse_inner([
+            "forformat".to_string(),
+            "-D".to_string(),
+            "--config".to_string(),
+            "foo.toml".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(consumed.config_selection.resolve().unwrap(), (false, None));
+        match consumed.command {
+            Command::Run(invocation) => {
+                assert_eq!(invocation.config.defines[0].name, "--config");
+                assert_eq!(invocation.paths, [PathBuf::from("foo.toml")]);
+            }
+            _ => panic!("expected run"),
+        }
+
+        assert_eq!(
+            selection(&["-D", "VALUE", "--config", "foo.toml"]).unwrap(),
+            (false, Some(PathBuf::from("foo.toml")))
+        );
+        assert_eq!(selection(&["--define=--config"]).unwrap(), (false, None));
+        assert_eq!(selection(&["-D", "--no-config"]).unwrap(), (false, None));
+    }
+
+    #[test]
+    fn config_selection_preserves_spellings_conflicts_and_termination() {
+        assert_eq!(
+            selection(&["--config=path.toml"]).unwrap(),
+            (false, Some(PathBuf::from("path.toml")))
+        );
+        assert_eq!(
+            selection(&["--config", "path.toml"]).unwrap(),
+            (false, Some(PathBuf::from("path.toml")))
+        );
+        assert_eq!(selection(&["--no-config"]).unwrap(), (true, None));
+
+        assert!(matches!(
+            selection(&["--config=one.toml", "--config=two.toml"]),
+            Err(crate::error::FormatError::InvalidOption(message))
+                if message == "--config may be specified only once"
+        ));
+        assert!(matches!(
+            selection(&["--no-config", "--config=path.toml"]),
+            Err(crate::error::FormatError::InvalidOption(message))
+                if message == "--config cannot be combined with --no-config"
+        ));
+
+        let terminated = parse_inner([
+            "forformat".to_string(),
+            "--".to_string(),
+            "--config".to_string(),
+            "foo.toml".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            terminated.config_selection.resolve().unwrap(),
+            (false, None)
+        );
+        match terminated.command {
+            Command::Run(invocation) => {
+                assert_eq!(
+                    invocation.paths,
+                    [PathBuf::from("--config"), PathBuf::from("foo.toml")]
+                );
+            }
+            _ => panic!("expected run"),
         }
     }
 
@@ -1009,6 +1141,70 @@ mod tests {
         assert_eq!(names, ["FIRST", "Second", "Third"]);
         assert_eq!(config.defines[1].value.as_deref(), Some("2"));
         assert_eq!(config.defines[0].value, None);
+    }
+
+    #[test]
+    fn exclude_accepts_repeatable_separated_and_normalized_spellings() {
+        let mut argv = vec!["forformat".to_string()];
+        argv.extend(
+            [
+                "--no-config",
+                "--exclude=vendor/**",
+                "--exclude",
+                "generated/",
+            ]
+            .iter()
+            .map(|arg| (*arg).to_string()),
+        );
+        let Command::Run(invocation) = parse(argv).unwrap() else {
+            panic!("expected a formatting command");
+        };
+        assert_eq!(invocation.exclude_patterns(), ["vendor/**", "generated/"]);
+
+        let Command::Run(invocation) = parse(
+            ["forformat", "--no_config", "--EXCLUDE=vendor/**"]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap() else {
+            panic!("expected a formatting command");
+        };
+        assert_eq!(invocation.exclude_patterns(), ["vendor/**"]);
+    }
+
+    #[test]
+    fn extend_exclude_adds_to_the_set_exclude_selects() {
+        let run = |args: &[&str]| {
+            let argv = std::iter::once("forformat")
+                .chain(args.iter().copied())
+                .map(str::to_owned);
+            let Command::Run(invocation) = parse(argv).unwrap() else {
+                panic!("expected a formatting command");
+            };
+            invocation
+        };
+
+        // With no `--exclude`, the defaults stand and `--extend-exclude` adds
+        // to them.
+        let invocation = run(&["--no-config", "--extend-exclude=generated/"]);
+        assert!(invocation.exclude.is_none());
+        assert_eq!(invocation.extend_exclude, ["generated/"]);
+        assert_eq!(
+            invocation.exclude_patterns(),
+            DEFAULT_EXCLUDES
+                .iter()
+                .map(|s| (*s).to_string())
+                .chain(["generated/".to_string()])
+                .collect::<Vec<_>>()
+        );
+
+        // `--exclude` replaces the defaults; the two options compose.
+        let invocation = run(&[
+            "--no-config",
+            "--exclude=vendor/",
+            "--extend_exclude=generated/",
+        ]);
+        assert_eq!(invocation.exclude_patterns(), ["vendor/", "generated/"]);
     }
 
     #[test]

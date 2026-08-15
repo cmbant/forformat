@@ -279,6 +279,49 @@ fn set_comment_column(
     *updated.get_mut(line_index).expect("run line in range") = line;
 }
 
+/// The separator step 18 still owes the next line of code.
+///
+/// The two owed separators differ in what they do to blank lines the author
+/// already wrote.  After `contains` the separator is exactly one line, which is
+/// the long-standing behaviour.  After a program-unit `end` the separator is a
+/// floor rather than a value: an author who put two blank lines between two
+/// procedures keeps both, because that is a deliberate spacing choice and step
+/// 19 permits runs of two everywhere else in the file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Pending {
+    #[default]
+    None,
+    Exactly,
+    AtLeast {
+        authored: usize,
+    },
+}
+
+impl Pending {
+    fn is_owed(self) -> bool {
+        self != Self::None
+    }
+
+    fn count_authored_blank(&mut self) {
+        if let Self::AtLeast { authored } = self {
+            *authored += 1;
+        }
+    }
+
+    /// How many blank lines to emit, once the separator is consumed.
+    ///
+    /// `MAX_SEPARATOR` matches the cap step 19 applies to every other blank
+    /// run, so the two passes cannot disagree and the result is a fixed point.
+    fn width(self) -> usize {
+        const MAX_SEPARATOR: usize = 2;
+        match self {
+            Self::None => 0,
+            Self::Exactly => 1,
+            Self::AtLeast { authored } => authored.clamp(1, MAX_SEPARATOR),
+        }
+    }
+}
+
 /// Step 18: blank-line policy around program units and `CONTAINS`.
 ///
 /// Port target: `normalize_program_unit_spacing`.
@@ -291,20 +334,22 @@ pub fn program_unit_spacing(
     let mut unit_depth = 0usize;
     let mut type_depth = 0usize;
     let mut interface_depth = 0usize;
-    let mut add_blank_before_next = false;
+    let mut pending = Pending::default();
     let mut cpp_continuation = false;
 
     for line in &document.lines {
         let cpp_line = cpp_continuation || is_preprocessor_line(line);
         if cpp_line {
-            if add_blank_before_next && !cpp_continuation {
+            if pending.is_owed() && !cpp_continuation {
                 if normalized
                     .last()
                     .is_some_and(|previous: &Vec<u8>| !previous.iter().all(u8::is_ascii_whitespace))
                 {
-                    normalized.push(Vec::new());
+                    for _ in 0..pending.width() {
+                        normalized.push(Vec::new());
+                    }
                 }
-                add_blank_before_next = false;
+                pending = Pending::None;
             }
             normalized.push(line.clone());
             cpp_continuation = cpp_line_continues(line);
@@ -314,12 +359,15 @@ pub fn program_unit_spacing(
 
         let code = code_context(line);
         let is_blank = line.iter().all(u8::is_ascii_whitespace);
-        if add_blank_before_next {
+        if pending.is_owed() {
             if is_blank {
+                pending.count_authored_blank();
                 continue;
             }
-            normalized.push(Vec::new());
-            add_blank_before_next = false;
+            for _ in 0..pending.width() {
+                normalized.push(Vec::new());
+            }
+            pending = Pending::None;
         }
 
         if is_blank
@@ -337,8 +385,13 @@ pub fn program_unit_spacing(
             type_depth += 1;
         }
 
-        let is_end = interface_depth == 0 && is_program_unit_end(code);
-        let is_header = !is_end && (scope_header(code) || is_module_declaration(code));
+        let is_end = interface_depth == 0
+            && is_program_unit_end(code)
+            && !(type_depth > 0 && is_procedure_end(code));
+        let is_header = !is_end
+            && (scope_header(code)
+                || is_module_declaration(code)
+                || (type_depth == 0 && is_module_procedure_header(code)));
         if interface_depth == 0 && is_header {
             unit_depth += 1;
         }
@@ -358,9 +411,12 @@ pub fn program_unit_spacing(
 
         normalized.push(line.clone());
         if is_contains {
-            add_blank_before_next = true;
+            pending = Pending::Exactly;
         }
         if is_end {
+            // The pending separator is consumed only by a following line; at
+            // EOF it remains unused, so no trailing blank line is introduced.
+            pending = Pending::AtLeast { authored: 0 };
             unit_depth = unit_depth.saturating_sub(1);
         }
         if is_interface_end(code) {
@@ -704,14 +760,32 @@ fn is_program_unit_end(code: &[u8]) -> bool {
     {
         return false;
     }
-    matches!(
-        first_word(&code[4..]),
-        Some(word)
-            if word.eq_ignore_ascii_case(b"module")
-                || word.eq_ignore_ascii_case(b"program")
-                || word.eq_ignore_ascii_case(b"function")
-                || word.eq_ignore_ascii_case(b"subroutine")
-    )
+    let rest = skip_ascii_whitespace(&code[4..]);
+    let Some(word) = first_word(rest) else {
+        return false;
+    };
+    if word.eq_ignore_ascii_case(b"block") {
+        let rest = skip_ascii_whitespace(&rest[word.len()..]);
+        return first_word(rest).is_some_and(|second| second.eq_ignore_ascii_case(b"data"));
+    }
+    word.eq_ignore_ascii_case(b"module")
+        || word.eq_ignore_ascii_case(b"submodule")
+        || word.eq_ignore_ascii_case(b"program")
+        || word.eq_ignore_ascii_case(b"function")
+        || word.eq_ignore_ascii_case(b"subroutine")
+        || word.eq_ignore_ascii_case(b"procedure")
+}
+
+fn is_procedure_end(code: &[u8]) -> bool {
+    let code = trimmed(code);
+    if !code
+        .get(..3)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"end"))
+    {
+        return false;
+    }
+    let rest = skip_ascii_whitespace(&code[3..]);
+    first_word(rest).is_some_and(|word| word.eq_ignore_ascii_case(b"procedure"))
 }
 
 fn is_type_definition_end(code: &[u8]) -> bool {
@@ -763,6 +837,20 @@ fn is_module_declaration(code: &[u8]) -> bool {
         && !word.eq_ignore_ascii_case(b"function")
 }
 
+fn is_module_procedure_header(code: &[u8]) -> bool {
+    let code = trimmed(code);
+    if !word_is(code, b"module") {
+        return false;
+    }
+    let first_len = first_word(code).map_or(0, <[u8]>::len);
+    let rest = skip_ascii_whitespace(&code[first_len..]);
+    first_word(rest).is_some_and(|word| {
+        word.eq_ignore_ascii_case(b"procedure")
+            || word.eq_ignore_ascii_case(b"subroutine")
+            || word.eq_ignore_ascii_case(b"function")
+    })
+}
+
 fn scope_header(code: &[u8]) -> bool {
     let code = code_context(code);
     let tokens = scanner::tokens(code);
@@ -770,11 +858,29 @@ fn scope_header(code: &[u8]) -> bool {
         (pair[0].text.eq_ignore_ascii_case(b"function")
             || pair[0].text.eq_ignore_ascii_case(b"subroutine")
             || pair[0].text.eq_ignore_ascii_case(b"program"))
-            && pair[1]
-                .text
-                .first()
-                .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+            && is_name_token(pair[1].text)
+    }) || tokens.windows(2).enumerate().any(|(index, pair)| {
+        if !pair[0].text.eq_ignore_ascii_case(b"submodule")
+            || !pair[1].text.eq_ignore_ascii_case(b"(")
+        {
+            return false;
+        }
+        let Some(close) = tokens[index + 2..]
+            .iter()
+            .position(|token| token.text == b")")
+        else {
+            return false;
+        };
+        tokens
+            .get(index + 2 + close + 1)
+            .is_some_and(|token| is_name_token(token.text))
     })
+}
+
+fn is_name_token(token: &[u8]) -> bool {
+    token
+        .first()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
 }
 
 /// Step 20: trailing horizontal whitespace and the final newline.
@@ -1117,6 +1223,117 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_program_units_have_one_blank_line_and_are_idempotent() {
+        for (source, expected) in [
+            (
+                b"function f\nend function f\nsubroutine s\nend subroutine s\n".as_slice(),
+                b"function f\n\nend function f\n\nsubroutine s\n\nend subroutine s\n".as_slice(),
+            ),
+            (
+                b"subroutine f\nend subroutine f\nsubroutine s\nend subroutine s\n".as_slice(),
+                b"subroutine f\n\nend subroutine f\n\nsubroutine s\n\nend subroutine s\n"
+                    .as_slice(),
+            ),
+            (
+                b"module m\nend module m\nprogram p\nend program p\n".as_slice(),
+                b"module m\n\nend module m\n\nprogram p\n\nend program p\n".as_slice(),
+            ),
+        ] {
+            let once = apply_all(source);
+            assert_eq!(once, expected);
+            assert_eq!(apply_all(&once), once);
+        }
+    }
+
+    #[test]
+    fn a_unit_separator_is_a_floor_of_one_and_a_cap_of_two() {
+        // Authored spacing between program units survives up to step 19's
+        // two-line cap; only the absence of a separator is corrected.
+        for (authored, expected) in [(0, 1), (1, 1), (2, 2), (3, 2), (5, 2)] {
+            let mut source = b"module m\nend module m\n".to_vec();
+            source.extend(std::iter::repeat_n(b'\n', authored));
+            source.extend_from_slice(b"program p\nend program p\n");
+
+            let once = apply_all(&source);
+            let mut separator = b"end module m\n".to_vec();
+            separator.extend(std::iter::repeat_n(b'\n', expected));
+            separator.extend_from_slice(b"program p");
+            assert!(
+                once.windows(separator.len()).any(|w| w == separator),
+                "{authored} authored blank lines should settle at {expected}, got:\n{}",
+                String::from_utf8_lossy(&once)
+            );
+            assert_eq!(apply_all(&once), once, "{authored} authored blank lines");
+        }
+    }
+
+    #[test]
+    fn a_contains_separator_stays_exactly_one_line() {
+        // `contains` keeps its long-standing collapsing behaviour; only the
+        // program-unit `end` separator preserves authored spacing.
+        let source = b"module m\ncontains\n\n\n\nsubroutine s\nend subroutine s\nend module m\n";
+        let once = apply_all(source);
+        assert!(once
+            .windows(b"contains\n\nsubroutine s".len())
+            .any(|w| w == b"contains\n\nsubroutine s"));
+        assert_eq!(apply_all(&once), once);
+    }
+
+    #[test]
+    fn a_comment_after_a_unit_end_opens_the_next_unit() {
+        // The separator lands before the comment, not after it: a comment
+        // written flush against an `end` almost always introduces what
+        // follows.  This is the same rule the `contains` separator uses.
+        let source =
+            b"function f\nend function f\n! trailing note\nsubroutine s\nend subroutine s\n";
+        let expected =
+            b"function f\n\nend function f\n\n! trailing note\nsubroutine s\n\nend subroutine s\n";
+        let once = apply_all(source);
+        assert_eq!(once, expected);
+        assert_eq!(apply_all(&once), once);
+    }
+
+    #[test]
+    fn submodules_and_separate_module_procedures_share_unit_spacing() {
+        let source = b"submodule (p) c\ncontains\nmodule procedure binding\nx = 1\nend procedure binding\nend submodule c\nsubmodule (p:gp) c2\ncontains\nmodule procedure binding\nx = 1\nend procedure binding\nend submodule c2\nmodule equivalent\ncontains\nsubroutine binding\nx = 1\nend subroutine binding\nend module equivalent\n";
+        let once = apply_all(source);
+        assert_eq!(apply_all(&once), once);
+        for (header, end) in [
+            (
+                b"submodule (p) c\n\ncontains\n\nmodule procedure binding".as_slice(),
+                b"end procedure binding\n\nend submodule c".as_slice(),
+            ),
+            (
+                b"submodule (p:gp) c2\n\ncontains\n\nmodule procedure binding".as_slice(),
+                b"end procedure binding\n\nend submodule c2".as_slice(),
+            ),
+            (
+                b"module equivalent\n\ncontains\n\nsubroutine binding".as_slice(),
+                b"end subroutine binding\n\nend module equivalent".as_slice(),
+            ),
+        ] {
+            assert!(once.windows(header.len()).any(|window| window == header));
+            assert!(once.windows(end.len()).any(|window| window == end));
+        }
+    }
+
+    #[test]
+    fn procedure_ends_in_interfaces_and_types_do_not_consume_the_host_unit() {
+        let source = b"module interface_host\ninterface\nmodule procedure p\nend procedure p\nend interface\ncontains\nsubroutine s\nend subroutine s\nend module interface_host\nmodule type_host\ntype :: t\ncontains\nprocedure :: p\nend procedure p\nend type t\ncontains\nsubroutine s\nend subroutine s\nend module type_host\nblock data b\ncommon /b/ x\nend block data b\n";
+        let output = apply_all(source);
+        assert_eq!(apply_all(&output), output);
+        for expected in [
+            b"end procedure p\nend interface\n\ncontains".as_slice(),
+            b"end procedure p\nend type t\n\ncontains".as_slice(),
+            b"common /b/ x\n\nend block data b".as_slice(),
+        ] {
+            assert!(output
+                .windows(expected.len())
+                .any(|window| window == expected));
+        }
+    }
+
+    #[test]
     fn module_interfaces_are_limited_to_one_blank_line() {
         let source = b"module demo\n\n\ninterface\n\n\nend interface\n\n\ncontains\nsubroutine work\nend subroutine work\nend module demo\n";
         let output = apply_all(source);
@@ -1148,8 +1365,8 @@ mod tests {
         let source = b"subroutine first\ninteger :: value\nvalue = 1\nend\nsubroutine second\ninteger :: value\nvalue = 2\nend\n";
         let output = apply_all(source);
         assert!(output
-            .windows(b"value = 1\n\nend\nsubroutine second".len())
-            .any(|w| w == b"value = 1\n\nend\nsubroutine second"));
+            .windows(b"value = 1\n\nend\n\nsubroutine second".len())
+            .any(|w| w == b"value = 1\n\nend\n\nsubroutine second"));
     }
 
     #[test]

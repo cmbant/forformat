@@ -84,7 +84,18 @@ Python project's `pyproject.toml`. Keys use the same names as the long command-l
 indent = 4
 line-length = 100
 align-paren = true
+exclude = ["vendor/"]
+extend-exclude = ["**/generated-*.f90"]
 ```
+
+`--exclude=<glob>` is repeatable and applies to automatic `--all` targets and tracked project
+context. Explicit paths are always formatted. The default exclusion set is empty. `exclude`
+selects the set, so `--exclude` on the command line replaces the configured `exclude`;
+`--extend-exclude=<glob>` and the `extend-exclude` key add to whatever is already in force.
+Patterns use
+`*` within one path component, `**` across components, `?` for one non-separator character, and a
+trailing `/` for a directory prefix. A leading `/` anchors at the repository root; otherwise the
+pattern is unanchored at path-component boundaries. Paths are matched with `/` separators.
 
 Command-line options override project settings. `--config PATH` selects a specific file and
 `--no-config` disables configuration discovery.

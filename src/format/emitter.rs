@@ -1,6 +1,6 @@
 use super::continuation::leading_ampersand;
 use crate::{
-    config::FormatConfig,
+    config::{FormatConfig, FormatMode},
     error::FormatError,
     source::{Newline, PhysicalLineKind, SourceBuffer},
 };
@@ -234,7 +234,6 @@ pub fn emit_line_to_with_quote<W: Write>(
         out.write_all(b" ").map_err(FormatError::Write)?;
     }
 
-    let remred = style.remred;
     if first && !(previous_cont && is_label_fragment(source)) {
         if let Some((label, rest)) = split_label(source) {
             if config.label_left {
@@ -247,28 +246,41 @@ pub fn emit_line_to_with_quote<W: Write>(
                 out.write_all(label).map_err(FormatError::Write)?;
                 out.write_all(b" ").map_err(FormatError::Write)?;
             }
-            write_body(rest, remred, quote, out)?;
+            write_body(rest, style, quote, out)?;
         } else {
             write_spaces(out, clamp_indent(target, config.max_indent))?;
-            write_body(source, remred, quote, out)?;
+            write_body(source, style, quote, out)?;
         }
     } else {
         write_spaces(out, clamp_indent(target, config.max_indent))?;
-        write_body(source, remred, quote, out)?;
+        write_body(source, style, quote, out)?;
     }
     write_newline(buf, index, out)
 }
 
 fn write_body<W: Write>(
     body: &[u8],
-    remred: bool,
+    style: &EmitStyle,
     quote: &mut u8,
     out: &mut W,
 ) -> Result<(), FormatError> {
     let body = trim_end_horizontal(body);
-    if remred {
-        crate::transform::whitespace::reduce_to_with_quote(body, quote, out)
-            .map_err(FormatError::Write)
+    if style.remred {
+        // The post-layout alignment passes that would own a protected gap
+        // (`declaration_separator_alignment`, `trailing_comment_alignment`)
+        // only run in full mode: indent-only reaches this same emitter
+        // through `engine::format` without ever running them. Protecting the
+        // gap there would leave it un-owned and un-collapsed, breaking the
+        // byte-exact indent-only contract.
+        let alignment_runs_after = style.config.mode == FormatMode::Full;
+        crate::transform::whitespace::reduce_to_with_quote_protected(
+            body,
+            quote,
+            alignment_runs_after && style.config.align_declarations,
+            alignment_runs_after && style.config.align_comments,
+            out,
+        )
+        .map_err(FormatError::Write)
     } else {
         out.write_all(body).map_err(FormatError::Write)
     }
@@ -462,6 +474,69 @@ mod tests {
         assert_eq!(
             emit_line(&whitespace, 0, first(0), &EmitStyle::new(&reduced), None),
             b"x = \"a  b\"\n"
+        );
+    }
+
+    #[test]
+    fn direct_emitter_protects_declaration_and_comment_gaps_from_remred() {
+        // `--ws-remred` still applies everywhere else on the line; only the
+        // gap the corresponding alignment pass owns is left for it to decide.
+        let declaration = SourceBuffer::new(b"real(dl), intent(in)  ::   x\n").unwrap();
+        let mut reduced = FormatConfig {
+            ws_remred: true,
+            ..FormatConfig::default()
+        };
+        assert_eq!(
+            emit_line(&declaration, 0, first(0), &EmitStyle::new(&reduced), None),
+            b"real(dl), intent(in)  :: x\n"
+        );
+
+        let mut reduced_no_align = reduced.clone();
+        reduced_no_align.align_declarations = false;
+        assert_eq!(
+            emit_line(
+                &declaration,
+                0,
+                first(0),
+                &EmitStyle::new(&reduced_no_align),
+                None
+            ),
+            b"real(dl), intent(in) :: x\n"
+        );
+
+        let comment = SourceBuffer::new(b"x  =  1   ! note\n").unwrap();
+        assert_eq!(
+            emit_line(&comment, 0, first(0), &EmitStyle::new(&reduced), None),
+            b"x = 1 ! note\n"
+        );
+        reduced.align_comments = true;
+        assert_eq!(
+            emit_line(&comment, 0, first(0), &EmitStyle::new(&reduced), None),
+            b"x = 1   ! note\n"
+        );
+    }
+
+    #[test]
+    fn indent_only_remred_still_collapses_the_declaration_gap() {
+        // Indent-only reaches this emitter directly (`format::engine`) and
+        // never runs the post-layout alignment passes that would otherwise
+        // own the `::` gap. Gap protection must not apply there, or
+        // `--ws-remred` in indent-only would stop matching the byte-exact
+        // findent contract it is required to reproduce.
+        use crate::config::FormatMode;
+        let declaration = SourceBuffer::new(b"real(dl), intent(in)  :: x\n").unwrap();
+        let reduced = FormatConfig {
+            mode: FormatMode::IndentOnly,
+            ws_remred: true,
+            ..FormatConfig::default()
+        };
+        assert!(
+            reduced.align_declarations,
+            "protection is gated on mode, not this default"
+        );
+        assert_eq!(
+            emit_line(&declaration, 0, first(0), &EmitStyle::new(&reduced), None),
+            b"real(dl), intent(in) :: x\n"
         );
     }
 

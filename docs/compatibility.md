@@ -53,10 +53,6 @@ and wrapping; its reviewed differences from the reference are collected here:
   two-line `constants.f90` continuation defect is retained as an adjudicated divergence.
 - The findent-oracle and Rust agree byte-for-byte on the resolved governing-declaration cases: owner-keyed
   type-bound bindings and old-style/typed local entities.
-- Top-level program-unit parameters use file scope, and Rust applies the governing-declaration rule.
-  In particular, the bare-program BJL validation file keeps
-  `BJL_RECURRENCE_MAX_L` against the unrelated module's `BJL_recurrence_MAX_L`; the focused
-  comparison is byte-identical.
 - Conditional `!$` sentinels retain the authored sentinel boundary spacing while their Fortran-like
   body is normalized, including declaration-driven identifier casing.
 - `--ws_remred` on a valid literal leaves the literal bytes intact. A legacy heuristic can
@@ -107,28 +103,6 @@ The full `test24` parenthesis-alignment fixture set is also checked in. Its only
 is the two-line alignment of a deliberately malformed continued string whose quote state spans
 the physical group; Rust keeps the quote-aware interpretation instead of aligning parentheses
 inside that literal. The valid nested-parenthesis and label-left rows remain byte-exact.
-
-There is one intentional oracle divergence in full mode for multi-line `(/ ... /)` array
-constructors. The legacy normalizer can change the opening `(/` to `[` without reaching a closing
-`/)` on a later physical line. Rust rewrites the complete statement and emits `[ ... ]`, which is
-valid Fortran. `tests/fixtures/array_constructor_multiline.f90` pins this behavior.
-
-Comment bodies are formatted only when the narrow commented-assignment recognizer can prove that
-the text begins with a simple identifier/member (or a single non-nested parenthesized subscript)
-followed by `=`; prose, URLs, tables, directives, banners, markers, and nested/otherwise uncertain
-expressions are left alone. This is an intentional reasonable-boundary rule: the legacy normalizer
-respaces several nested or non-Fortran expressions that Rust declines, so those pairs remain an
-accepted `comment-content` divergence.
-
-OpenMP-style conditional sentinels retain their authored spacing after the `!$` marker while their
-Fortran body receives ordinary keyword and declaration-case normalization. Thus `!$  IF (X) THEN`
-becomes `!$ if (X) then`, while a declared `MyVar` is also applied inside the body. The two spaces
-collapse at the free-form sentinel boundary; protected literal, Hollerith, and CPP bytes remain
-exact.
-
-The governing declaration also resolves `DarkEnergyQuintessence.f90`: its procedure-local result
-declaration `Vofphi` (backed by the `procedure :: Vofphi` binding) governs the `VofPhi` definition
-and named END. Rust emits `Vofphi`; the legacy same-file spelling-conflict veto does not.
 
 Tests 26 and 27's legacy `doit` calls pass the human-readable case description as an option and are
 therefore not executable differential commands as written. Their direct free-form features were
@@ -197,6 +171,13 @@ intentional divergence from findent 4.3.7's legacy handling of the `Test031` mal
 There is one additional reviewed divergence: findent 4.3.7's `remred` heuristic treats the quote
 after `error stop ` as code and collapses spaces inside the valid character literal. Rust keeps the
 literal unchanged; `ws_remred_valid_literal` records this oracle defect explicitly.
+
+`--ws_remred` also diverges from legacy findent around the two column-alignment options,
+`--align-declarations` (default on) and `--align-comments` (default off): each owns the one gap it
+aligns — the whitespace before a declaration's `::` and before a trailing comment, respectively —
+and `--ws_remred` leaves that gap alone whenever the corresponding option is enabled, rather than
+collapsing it before the alignment pass sees the authored spacing. Legacy findent has no equivalent
+alignment options, so this precedence is Rust-only behavior with no oracle to diverge from.
 
 COCO (`??`) and FYPP (`#:`) directive recognition is currently retained only for safe grouping and
 branch continuation. They are not part of the first compatibility release's supported semantic

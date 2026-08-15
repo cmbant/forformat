@@ -90,6 +90,170 @@ fn all_discovers_uppercase_extensions_and_ignores_hook_git_environment() {
 }
 
 #[test]
+fn an_excluded_explicit_path_is_still_formatted() {
+    let repo = temp_repo();
+    fs::create_dir(repo.join("vendor")).unwrap();
+    let path = repo.join("vendor/source.f90");
+    fs::write(&path, b"program p\nx=1\nend program p\n").unwrap();
+    git_add(&repo);
+
+    let output = run(
+        &repo,
+        &["--indent-only", "--exclude", "vendor/", "vendor/source.f90"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"vendor/source.f90\n");
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        b"program p\n   x=1\nend program p\n"
+    );
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn an_excluded_tracked_source_is_not_an_all_target() {
+    let repo = temp_repo();
+    fs::create_dir(repo.join("generated")).unwrap();
+    let generated = repo.join("generated/source.f90");
+    let kept = repo.join("kept.f90");
+    let source = b"program p\nx=1\nend program p\n";
+    fs::write(&generated, source).unwrap();
+    fs::write(&kept, source).unwrap();
+    git_add(&repo);
+
+    let output = run(&repo, &["--indent-only", "--all", "--exclude=generated/"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("kept.f90"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("generated/source.f90"));
+    assert_eq!(fs::read(&generated).unwrap(), source);
+    assert_eq!(
+        fs::read(&kept).unwrap(),
+        b"program p\n   x=1\nend program p\n"
+    );
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn excluding_a_project_source_removes_its_name_resolution() {
+    let repo = temp_repo();
+    let declarations = repo.join("declarations.f90");
+    let dependent = repo.join("dependent.f90");
+    fs::write(&declarations, b"module SharedName\nend module SharedName\n").unwrap();
+    fs::write(
+        &dependent,
+        b"program p\nuse sharedname\nprint *, 1\nend program p\n",
+    )
+    .unwrap();
+    git_add(&repo);
+
+    let output = run(&repo, &["--full", "--all", "--exclude=/declarations.f90"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        fs::read(&dependent).unwrap(),
+        b"program p\n   use sharedname\n   print *, 1\n\nend program p\n"
+    );
+    assert_eq!(
+        fs::read(&declarations).unwrap(),
+        b"module SharedName\nend module SharedName\n"
+    );
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn exclude_arrays_work_in_standalone_and_pyproject_configuration() {
+    let repo = temp_repo();
+    fs::create_dir(repo.join("vendor")).unwrap();
+    let kept = repo.join("kept.f90");
+    let vendor = repo.join("vendor/source.f90");
+    let generated = repo.join("generated.f90");
+    let source = b"program p\nx=1\nend program p\n";
+    fs::write(&kept, source).unwrap();
+    fs::write(&vendor, source).unwrap();
+    fs::write(&generated, source).unwrap();
+    fs::write(
+        repo.join(".forformat.toml"),
+        b"exclude = [\"vendor/\"]\nextend-exclude = [\"generated.f90\"]\n",
+    )
+    .unwrap();
+    git_add(&repo);
+
+    let output = run(&repo, &["--indent-only", "--all"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(fs::read(&vendor).unwrap(), source);
+    assert_eq!(fs::read(&generated).unwrap(), source);
+    assert_eq!(
+        fs::read(&kept).unwrap(),
+        b"program p\n   x=1\nend program p\n"
+    );
+
+    for path in [&kept, &vendor, &generated] {
+        fs::write(path, source).unwrap();
+    }
+    fs::remove_file(repo.join(".forformat.toml")).unwrap();
+    fs::write(
+        repo.join("pyproject.toml"),
+        b"[tool.forformat]\nexclude = [\"vendor/\"]\nextend_exclude = [\"generated.f90\"]\n",
+    )
+    .unwrap();
+    let output = run(&repo, &["--indent-only", "--all"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(fs::read(&vendor).unwrap(), source);
+    assert_eq!(fs::read(&generated).unwrap(), source);
+    assert_eq!(
+        fs::read(&kept).unwrap(),
+        b"program p\n   x=1\nend program p\n"
+    );
+    let _ = fs::remove_dir_all(repo);
+}
+
+/// `--exclude` selects a set rather than adding to one, so it replaces the
+/// configured `exclude` instead of accumulating with it — the way ruff and
+/// black treat the same pair of options. `extend-exclude` is the additive
+/// spelling and survives from the configuration file.
+#[test]
+fn a_command_line_exclude_replaces_the_configured_one() {
+    let repo = temp_repo();
+    fs::create_dir(repo.join("vendor")).unwrap();
+    let kept = repo.join("kept.f90");
+    let vendor = repo.join("vendor/source.f90");
+    let generated = repo.join("generated.f90");
+    let source = b"program p\nx=1\nend program p\n";
+    let formatted = b"program p\n   x=1\nend program p\n";
+    for path in [&kept, &vendor, &generated] {
+        fs::write(path, source).unwrap();
+    }
+    fs::write(
+        repo.join(".forformat.toml"),
+        b"exclude = [\"vendor/\"]\nextend-exclude = [\"generated.f90\"]\n",
+    )
+    .unwrap();
+    git_add(&repo);
+
+    let output = run(&repo, &["--indent-only", "--all", "--exclude=kept.f90"]);
+    assert_eq!(output.status.code(), Some(0));
+    // The configured `exclude = ["vendor/"]` is gone, so vendor is formatted.
+    assert_eq!(fs::read(&vendor).unwrap(), formatted);
+    // `extend-exclude` is additive and still applies.
+    assert_eq!(fs::read(&generated).unwrap(), source);
+    // The command-line pattern is the one in force.
+    assert_eq!(fs::read(&kept).unwrap(), source);
+
+    for path in [&kept, &vendor, &generated] {
+        fs::write(path, source).unwrap();
+    }
+    // `--extend-exclude` adds instead, so every configured pattern survives.
+    let output = run(
+        &repo,
+        &["--indent-only", "--all", "--extend-exclude=kept.f90"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(fs::read(&vendor).unwrap(), source);
+    assert_eq!(fs::read(&generated).unwrap(), source);
+    assert_eq!(fs::read(&kept).unwrap(), source);
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
 fn project_config_applies_to_all_and_cli_options_override_it() {
     let repo = temp_repo();
     fs::write(

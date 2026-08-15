@@ -105,7 +105,9 @@ pass changes width, the text is laid out again before the final output is accept
 
 ## File and project workflow
 
-The CLI supports stdin, explicit paths, `--all`, `--stdout`, `--isolated`, `--check`, and `--diff`.
+The CLI supports stdin, explicit paths, `--all`, repeatable `--exclude` and `--extend-exclude`,
+`--stdout`, `--isolated`,
+`--check`, and `--diff`.
 Explicit files in a Git checkout use declarations from the tracked free-form sources; `--isolated`
 and stdin use only the input buffer. `--project-context` lets a stdin buffer borrow declarations
 from a checkout while excluding its stale on-disk target.

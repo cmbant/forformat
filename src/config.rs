@@ -2,13 +2,13 @@ use std::{fmt, fs, path::Path};
 
 /// What the formatter is allowed to change.
 ///
+/// `Full` is the product default and adds normalization and wrapping.
 /// `IndentOnly` is the findent 4.3.7 contract and stays byte-exact forever
-/// (I6).  `Full` adds normalization and wrapping.  `NormalizeOnly` runs the
-/// text passes without the structural layout, which is how a single
-/// normalization rule can be tested independently of structural layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// (I6).  `NormalizeOnly` runs the text passes without the structural layout,
+/// which is how a single normalization rule can be tested independently of
+/// structural layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatMode {
-    #[default]
     IndentOnly,
     NormalizeOnly,
     Full,
@@ -124,9 +124,15 @@ fn read_config(
         )));
     };
 
+    let mut entries: Vec<_> = table.iter().collect();
+    entries.sort_by_key(|(key, _)| {
+        let normalized = normalize_config_key(key);
+        (config_key_priority(&normalized), normalized)
+    });
+
     let mut args = Vec::new();
-    for (key, value) in table {
-        let key = key.replace('_', "-").to_ascii_lowercase();
+    for (key, value) in entries {
+        let key = normalize_config_key(key);
         if matches!(
             key.as_str(),
             "all"
@@ -188,6 +194,33 @@ fn read_config(
             }
             continue;
         }
+        if key == "exclude" || key == "extend-exclude" {
+            let specs = value.as_array().ok_or_else(|| {
+                crate::error::FormatError::InvalidOption(format!(
+                    "configuration key `{key}` in {} must be an array of strings",
+                    path.display()
+                ))
+            })?;
+            for spec in specs {
+                let spec = spec.as_str().ok_or_else(|| {
+                    crate::error::FormatError::InvalidOption(format!(
+                        "configuration key `{key}` in {} must contain strings",
+                        path.display()
+                    ))
+                })?;
+                if spec.is_empty() {
+                    return Err(crate::error::FormatError::InvalidOption(format!(
+                        "configuration key `{key}` in {} must not contain empty patterns",
+                        path.display()
+                    )));
+                }
+                // The two keys are not synonyms: `exclude` selects the set and
+                // `extend-exclude` adds to it, so they must survive as distinct
+                // options for the command line to layer over them correctly.
+                args.push(format!("--{key}={spec}"));
+            }
+            continue;
+        }
         if matches!(
             key.as_str(),
             "uppercase-single-l" | "refactor-end" | "no-wrap"
@@ -201,6 +234,87 @@ fn read_config(
         args.push(format!("--{key}={value}"));
     }
     Ok(args)
+}
+
+// TOML tables are BTreeMaps, but CLI option order is meaningful: --indent
+// resets the values later supplied by the construct-specific --indent-*
+// options. Keep every broad/resetting config key in this list so adding a new
+// one requires an explicit precedence decision instead of silently inheriting
+// alphabetical ordering.
+const RESETTING_CONFIG_KEYS: &[&str] = &["indent"];
+
+fn normalize_config_key(key: &str) -> String {
+    key.replace('_', "-").to_ascii_lowercase()
+}
+
+fn config_key_priority(key: &str) -> usize {
+    RESETTING_CONFIG_KEYS
+        .iter()
+        .position(|resetting| *resetting == key)
+        .unwrap_or(RESETTING_CONFIG_KEYS.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{config_args, config_key_priority, FormatConfig};
+    use crate::cli::{parse, Command};
+    use std::fs;
+
+    fn config_from_text(name: &str, text: &str) -> FormatConfig {
+        let path = std::env::temp_dir().join(format!(
+            "forformat-config-{name}-{}.toml",
+            std::process::id()
+        ));
+        fs::write(&path, text).unwrap();
+        let config_args = config_args(&path, Some(&path)).unwrap();
+        let _ = fs::remove_file(&path);
+
+        let mut args = vec!["forformat".to_string(), "--no-config".to_string()];
+        args.extend(config_args);
+        match parse(args).unwrap() {
+            Command::Run(invocation) => invocation.config,
+            _ => panic!("expected a formatting command"),
+        }
+    }
+
+    #[test]
+    fn specific_indent_config_overrides_the_global_reset() {
+        let config = config_from_text("specific-indent", "indent = 4\nindent-select = 2\n");
+
+        assert_eq!(config.indent, 4);
+        assert_eq!(config.construct_indents.select, 2);
+    }
+
+    #[test]
+    fn global_indent_config_resets_every_per_construct_indent() {
+        let config = config_from_text("global-indent", "indent = 4\n");
+
+        assert_eq!(config.construct_indents.associate, 4);
+        assert_eq!(config.construct_indents.block, 4);
+        assert_eq!(config.construct_indents.changeteam, 4);
+        assert_eq!(config.construct_indents.critical, 4);
+        assert_eq!(config.construct_indents.do_, 4);
+        assert_eq!(config.construct_indents.r#enum, 4);
+        assert_eq!(config.construct_indents.forall, 4);
+        assert_eq!(config.construct_indents.if_, 4);
+        assert_eq!(config.construct_indents.interface, 4);
+        assert_eq!(config.construct_indents.module, 4);
+        assert_eq!(config.construct_indents.procedure, 4);
+        assert_eq!(config.construct_indents.select, 4);
+        assert_eq!(config.construct_indents.r#type, 4);
+        assert_eq!(config.construct_indents.where_, 4);
+        assert_eq!(config.contains_indent, 4);
+        assert_eq!(config.continuation_indent, 4);
+        assert_eq!(config.case_indent, 2);
+        assert_eq!(config.entry_indent, 2);
+    }
+
+    #[test]
+    fn resetting_config_keys_have_explicit_precedence() {
+        let config = config_from_text("precedence", "indent-select = 2\nindent = 4\n");
+        assert!(config_key_priority("indent") < config_key_priority("indent-select"));
+        assert_eq!(config.construct_indents.select, 2);
+    }
 }
 
 fn config_value(

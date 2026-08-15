@@ -11,6 +11,8 @@ use crate::{
     error::FormatError,
     format_source, format_source_with_context, FormatResult,
 };
+mod exclude;
+use exclude::ExcludeMatcher;
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -47,6 +49,14 @@ impl WorkflowError {
         match self {
             Self::Usage(_) => 2,
             Self::Io(_) | Self::Format(_) => 1,
+        }
+    }
+
+    pub fn is_broken_pipe(&self) -> bool {
+        match self {
+            Self::Io(error) => error.kind() == io::ErrorKind::BrokenPipe,
+            Self::Format(error) => error.is_broken_pipe(),
+            Self::Usage(_) => false,
         }
     }
 }
@@ -617,11 +627,21 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
             "--project-context requires a valid Git checkout".into(),
         ));
     }
+    let exclude_matcher = ExcludeMatcher::new(&invocation.exclude_patterns());
     let tracked = if invocation.all
         || invocation.project_context.is_some()
         || (!invocation.isolated && root.is_some())
     {
-        root.as_deref().map(tracked_sources).transpose()?
+        root.as_deref()
+            .map(|root| {
+                tracked_sources(root).map(|paths| {
+                    paths
+                        .into_iter()
+                        .filter(|path| !exclude_matcher.is_excluded(root, path))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .transpose()?
     } else {
         None
     };

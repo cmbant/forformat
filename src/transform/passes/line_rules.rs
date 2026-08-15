@@ -703,6 +703,25 @@ fn normalize_keyword_spacing_with_state(
                     edits.replace(token.span.start..colon, b"only");
                 }
             }
+            // A keyword that introduces a following name is collapsed to one
+            // space: `module   mymod`, `use   mymod`, `call   foo`,
+            // `subroutine  do_thing`. Unlike `end`/`do` above this is not
+            // conditioned on position, so `end module   mymod` is closed up
+            // by this rule rather than needing its own case.
+            if (token.is(b"module")
+                || token.is(b"use")
+                || token.is(b"call")
+                || token.is(b"subroutine"))
+                && !declared_names.suppresses_keyword(line_index, token.text, false)
+            {
+                if let Some(next) = tokens.get(index + 1) {
+                    if next.kind == TokenKind::Name
+                        && horizontal_gap(line, token.span.end, next.span.start)
+                    {
+                        edits.replace(token.span.end..next.span.start, b" ");
+                    }
+                }
+            }
         }
 
         if token.kind == TokenKind::Name && is_followed_by_lparen(&tokens, index) {
@@ -2334,6 +2353,21 @@ WRITE( UNIT = 1 , FMT = 2 )'x'\n";
         assert_eq!(
             once,
             "end if\nelse if (X)\nblock data\ngoto 10\ndouble precision :: X\nif (X) then\nselect type is (X)\ndo while (X)\ncommon /blk/ x\nsubroutine s\nx = [1, 2]\nformat((/1, 2 /))\nwrite(unit=1, fmt=2) 'x'\n"
+        );
+        assert_eq!(normalized(once.as_bytes()), once);
+    }
+
+    #[test]
+    fn keyword_to_name_gaps_collapse_to_one_space() {
+        let source = b"module   mymod\n\
+use   mymod\n\
+call   foo(x)\n\
+subroutine   do_thing\n\
+end subroutine   do_thing\n";
+        let once = normalized(source);
+        assert_eq!(
+            once,
+            "module mymod\nuse mymod\ncall foo(x)\nsubroutine do_thing\nend subroutine do_thing\n"
         );
         assert_eq!(normalized(once.as_bytes()), once);
     }

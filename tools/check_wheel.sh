@@ -50,7 +50,9 @@ status=0
 forformat --isolated --check "$work/smoke.f90" >/dev/null || status=$?
 test "$status" -eq 1
 forformat --isolated "$work/smoke.f90" >/dev/null
-forformat --isolated --check "$work/smoke.f90" >/dev/null
+status=0
+forformat --isolated --check "$work/smoke.f90" >/dev/null || status=$?
+test "$status" -eq 0
 
 status=0
 forformat --not-an-option </dev/null >/dev/null 2>"$work/stderr.txt" || status=$?

@@ -29,6 +29,13 @@ forformat --version
 Wheels contain a platform-specific native executable. If `forformat` is not yet available for your
 platform on PyPI, build a wheel from a source checkout as described below.
 
+PyPI publishes platform-specific wheels only; no source distribution (sdist) is published. A
+platform not covered by those wheels must build from a checkout:
+
+```sh
+python -m build --wheel --outdir dist
+```
+
 ### From source
 
 To build and run the native formatter, install Rust 1.85 or newer and use Cargo:
@@ -41,14 +48,14 @@ cargo build --locked --release
 To build the Python wheel as well, use Python 3.9 or newer and the Python build frontend:
 
 ```sh
-cargo build --locked --release
 python -m pip install --upgrade build
 python -m build --wheel --outdir dist
 python -m pip install dist/forformat-*.whl
 ```
 
-The wheel build packages the already-built `target/release/forformat` executable. A source build
-therefore needs Rust; an installed wheel does not.
+The wheel build uses an existing release binary when one is available and otherwise runs
+`cargo build --locked --release` from the checkout. Building from source therefore needs Rust;
+an installed wheel does not.
 
 ## Use
 
@@ -96,11 +103,28 @@ formatted = format_source(
 The return type matches the input type. The Python API disables automatic
 configuration discovery unless `options` explicitly supplies `--config`.
 
-Use `--check` in CI or pre-commit, and `--diff` to review changes without modifying files:
+Use `--check` in CI or with the check-only pre-commit hook, and `--diff` to review changes without
+modifying files:
 
 ```sh
 forformat --check src/*.f90
 forformat --diff src/*.f90
+```
+
+For pre-commit, use the rewriting hook to format files in place, or use `forformat-check` when the
+hook should only check formatting. Replace `vX.Y.Z` with the release you want to pin:
+
+These hooks install this repository from source. If no prebuilt release binary is available, the
+installation invokes Cargo, so Rust 1.85 or newer is required for pre-commit. A published wheel
+does not require Rust, but it does not make this source-based hook toolchain-free.
+
+```yaml
+repos:
+  - repo: https://github.com/cmbant/forformat
+    rev: vX.Y.Z
+    hooks:
+      - id: forformat          # rewrite files in place
+      # - id: forformat-check  # use this instead for check-only CI behavior
 ```
 
 The default is `--full`. The main modes are:
@@ -112,6 +136,39 @@ The default is `--full`. The main modes are:
 Run `forformat --help` for indentation controls, wrapping options, preprocessor definitions, and
 the complete compatibility option set. Fixed-form Fortran and automatic format detection are not
 supported.
+
+### Formatting options
+
+In full mode, wrapping is enabled by default. Use `--wrap` or `--wrap=1` to enable it, `--no-wrap`
+or `--wrap=0` to disable it, and `--line-length=<n>` to set the wrapping budget. These options
+can also be placed in `.forformat.toml` or `[tool.forformat]` in `pyproject.toml`; underscores and
+hyphens are equivalent in configuration keys. For example:
+
+```toml
+[tool.forformat]
+mode = "full"
+indent = 4
+wrap = true
+line_length = 120
+indent_module = 0
+indent_procedure = 0
+start_indent = 4
+indent-contains = "restart"
+indent_select = 4
+indent_case = 4
+indent_interface = 0
+indent_continuation = 4
+indent_ampersand = true
+openmp = 0
+```
+
+`--align-declarations` (default on) and `--align-comments` (default off) each own a kind of gap
+wherever it occurs: every declaration's `::` and every trailing comment's leading whitespace,
+respectively, no matter how wide the authored padding is or how many lines the block spans.
+`--ws-remred`'s broader whitespace reduction defers to whichever of those is enabled, leaving that
+gap for the alignment pass to decide instead of collapsing it first — so a hand-aligned block of any
+width stays aligned even when `--ws-remred` is on. Turning the corresponding alignment option off
+hands that gap back to `--ws-remred` everywhere it occurs.
 
 ### Project context
 
@@ -133,18 +190,32 @@ To format every tracked free-form Fortran source in a checkout, use:
 forformat --all
 ```
 
+Use repeatable `--exclude=<glob>` options to omit vendored or generated sources from automatic
+`--all` targets and from the tracked-source project-context scan. Explicit paths are always
+formatted even when they match an exclusion:
+
+```sh
+forformat --all --exclude=vendor/ --exclude='**/generated-*.f90'
+```
+
+`--exclude` selects the exclusion set rather than adding to it, so it replaces both the default
+set and any `exclude` in the configuration file. Use the repeatable `--extend-exclude=<glob>` to
+add patterns on top of whatever is already configured.
+
 Repository-wide formatting settings are discovered from the nearest project root. For any
 repository, put formatter options in a top-level `.forformat.toml`; Python projects can use the
-same option names in `[tool.forformat]` in `pyproject.toml`:
+same option names in `[tool.forformat]` in `pyproject.toml`. The formatting options example above
+shows a longer indentation and wrapping configuration; other settings include `align-paren` and
+`defines = ["USE_MPI", "REAL_KIND"]`. The exclusion keys are arrays of patterns:
+`exclude = ["vendor/"]` replaces the default exclusion set, while
+`extend-exclude = ["**/generated-*.f90"]` adds patterns. The default exclusion set is empty:
+`forformat` selects files with `git ls-files`, so anything it sees was tracked deliberately and
+nothing is skipped unless you say so.
 
-```toml
-[tool.forformat]
-mode = "full"
-indent = 4
-line-length = 100
-align-paren = true
-defines = ["USE_MPI", "REAL_KIND"]
-```
+Patterns use `/` separators and support `*` (within one path component), `**` (across components),
+and `?` (one non-separator character). A trailing `/` matches that directory and everything below
+it. A leading `/` anchors the pattern at the repository root; without it, a pattern may match at
+any path-component boundary. Paths are normalized to `/` before matching.
 
 The standalone `.forformat.toml` uses the same top-level keys. Configuration applies to `--all`,
 explicit file paths, and standard-input runs from that project. Command-line options take
