@@ -184,6 +184,7 @@ fn read_config(
         if matches!(
             key.as_str(),
             "all"
+                | "all-files"
                 | "check"
                 | "config"
                 | "diff"
@@ -191,8 +192,10 @@ fn read_config(
                 | "last-indent"
                 | "last-usable"
                 | "no-config"
+                | "no-submodules"
                 | "stdin"
                 | "stdout"
+                | "show-files"
         ) {
             return Err(crate::error::FormatError::InvalidOption(format!(
                 "configuration key `{key}` is a command-line workflow option"

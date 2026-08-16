@@ -151,7 +151,24 @@ pub fn repository_root(start: &Path) -> io::Result<Option<PathBuf>> {
 
 /// Return tracked free-form sources, accepting upper-case suffix spellings.
 pub fn tracked_sources(root: &Path) -> io::Result<Vec<PathBuf>> {
-    let output = git(&["ls-files", "--recurse-submodules", "-z", "--"], root)?;
+    tracked_sources_with_submodules(root, true)
+}
+
+/// Return tracked free-form sources from the checkout itself, excluding
+/// sources owned by initialized submodules.
+pub fn tracked_sources_without_submodules(root: &Path) -> io::Result<Vec<PathBuf>> {
+    tracked_sources_with_submodules(root, false)
+}
+
+fn tracked_sources_with_submodules(
+    root: &Path,
+    recurse_submodules: bool,
+) -> io::Result<Vec<PathBuf>> {
+    let mut args = vec!["ls-files", "-z", "--"];
+    if recurse_submodules {
+        args.insert(1, "--recurse-submodules");
+    }
+    let output = git(&args, root)?;
     if !output.status.success() {
         return Err(io::Error::other(
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
@@ -529,7 +546,8 @@ fn unified_diff(path: &Path, old: &[u8], new: &[u8], root: Option<&Path>) -> Vec
 /// Execute one parsed invocation. Return value is the process status for a
 /// successful operation: 0 clean/success, 1 differences found.
 pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
-    let stdin_mode = invocation.stdin || (invocation.paths.is_empty() && !invocation.all);
+    let all_selection = invocation.all || invocation.all_files;
+    let stdin_mode = invocation.stdin || (invocation.paths.is_empty() && !all_selection);
     if stdin_mode && invocation.project_context.is_none() {
         let mut source = Vec::new();
         io::stdin().read_to_end(&mut source)?;
@@ -591,7 +609,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
             Ok((directory, Some(stdin_path)))
         })
         .transpose()?;
-    let all_scope = if invocation.all {
+    let all_scope = if all_selection {
         invocation
             .paths
             .first()
@@ -599,13 +617,13 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
                 let candidate = resolve_input(path, None);
                 let canonical = fs::canonicalize(&candidate).map_err(|error| {
                     WorkflowError::Usage(format!(
-                        "--all directory does not exist: {} ({error})",
+                        "--all/--all-files directory does not exist: {} ({error})",
                         candidate.display()
                     ))
                 })?;
                 if !fs::metadata(&canonical)?.is_dir() {
                     return Err(WorkflowError::Usage(format!(
-                        "--all requires a directory: {}",
+                        "--all/--all-files requires a directory: {}",
                         candidate.display()
                     )));
                 }
@@ -628,13 +646,18 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         ));
     }
     let exclude_matcher = ExcludeMatcher::new(&invocation.exclude_patterns());
-    let tracked = if invocation.all
+    let tracked_source_reader = if invocation.no_submodules {
+        tracked_sources_without_submodules
+    } else {
+        tracked_sources
+    };
+    let tracked = if all_selection
         || invocation.project_context.is_some()
         || (!invocation.isolated && root.is_some())
     {
         root.as_deref()
             .map(|root| {
-                tracked_sources(root).map(|paths| {
+                tracked_source_reader(root).map(|paths| {
                     paths
                         .into_iter()
                         .filter(|path| !exclude_matcher.is_excluded(root, path))
@@ -657,6 +680,21 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
                 .collect(),
             None => tracked.clone(),
         }
+    } else if invocation.all_files {
+        let tracked = root
+            .as_deref()
+            .map(tracked_sources_without_submodules)
+            .transpose()?
+            .ok_or_else(|| {
+                WorkflowError::Usage("--all-files requires a valid Git checkout".into())
+            })?;
+        let tracked = tracked
+            .into_iter()
+            .filter(|path| !exclude_matcher.is_excluded(root.as_deref().unwrap(), path));
+        match all_scope.as_deref() {
+            Some(scope) => tracked.filter(|path| path.starts_with(scope)).collect(),
+            None => tracked.collect(),
+        }
     } else if stdin_mode {
         Vec::new()
     } else {
@@ -668,6 +706,12 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
                 .collect::<Vec<_>>(),
         )
     };
+    if invocation.show_files {
+        for path in &target_paths {
+            println!("{}", display_path(path, root.as_deref()).display());
+        }
+        return Ok(0);
+    }
     let mut project_paths = if invocation.isolated {
         // Isolated means no project tables at all. The target is still read
         // and formatted, but its declarations remain local to the formatter,
@@ -710,7 +754,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     }
     // Read each selected source once. The same in-memory bytes serve both the
     // target formatter and the single project-analysis pass.
-    let explicit_targets: HashSet<&Path> = if invocation.all || stdin_mode {
+    let explicit_targets: HashSet<&Path> = if all_selection || stdin_mode {
         HashSet::new()
     } else {
         target_paths.iter().map(PathBuf::as_path).collect()

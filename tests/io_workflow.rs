@@ -38,6 +38,22 @@ fn git_add(path: &Path) {
         .unwrap();
 }
 
+fn git_commit(path: &Path) {
+    Command::new("git")
+        .args([
+            "-c",
+            "user.name=forformat-test",
+            "-c",
+            "user.email=forformat-test@example.invalid",
+            "commit",
+            "-qm",
+            "initial",
+        ])
+        .current_dir(path)
+        .status()
+        .unwrap();
+}
+
 fn run(path: &Path, args: &[&str]) -> Output {
     Command::new(binary())
         .args(args)
@@ -86,6 +102,70 @@ fn all_discovers_uppercase_extensions_and_ignores_hook_git_environment() {
         fs::read(repo.join("source.F90")).unwrap(),
         b"program p\n   x=1\nend program p\n"
     );
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn all_files_excludes_submodules_from_targets_but_keeps_them_as_context() {
+    let submodule = temp_repo();
+    let submodule_source = submodule.join("submodule.f90");
+    let source = b"program p\nx=1\nend program p\n";
+    fs::write(&submodule_source, source).unwrap();
+    git_add(&submodule);
+    git_commit(&submodule);
+
+    let repo = temp_repo();
+    let root_source = repo.join("root.f90");
+    fs::write(&root_source, source).unwrap();
+    git_add(&repo);
+    git_commit(&repo);
+    Command::new("git")
+        .args(["-c", "protocol.file.allow=always", "submodule", "add", "-q"])
+        .arg(&submodule)
+        .arg("vendor")
+        .current_dir(&repo)
+        .status()
+        .unwrap();
+    git_commit(&repo);
+
+    let output = run(&repo, &["--indent-only", "--all-files"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        fs::read(&root_source).unwrap(),
+        b"program p\n   x=1\nend program p\n"
+    );
+    assert_eq!(fs::read(repo.join("vendor/submodule.f90")).unwrap(), source);
+
+    let listed = run(&repo, &["--indent-only", "--all-files", "--show-files"]);
+    assert_eq!(listed.status.code(), Some(0));
+    assert_eq!(listed.stdout, b"root.f90\n");
+
+    let _ = fs::remove_dir_all(repo);
+    let _ = fs::remove_dir_all(submodule);
+}
+
+#[test]
+fn show_files_accepts_an_optional_directory_and_does_not_modify_sources() {
+    let repo = temp_repo();
+    fs::create_dir(repo.join("src")).unwrap();
+    let source = b"program p\nx=1\nend program p\n";
+    fs::write(repo.join("src/main.f90"), source).unwrap();
+    fs::write(repo.join("other.f90"), source).unwrap();
+    git_add(&repo);
+
+    let output = run(
+        &repo,
+        &["--all-files", "src", "--show-files", "--exclude=main.f90"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stdout.is_empty());
+    assert_eq!(fs::read(repo.join("src/main.f90")).unwrap(), source);
+    assert_eq!(fs::read(repo.join("other.f90")).unwrap(), source);
+
+    let output = run(&repo, &["--all-files", "src", "--show-files"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"src/main.f90\n");
+    assert_eq!(fs::read(repo.join("src/main.f90")).unwrap(), source);
     let _ = fs::remove_dir_all(repo);
 }
 

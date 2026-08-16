@@ -226,15 +226,41 @@ forformat --isolated src/module.f90
 forformat --isolated --stdout src/module.f90 > /tmp/module.f90
 ```
 
-To format every tracked free-form Fortran source in a checkout, use:
+To format every tracked free-form Fortran source owned by the current checkout, use:
+
+```sh
+forformat --all-files
+```
+
+Initialized submodules are scanned only for project context. The optional directory limits the
+target set:
+
+```sh
+forformat --all-files
+forformat --all-files ./src
+```
+
+Use `--all` when recursive submodule sources should also be formatting targets:
 
 ```sh
 forformat --all
 ```
 
+Add `--no-submodules` when submodule sources should not be included even as project context. With
+`--all`, this also prevents submodule sources from being targets; with explicit paths, the
+superproject's other tracked sources remain available for context.
+
+Use `--show-files` with explicit paths, `--all`, or `--all-files` to print the selected targets
+without reading or modifying them:
+
+```sh
+forformat --all-files --show-files
+forformat --all-files ./src --show-files --exclude='**/generated-*.f90'
+```
+
 Use repeatable `--exclude=<glob>` options to omit vendored or generated sources from automatic
-`--all` targets and from the tracked-source project-context scan. Explicit paths are always
-formatted even when they match an exclusion:
+`--all-files` and `--all` targets and from the tracked-source project-context scan. Explicit paths
+are always formatted even when they match an exclusion:
 
 ```sh
 forformat --all --exclude=vendor/ --exclude='**/generated-*.f90'
@@ -262,8 +288,8 @@ any path-component boundary. Paths are normalized to `/` before matching.
 The standalone `.forformat.toml` uses the same top-level keys. Configuration applies to `--all`,
 explicit file paths, and standard-input runs from that project. Command-line options take
 precedence over the project file; use `--config PATH` to select a file explicitly or `--no-config`
-to ignore discovered settings. Workflow controls such as `--all`, `--check`, and `--diff` remain
-command-line-only.
+to ignore discovered settings. Workflow controls such as `--all`, `--all-files`, `--check`, and
+`--diff` remain command-line-only.
 
 ## Rust crate
 

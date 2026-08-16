@@ -22,11 +22,14 @@ pub struct Invocation {
     pub paths: Vec<PathBuf>,
     pub project_context: Option<PathBuf>,
     pub all: bool,
+    pub all_files: bool,
+    pub no_submodules: bool,
     pub stdin: bool,
     pub stdout: bool,
     pub isolated: bool,
     pub check: bool,
     pub diff: bool,
+    pub show_files: bool,
     /// Patterns from `--exclude`, which *replaces* [`DEFAULT_EXCLUDES`] rather
     /// than adding to it. `None` means the option was never given.
     pub exclude: Option<Vec<String>>,
@@ -144,7 +147,7 @@ where
 
 fn config_start(command: &Command, cwd: &Path) -> PathBuf {
     if let Command::Run(invocation) = command {
-        if invocation.all && invocation.paths.len() == 1 {
+        if (invocation.all || invocation.all_files) && invocation.paths.len() == 1 {
             let candidate = if invocation.paths[0].is_absolute() {
                 invocation.paths[0].clone()
             } else {
@@ -173,11 +176,14 @@ where
     let mut paths = Vec::new();
     let mut project_context = None;
     let mut all = false;
+    let mut all_files = false;
+    let mut no_submodules = false;
     let mut stdin = false;
     let mut stdout = false;
     let mut isolated = false;
     let mut check = false;
     let mut diff = false;
+    let mut show_files = false;
     let mut exclude: Option<Vec<String>> = None;
     let mut extend_exclude = Vec::new();
     while let Some(arg) = a.next() {
@@ -312,6 +318,8 @@ where
                 "last-indent" => c.last_indent = true,
                 "last-usable" => c.last_usable = true,
                 "all" => all = true,
+                "all-files" => all_files = true,
+                "no-submodules" => no_submodules = true,
                 "project-context" => {
                     let path = need(&mut value, &mut a)?;
                     if path.is_empty() {
@@ -326,6 +334,7 @@ where
                 "isolated" => isolated = true,
                 "check" => check = true,
                 "diff" => diff = true,
+                "show-files" => show_files = true,
                 "exclude" | "extend-exclude" => {
                     let pattern = need(&mut value, &mut a)?;
                     if pattern.is_empty() {
@@ -581,43 +590,76 @@ where
         paths.push(PathBuf::from(arg));
     }
     if project_context.is_some()
-        && (!stdin || !paths.is_empty() || all || stdout || isolated || check || diff)
+        && (!stdin
+            || !paths.is_empty()
+            || all
+            || all_files
+            || stdout
+            || isolated
+            || check
+            || diff
+            || show_files)
     {
         return Err(FormatError::InvalidOption(
-            "--project-context requires --stdin and cannot be combined with paths, --all, --stdout, --isolated, --check, or --diff".into(),
+            "--project-context requires --stdin and cannot be combined with paths, --all, --all-files, --stdout, --isolated, --check, --diff, or --show-files".into(),
         ));
     }
-    if stdin && (all || !paths.is_empty() || stdout || isolated || check || diff) {
+    if stdin
+        && (all
+            || all_files
+            || !paths.is_empty()
+            || stdout
+            || isolated
+            || check
+            || diff
+            || show_files)
+    {
         return Err(FormatError::InvalidOption(
-            "--stdin cannot be combined with paths, --all, --stdout, --check, --diff, or --isolated".into(),
+            "--stdin cannot be combined with paths, --all, --all-files, --stdout, --check, --diff, --show-files, or --isolated".into(),
         ));
     }
-    if stdout && (paths.len() != 1 || all || check || diff) {
+    if all && all_files {
         return Err(FormatError::InvalidOption(
-            "--stdout requires exactly one path and cannot be combined with --all, --check, or --diff".into(),
+            "--all and --all-files cannot be combined".into(),
         ));
     }
-    if all && paths.len() > 1 {
+    if stdout && (paths.len() != 1 || all || all_files || check || diff || show_files) {
         return Err(FormatError::InvalidOption(
-            "--all accepts at most one directory path".into(),
+            "--stdout requires exactly one path and cannot be combined with --all, --all-files, --check, --diff, or --show-files".into(),
         ));
     }
-    if isolated && (all || paths.is_empty()) {
+    if (all || all_files) && paths.len() > 1 {
         return Err(FormatError::InvalidOption(
-            "--isolated requires one or more explicit paths".into(),
+            "--all and --all-files accept at most one directory path".into(),
         ));
     }
-    if diff && paths.is_empty() && !all {
+    if isolated && (all || all_files || paths.is_empty()) {
         return Err(FormatError::InvalidOption(
-            "--diff requires paths or --all".into(),
+            "--isolated requires one or more explicit paths and cannot be combined with --all-files".into(),
         ));
     }
-    if check && paths.is_empty() && !all {
+    if diff && paths.is_empty() && !all && !all_files {
         return Err(FormatError::InvalidOption(
-            "--check requires paths or --all".into(),
+            "--diff requires paths, --all, or --all-files".into(),
         ));
     }
-    if (c.last_indent || c.last_usable) && (all || !paths.is_empty() || check || diff) {
+    if check && paths.is_empty() && !all && !all_files {
+        return Err(FormatError::InvalidOption(
+            "--check requires paths, --all, or --all-files".into(),
+        ));
+    }
+    if show_files && paths.is_empty() && !all && !all_files {
+        return Err(FormatError::InvalidOption(
+            "--show-files requires paths, --all, or --all-files".into(),
+        ));
+    }
+    if show_files && (check || diff || c.last_indent || c.last_usable) {
+        return Err(FormatError::InvalidOption(
+            "--show-files cannot be combined with --check, --diff, or query modes".into(),
+        ));
+    }
+    if (c.last_indent || c.last_usable) && (all || all_files || !paths.is_empty() || check || diff)
+    {
         return Err(FormatError::InvalidOption(
             "-lastindent/-lastusable cannot be combined with path-update, --check, or --diff"
                 .into(),
@@ -640,11 +682,14 @@ where
                 paths,
                 project_context,
                 all,
+                all_files,
+                no_submodules,
                 stdin,
                 stdout,
                 isolated,
                 check,
                 diff,
+                show_files,
                 exclude,
                 extend_exclude,
             })),
@@ -717,6 +762,7 @@ fn single_dash_long_option_suggestion(arg: &str) -> Option<String> {
             | "align-declarations"
             | "align-paren"
             | "all"
+            | "all-files"
             | "array-brackets"
             | "check"
             | "compact-multiplicative"
@@ -746,6 +792,7 @@ fn single_dash_long_option_suggestion(arg: &str) -> Option<String> {
             | "no-wrap"
             | "normalize-only"
             | "no-config"
+            | "no-submodules"
             | "openmp"
             | "project-context"
             | "program-unit-spacing"
@@ -758,6 +805,7 @@ fn single_dash_long_option_suggestion(arg: &str) -> Option<String> {
             | "start-indent"
             | "stdin"
             | "stdout"
+            | "show-files"
             | "strip-empty-args"
             | "uppercase-single-l"
             | "wrap"
@@ -848,14 +896,17 @@ Free-form Fortran formatter.\n\
   --align-declarations=<0|1>         shrink space to align `::` blocks (default 1)\n\
   --align-comments=<0|1>             shrink space to align trailing comment blocks (default 0)\n\
   -lastindent, -lastusable           print query result instead of source\n\
-  <paths>, --all [directory]          format explicit files or all tracked sources\n\
+    --all-files [directory]             format this checkout's tracked sources; submodules are context only\n\
+    <paths>, --all [directory]          format explicit files or all tracked sources recursively\n\
+    --no-submodules                     omit submodule sources from targets and project context\n\
   --stdin                             read source from stdin (default without paths)\n\
   --project-context=<path>            analyze a Git checkout while formatting stdin; a source path excludes its on-disk copy\n\
   --stdout                            write one file's result to stdout\n\
   --isolated                          do not scan repository sources for case resolution\n\
   --check                             exit 1 if selected files would change\n\
   --diff                              print unified diffs and exit 1 if changed\n\
-  --exclude=<glob>                    exclude tracked sources from --all and project scanning (repeatable)\n\
+    --show-files                        print selected files without formatting\n\
+    --exclude=<glob>                    exclude tracked sources from --all-files, --all, and project scanning (repeatable)\n\
   --extend-exclude=<glob>             add to the exclusions instead of replacing them (repeatable)\n\
   Query modes cannot be combined with path-update, --check, or --diff.\n\
   --indent-only                      findent-compatible indentation only\n\
