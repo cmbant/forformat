@@ -26,7 +26,7 @@
 
 use super::{
     engine,
-    planner::{PlanBody, Planner},
+    planner::{GroupPlan, PlanBody, Planner},
     wrapping::{self, ContinuationLayout, Decline},
 };
 use crate::{
@@ -39,6 +39,15 @@ use crate::{
 };
 
 type ReflowResult = Vec<(usize, Decline)>;
+
+/// How many times wrapping re-derives its decisions against the layout the
+/// previous round produced.
+///
+/// Two rounds settle every corpus file observed — the second confirms the
+/// first, or corrects a block whose alignment the first round's own breaks
+/// changed. The third is the stop, so a file whose decisions genuinely
+/// oscillate ends on a definite layout instead of looping.
+const MAX_REFLOW_ROUNDS: usize = 3;
 
 /// Format one buffer with project context.
 pub fn format_with_context(
@@ -165,6 +174,21 @@ fn reflow_with_context_inner(
     for group in &analysis.groups {
         plans.push(planner.plan(&analysis.buffer, group, config));
     }
+    // Wrapping decides against a measurement that wrapping itself invalidates.
+    // Step 17 aligns a `::` across a *block* of declarations, so breaking one
+    // member moves its separator onto a continuation line and changes the
+    // block — and with it the column, and so the emitted width, of every other
+    // member. Measuring the authored layout once therefore mispredicts exactly
+    // the statements this pass is about to move, and the next run, reading the
+    // widths that were actually emitted, decides differently (I1).
+    //
+    // So the decisions are re-derived, each round against the layout the
+    // previous round produced. Every round reads this same immutable document:
+    // nothing is ever re-wrapped from already-wrapped bytes, so a round is a
+    // fresh decision rather than a correction layered onto the last one. Only
+    // the *measurement* advances, and `spans` carries each group's lines in
+    // that measurement, since wrapping no longer leaves them one-to-one with
+    // the document's.
     // The budget applies to the bytes this run is about to emit, not to the
     // ones it read.  A statement whose authored lines all fit can still
     // overrun once the layout engine has moved it to its final column — and
@@ -173,182 +197,249 @@ fn reflow_with_context_inner(
     // rather than re-deriving them keeps labels, OpenMP sentinels and
     // `--align-paren` in agreement with the pass that will actually place the
     // text; the engine emits one line per physical line.
-    let mut laid_out =
+    //
+    // *Whether* a statement overruns is asked of this layout only, and never
+    // of a later round's: a round measures the lines the round before it
+    // emitted, and those are already broken and so already short.  Asking them
+    // would answer "nothing overruns", unwrap the file, and ask again — the
+    // decisions oscillate with a period of two and never settle.
+    let mut unwrapped =
         Document::from_bytes(&engine::format(&document.to_lf_bytes(), config)?.bytes);
-    // Step 17 is the one post-layout pass that can make a line *longer*, by
-    // giving a declaration's `::` the space it is entitled to.  It rewrites
-    // lines in place, so measuring after it keeps the index correspondence and
-    // makes the width exact rather than nearly right.
-    crate::transform::passes::layout_post::declaration_separator_alignment(&mut laid_out, config)?;
-    // Comment alignment only shrinks a gap, so it cannot invalidate a wrap
-    // decision — but it must still be measured, or the wrapper sizes lines
-    // against an authored gap that is about to be compressed away.
-    crate::transform::passes::layout_post::trailing_comment_alignment(&mut laid_out, config)?;
-    let laid_out_width = |line: usize| laid_out.lines.get(line).map_or(0, |text| text.len());
+    crate::transform::passes::layout_post::declaration_separator_alignment(&mut unwrapped, config)?;
+    crate::transform::passes::layout_post::trailing_comment_alignment(&mut unwrapped, config)?;
+    let unwrapped_width = |line: usize| unwrapped.lines.get(line).map_or(0, |text| text.len());
 
-    let mut lines: Vec<Vec<u8>> = Vec::with_capacity(document.lines.len());
-    let mut declined = Vec::new();
-    for (group, plan) in analysis.groups.iter().zip(&plans) {
-        if let Some(directive) = join_openmp_directive(document, group) {
-            // A directive is measured and wrapped at the column the layout
-            // engine is about to move it to.  Measuring the authored indent
-            // instead leaves an over-long directive for the next run to find,
-            // which breaks the fixed point exactly as it does for statements.
-            let directive = reindent(
-                &directive,
-                match plan.body {
-                    PlanBody::Uniform { indent } => indent,
-                    PlanBody::Code { first_indent, .. } => first_indent,
-                },
-            );
-            let long = directive.len() > config.wrap.line_length
-                || group.lines.clone().any(|index| {
-                    document.lines[index].len() > config.wrap.line_length
-                        || laid_out_width(index) > config.wrap.line_length
-                });
-            if long {
-                match wrap_openmp_directive(&directive, config.wrap.line_length) {
-                    Ok(wrapped) => lines.extend(wrapped),
-                    Err(reason) => {
-                        declined.push((group.lines.start, reason));
-                        copy_group(document, group, &mut lines);
+    let mut spans: Vec<std::ops::Range<usize>> = analysis
+        .groups
+        .iter()
+        .map(|group| group.lines.clone())
+        .collect();
+    let mut measured = document.to_lf_bytes();
+    let mut emitted: Option<(Vec<Vec<u8>>, ReflowResult)> = None;
+
+    for _ in 0..MAX_REFLOW_ROUNDS {
+        // What the `::` run will *be*, on the other hand, is a property of the
+        // block step 17 forms, and breaking one member rewrites that block.  So
+        // this measurement — and only this one — advances to the layout the
+        // previous round produced.
+        let mut laid_out = Document::from_bytes(&engine::format(&measured, config)?.bytes);
+        // Step 17 is the one post-layout pass that can make a line *longer*, by
+        // giving a declaration's `::` the space it is entitled to.  It rewrites
+        // lines in place, so measuring after it keeps the index correspondence and
+        // makes the width exact rather than nearly right.
+        crate::transform::passes::layout_post::declaration_separator_alignment(
+            &mut laid_out,
+            config,
+        )?;
+        // Comment alignment only shrinks a gap, so it cannot invalidate a wrap
+        // decision — but it must still be measured, or the wrapper sizes lines
+        // against an authored gap that is about to be compressed away.
+        crate::transform::passes::layout_post::trailing_comment_alignment(&mut laid_out, config)?;
+        // One group's emitted lines, plus the decline to report for it. Built
+        // as its own list so a group's output can be located in the result,
+        // which is what lets the next round measure it.
+        let emit_group = |group: &LogicalGroup,
+                          plan: &GroupPlan,
+                          span: &std::ops::Range<usize>|
+         -> (Vec<Vec<u8>>, Option<(usize, Decline)>) {
+            let mut out: Vec<Vec<u8>> = Vec::new();
+            if let Some(directive) = join_openmp_directive(document, group) {
+                // A directive is measured and wrapped at the column the layout
+                // engine is about to move it to.  Measuring the authored indent
+                // instead leaves an over-long directive for the next run to find,
+                // which breaks the fixed point exactly as it does for statements.
+                let directive = reindent(
+                    &directive,
+                    match plan.body {
+                        PlanBody::Uniform { indent } => indent,
+                        PlanBody::Code { first_indent, .. } => first_indent,
+                    },
+                );
+                let mut decline = None;
+                let long = directive.len() > config.wrap.line_length
+                    || group
+                        .lines
+                        .clone()
+                        .any(|index| document.lines[index].len() > config.wrap.line_length)
+                    || group
+                        .lines
+                        .clone()
+                        .any(|index| unwrapped_width(index) > config.wrap.line_length);
+                if long {
+                    match wrap_openmp_directive(&directive, config.wrap.line_length) {
+                        Ok(wrapped) => out.extend(wrapped),
+                        Err(reason) => {
+                            decline = Some((group.lines.start, reason));
+                            copy_group(document, group, &mut out);
+                        }
+                    }
+                } else {
+                    out.push(document.lines[group.lines.start].clone());
+                }
+                if group.lines.len() > 1 {
+                    for index in group.lines.clone().skip(1) {
+                        out.push(document.lines[index].clone());
                     }
                 }
-            } else {
-                lines.push(document.lines[group.lines.start].clone());
+                return (out, decline);
             }
+            let PlanBody::Code {
+                first_indent,
+                align,
+                ..
+            } = plan.body
+            else {
+                copy_group(document, group, &mut out);
+                return (out, None);
+            };
+            if !eligible(&analysis.buffer, group) {
+                copy_group(document, group, &mut out);
+                return (out, None);
+            }
+            if group.statements.len() != 1 {
+                copy_group(document, group, &mut out);
+                return (out, None);
+            }
+            let index = group.lines.start;
+            let layout = ContinuationLayout {
+                first_indent,
+                continuation: first_indent.saturating_add(if config.indent_continuation {
+                    config.continuation_indent
+                } else {
+                    0
+                }),
+            };
+            // Only the laid-out width decides.  The normalized line still carries
+            // the authored indent and the authored `::` run, and both are about to
+            // change: a declaration whose author lined its `::` up in a wide block
+            // reads as 120 columns here and is emitted at 79.  Wrapping it anyway
+            // broke the fixed point in the worst way, because the wrap changes
+            // which lines step 17 groups together and therefore the width the
+            // *next* run measures.  Measuring only what is emitted closes that
+            // loop: leaving the statement alone leaves the block — and so the
+            // measurement — exactly as it was.
+            let has_long_physical_line = group
+                .lines
+                .clone()
+                .any(|line| unwrapped_width(line) > config.wrap.line_length);
+            if !has_long_physical_line {
+                copy_group(document, group, &mut out);
+                return (out, None);
+            }
+            let mut body = trim(&group.statements[0].text).to_vec();
             if group.lines.len() > 1 {
-                for index in group.lines.clone().skip(1) {
-                    lines.push(document.lines[index].clone());
-                }
+                let original_body = body.clone();
+                body = crate::transform::passes::line_rules::respace_joined(
+                    &body,
+                    &context,
+                    &declared_names,
+                    index,
+                );
+                body = crate::transform::passes::case_pass::restore_declined_component_spellings(
+                    &original_body,
+                    &body,
+                    index,
+                    &declared_names,
+                    &context,
+                );
+                body = trim(&body).to_vec();
             }
-            continue;
-        }
-        let PlanBody::Code {
-            first_indent,
-            align,
-            ..
-        } = plan.body
-        else {
-            copy_group(document, group, &mut lines);
-            continue;
-        };
-        if !eligible(&analysis.buffer, group) {
-            copy_group(document, group, &mut lines);
-            continue;
-        }
-        if group.statements.len() != 1 {
-            copy_group(document, group, &mut lines);
-            continue;
-        }
-        let index = group.lines.start;
-        let layout = ContinuationLayout {
-            first_indent,
-            continuation: first_indent.saturating_add(if config.indent_continuation {
-                config.continuation_indent
-            } else {
-                0
-            }),
-        };
-        // Only the laid-out width decides.  The normalized line still carries
-        // the authored indent and the authored `::` run, and both are about to
-        // change: a declaration whose author lined its `::` up in a wide block
-        // reads as 120 columns here and is emitted at 79.  Wrapping it anyway
-        // broke the fixed point in the worst way, because the wrap changes
-        // which lines step 17 groups together and therefore the width the
-        // *next* run measures.  Measuring only what is emitted closes that
-        // loop: leaving the statement alone leaves the block — and so the
-        // measurement — exactly as it was.
-        let has_long_physical_line = group
-            .lines
-            .clone()
-            .any(|line| laid_out_width(line) > config.wrap.line_length);
-        if !has_long_physical_line {
-            copy_group(document, group, &mut lines);
-            continue;
-        }
-        let mut body = trim(&group.statements[0].text).to_vec();
-        if group.lines.len() > 1 {
-            let original_body = body.clone();
-            body = crate::transform::passes::line_rules::respace_joined(
-                &body,
-                &context,
-                &declared_names,
-                index,
-            );
-            body = crate::transform::passes::case_pass::restore_declined_component_spellings(
-                &original_body,
-                &body,
-                index,
-                &declared_names,
-                &context,
-            );
-            body = trim(&body).to_vec();
-        }
-        // Step 17 does not only pad: on a declaration whose author lined the
-        // `::` up in a much wider block, it *compresses*, and the statement the
-        // wrapper is about to break is then far narrower than the one it read.
-        // Measuring the authored run made an over-long declaration unwrappable
-        // (`NoSafeBreak`: no break left the head inside the budget) while the
-        // emitted, compressed line was both over-long and perfectly breakable —
-        // so the next run wrapped it and I1 failed. `laid_out` already has step
-        // 17 applied, so its run is the one that will be emitted.
-        body = with_laid_out_separator(body, laid_out.lines.get(index));
-        // A detached trailing comment belongs to the statement as a whole, not
-        // to its last continuation line, so it is written above the statement
-        // at the statement's own indent.  The layout engine then places it like
-        // any other comment line — which is what makes it stable: forcing it
-        // back to the statement indent afterwards disagreed with the engine
-        // above a dedented `else if`, and the next run moved it.
-        let comment_indent = layout.first_indent;
-        let detached = detach_final_inline_comment(document, group, comment_indent);
-        // Whatever step 17 is going to add around `::` has to be paid for
-        // here, from the same budget: a break chosen against the unpadded text
-        // lands one column over once step 17 runs, and the run after that
-        // would rewrap it.
-        let budget = config
-            .wrap
-            .line_length
-            .saturating_sub(declaration_separator_growth(&body));
-        if first_indent + body.len() <= budget {
-            match detached {
-                Some(Some(comment)) => {
-                    lines.extend(comment);
-                    if group.lines.len() > 1 {
-                        emit_joined_body(&mut lines, &body, first_indent);
-                    } else {
-                        copy_group_without_final_comment(document, group, &mut lines);
+            // Step 17 does not only pad: on a declaration whose author lined the
+            // `::` up in a much wider block, it *compresses*, and the statement the
+            // wrapper is about to break is then far narrower than the one it read.
+            // Measuring the authored run made an over-long declaration unwrappable
+            // (`NoSafeBreak`: no break left the head inside the budget) while the
+            // emitted, compressed line was both over-long and perfectly breakable —
+            // so the next run wrapped it and I1 failed. `laid_out` already has step
+            // 17 applied, so its run is the one that will be emitted.
+            body = with_laid_out_separator(body, laid_out_separator_line(&laid_out, span));
+            // A detached trailing comment belongs to the statement as a whole, not
+            // to its last continuation line, so it is written above the statement
+            // at the statement's own indent.  The layout engine then places it like
+            // any other comment line — which is what makes it stable: forcing it
+            // back to the statement indent afterwards disagreed with the engine
+            // above a dedented `else if`, and the next run moved it.
+            let comment_indent = layout.first_indent;
+            let detached = detach_final_inline_comment(document, group, comment_indent);
+            // Whatever step 17 is going to add around `::` has to be paid for
+            // here, from the same budget: a break chosen against the unpadded text
+            // lands one column over once step 17 runs, and the run after that
+            // would rewrap it.
+            let budget = config
+                .wrap
+                .line_length
+                .saturating_sub(declaration_separator_growth(&body));
+            if first_indent + body.len() <= budget {
+                match detached {
+                    Some(Some(comment)) => {
+                        out.extend(comment);
+                        if group.lines.len() > 1 {
+                            emit_joined_body(&mut out, &body, first_indent);
+                        } else {
+                            copy_group_without_final_comment(document, group, &mut out);
+                        }
                     }
+                    Some(None) if group.lines.len() > 1 => {
+                        emit_joined_body(&mut out, &body, first_indent);
+                    }
+                    _ => copy_group(document, group, &mut out),
                 }
-                Some(None) if group.lines.len() > 1 => {
-                    emit_joined_body(&mut lines, &body, first_indent);
+                return (out, None);
+            }
+            if detached.is_none() {
+                copy_group(document, group, &mut out);
+                return (out, None);
+            }
+            let mut decline = None;
+            match wrapping::wrap_body_with_alignment(&body, layout, budget, align) {
+                Ok(wrapped) => {
+                    if let Some(comment) = detached.flatten() {
+                        out.extend(comment);
+                    }
+                    out.extend(wrapped)
                 }
-                _ => copy_group(document, group, &mut lines),
-            }
-            continue;
-        }
-        if detached.is_none() {
-            copy_group(document, group, &mut lines);
-            continue;
-        }
-        match wrapping::wrap_body_with_alignment(&body, layout, budget, align) {
-            Ok(wrapped) => {
-                if let Some(comment) = detached.flatten() {
-                    lines.extend(comment);
+                // A decline means the statement stays exactly as authored.  It has
+                // to be copied whole: pushing only the first physical line silently
+                // deleted the continuations of a multi-line group, which turns an
+                // unwrappable statement into a syntax error.
+                Err(Decline::Fits) => copy_group(document, group, &mut out),
+                Err(reason) => {
+                    decline = Some((index, reason));
+                    copy_group(document, group, &mut out);
                 }
-                lines.extend(wrapped)
             }
-            // A decline means the statement stays exactly as authored.  It has
-            // to be copied whole: pushing only the first physical line silently
-            // deleted the continuations of a multi-line group, which turns an
-            // unwrappable statement into a syntax error.
-            Err(Decline::Fits) => copy_group(document, group, &mut lines),
-            Err(reason) => {
-                declined.push((index, reason));
-                copy_group(document, group, &mut lines);
+            (out, decline)
+        };
+
+        let mut lines: Vec<Vec<u8>> = Vec::with_capacity(document.lines.len());
+        let mut declined = Vec::new();
+        let mut next_spans = Vec::with_capacity(analysis.groups.len());
+        for ((group, plan), span) in analysis.groups.iter().zip(&plans).zip(&spans) {
+            let start = lines.len();
+            let (out, decline) = emit_group(group, plan, span);
+            lines.extend(out);
+            if let Some(decline) = decline {
+                declined.push(decline);
             }
+            next_spans.push(start..lines.len());
         }
+
+        // A round that reproduces the last one is the fixed point: its
+        // decisions already agree with the layout they were measured against.
+        if emitted
+            .as_ref()
+            .is_some_and(|(previous, _)| *previous == lines)
+        {
+            break;
+        }
+        let mut probe = document.clone();
+        probe.set_lines(lines.clone());
+        measured = probe.to_lf_bytes();
+        spans = next_spans;
+        emitted = Some((lines, declined));
     }
+
+    let (lines, declined) = emitted.expect("the loop runs at least one round");
     document.set_lines(lines);
     Ok(declined)
 }
@@ -502,6 +593,26 @@ fn wrap_openmp_directive(line: &[u8], line_length: usize) -> Result<Vec<Vec<u8>>
     last.extend_from_slice(&body);
     result.push(last);
     Ok(result)
+}
+
+/// The laid-out physical line carrying this statement's declaration separator.
+///
+/// The `::` belongs to the statement, not to a line.  An author who breaks a
+/// declaration before its attributes leaves the separator on a continuation
+/// (`CHARACTER(LEN=3), DIMENSION(7), &` / `PARAMETER, PUBLIC :: name = ...`),
+/// and step 17 aligns it there just the same.  Reading only the group's head
+/// line found no separator at all in that shape, so the wrapper measured and
+/// broke the *authored* run while the emitted line carried the aligned one —
+/// and the next run, reading the aligned spelling, chose a different break.
+fn laid_out_separator_line<'a>(
+    laid_out: &'a Document,
+    span: &std::ops::Range<usize>,
+) -> Option<&'a Vec<u8>> {
+    span.clone()
+        .filter_map(|line| laid_out.lines.get(line))
+        .find(|line| {
+            crate::transform::passes::layout_post::declaration_separator_info(line).is_some()
+        })
 }
 
 /// Rewrite the whitespace run in front of `body`'s `::` to the run step 17 has

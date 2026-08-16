@@ -240,6 +240,47 @@ fn a_component_named_function_does_not_open_a_procedure() {
         text.contains("      f = a"),
         "prefixed function heading stopped opening a frame in\n{text}"
     );
+
+    // And so does one whose prefix contains an ordinary name spelled like the
+    // keyword.  Fortran reserves no words, so `function` is a legal name for
+    // the named constant here; asking only about the *first* occurrence read
+    // the kind parameter, rejected the heading, and left the body — and every
+    // later sibling procedure — unindented.  findent 4.3.7 indents both.
+    let shadowed = b"module m\ninteger, parameter :: function = 4\ncontains\ninteger(kind=function) function f()\nf = 1\nend function f\nsubroutine s()\nx = 0\nend subroutine s\nend module m\n";
+    let text = String::from_utf8(
+        format_source(shadowed, &indent_only_config())
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    for expected in ["      f = 1", "      x = 0"] {
+        assert!(
+            text.lines().any(|line| line == expected),
+            "expected {expected:?} in\n{text}"
+        );
+    }
+
+    // Declaring a variable by that name is not a heading either.  A
+    // `subroutine-stmt` names its procedure right after the keyword, and none
+    // of these do; findent opens no frame for any of them.
+    for declaration in [
+        "integer :: subroutine",
+        "integer :: function",
+        "integer subroutine",
+        "type(t) :: function",
+    ] {
+        let source = format!("subroutine outer()\n{declaration}\nx = 1\nend subroutine outer\n");
+        let text = String::from_utf8(
+            format_source(source.as_bytes(), &indent_only_config())
+                .unwrap()
+                .bytes,
+        )
+        .unwrap();
+        assert!(
+            text.lines().any(|line| line == "   x = 1"),
+            "{declaration:?} opened a frame in\n{text}"
+        );
+    }
 }
 
 #[test]
@@ -715,6 +756,21 @@ fn a_declared_name_keeps_its_spelling_on_a_continued_entity_list() {
             "module m\n   integer :: a = f( &\n      TYPE)\nend module m\n",
             "      type)",
         ),
+        // Reduced from CP2K `src/smeagol_matrix_utils.F`: an initializer split
+        // across its own `=` leaves neither the `::` nor the `=` on this line,
+        // so the whole continuation used to read as entity names.  `INT` kept
+        // its authored spelling on the second corpus pass only, because the
+        // first pass is what had wrapped it.
+        (
+            "module m\n   integer, parameter :: k = 8\n   integer, parameter :: y = 4/ &\n      INT(k, kind=k)\nend module m\n",
+            "      int(k, kind=k)",
+        ),
+        // A top-level comma closes that initializer again, so the entity it
+        // starts is still a declared name.
+        (
+            "module m\n   integer :: a = f(1) + 2, &\n      TYPE = 3\nend module m\n",
+            "      TYPE = 3",
+        ),
     ] {
         let once = format_source(source.as_bytes(), &config).unwrap().bytes;
         let text = String::from_utf8(once.clone()).unwrap();
@@ -1104,9 +1160,9 @@ fn end_keyword_spacing_stops_at_the_statement_it_owns() {
 #[test]
 fn end_construct_keyword_wins_over_a_same_spelled_declared_name() {
     // Reduced from SPECFEM3D. `end` is both the block-end keyword and, here, a
-    // declared dummy argument and local variable. The declared-case engine
-    // used to govern every occurrence of the spelling `end` on a line,
-    // including the leading keyword of `end do` and `end subroutine` — so
+    // declared dummy argument and local variable; `do` is also declared. The
+    // declared-case engine used to govern every occurrence of those spellings
+    // on a line, including the leading keyword of `end do` and `end subroutine` — so
     // under `--keyword-case=upper` the first run emitted `END DO` correctly,
     // and only the *second* run (which starts from a document where `END` and
     // `DO` are already separate tokens) recast the leading `END` down to
@@ -1119,7 +1175,7 @@ fn end_construct_keyword_wins_over_a_same_spelled_declared_name() {
         },
         ..FormatConfig::default()
     };
-    let source = b"subroutine p(end)\nreal end\ndo i = 1, 2\nenddo\nend subroutine p\n";
+    let source = b"subroutine p(end)\nreal end, do\ndo i = 1, 2\nenddo\nend subroutine p\n";
     let once = format_source(source, &config).unwrap().bytes;
     let text = String::from_utf8(once.clone()).unwrap();
     assert!(text.contains("END DO"), "expected END DO in\n{text}");
@@ -1626,4 +1682,167 @@ fn normalize_label_padding(line: &[u8]) -> Vec<u8> {
     let mut normalized = line[..digits].to_vec();
     normalized.extend_from_slice(&line[after_label..]);
     normalized
+}
+
+/// A wrapping profile deep enough that a hand-aligned declaration block sits
+/// near the budget, which is where step 16 and step 17 disagree.
+fn deep_wrapping_config() -> FormatConfig {
+    FormatConfig {
+        mode: FormatMode::Full,
+        wrap: forformat::WrapConfig {
+            enabled: true,
+            line_length: 80,
+        },
+        indent: 8,
+        // The engine reads the per-construct indents, not the scalar, so
+        // setting only `indent` leaves every construct at the default 3 and
+        // the block never reaches the columns where the two passes disagree.
+        construct_indents: forformat::ConstructIndents::with_indent(8),
+        contains_indent: 8,
+        continuation_indent: 8,
+        align_paren: true,
+        align_paren_value: 4,
+        ..FormatConfig::default()
+    }
+}
+
+fn full_twice(source: &str, config: &FormatConfig) -> (String, String) {
+    let once = format_source(source.as_bytes(), config).unwrap().bytes;
+    let twice = format_source(&once, config).unwrap().bytes;
+    (
+        String::from_utf8(once).unwrap(),
+        String::from_utf8(twice).unwrap(),
+    )
+}
+
+#[test]
+fn wrapping_a_block_mate_does_not_change_the_separator_a_declaration_was_measured_against() {
+    // Reduced from CP2K `src/rpa_grad.F`.  `TYPE(...)` is aligned into a block
+    // with the `REAL` declarations, so step 17 holds its `::` out at the
+    // block's shared column and the wrapper measures it there — but wrapping
+    // those neighbours moves their separators onto continuation lines, the
+    // block breaks up, and the `::` is emitted at one space instead.  The
+    // statement was left at 82 columns with `NoSafeBreak` and the next run,
+    // reading the compressed spelling, wrapped it cleanly.
+    let source = "\
+MODULE m
+CONTAINS
+   SUBROUTINE s(ispin)
+      INTEGER :: ispin
+      IF (ispin > 1) THEN
+         IF (ispin > 2) THEN
+            IF (ispin > 3) THEN
+               INTEGER :: send_a_start, send_a_end, send_a_size, &
+                          recv_a_start, recv_a_end, recv_a_size, proc_shift
+               REAL(KIND=dp), DIMENSION(:), ALLOCATABLE, TARGET :: buffer_send_1D
+               REAL(KIND=dp), DIMENSION(:, :), POINTER :: buffer_send
+               REAL(KIND=dp), DIMENSION(:, :), ALLOCATABLE :: buffer_recv
+               TYPE(group_dist_d1_type)                           :: gd_virtual_sub
+            END IF
+         END IF
+      END IF
+   END SUBROUTINE s
+END MODULE m
+";
+    let (once, twice) = full_twice(source, &deep_wrapping_config());
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+    for line in once.lines() {
+        assert!(
+            line.len() <= 80,
+            "emitted {} columns, over the budget it was measured against: {line}",
+            line.len()
+        );
+    }
+}
+
+#[test]
+fn a_separator_on_a_continuation_line_is_still_the_statement_s_own() {
+    // Reduced from CP2K `src/subsys/cell_types.F`.  The author broke this
+    // declaration before its attributes, so the `::` is on the continuation
+    // and the group's *head* line carries none.  Measuring only the head line
+    // found no separator at all, so the wrapper sized and broke the authored
+    // run while step 17 emitted the aligned one, and the two passes chose
+    // different break points.
+    let source = "\
+MODULE m
+   CHARACTER(LEN=3), DIMENSION(7), &
+      PARAMETER, PUBLIC                     :: periodicity_string = [\"  X\", \"  Y\", \"  Z\", &
+                                                                     \" XY\", \" XZ\", \" YZ\", &
+                                                                     \"XYZ\"]
+END MODULE m
+";
+    let (once, twice) = full_twice(source, &deep_wrapping_config());
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+}
+
+#[test]
+fn a_redundant_pair_is_still_redundant_when_the_author_broke_the_line_between_them() {
+    // Reduced from Q-E `PP/src/write_hamiltonians.f90`.  The author closed this
+    // condition on a continuation, so the inner `)` is followed by `&`, a
+    // newline and only then the outer `)`.  Step 7 scanned raw bytes and looked
+    // for the matching `)` across *whitespace* alone, so the continuation
+    // marker hid the pair and the parentheses survived.  Wrapping then rejoined
+    // the statement and broke it elsewhere, and the next run — now seeing the
+    // two `)` adjacent — removed what the first had kept.
+    let source = "\
+subroutine p
+   integer i
+   IF( ((wan_in(i,1)%iatom .ne. wan_in(i+1,1)%iatom) .OR. wan_in(i,1)%ing(1)%l .ne. wan_in(i+1,1)%ing(1)%l) &
+       ) THEN
+      x = 1
+   END IF
+end subroutine p
+";
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        wrap: forformat::WrapConfig {
+            enabled: true,
+            line_length: 80,
+        },
+        ..FormatConfig::default()
+    };
+    let (once, twice) = full_twice(source, &config);
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+    assert!(
+        !once.contains("if ((("),
+        "the redundant pair survived the first pass:\n{once}"
+    );
+}
+
+#[test]
+fn continuation_transparency_does_not_widen_what_paren_removal_is_allowed_to_touch() {
+    // Looking through a continuation marker also lets an assignment's `=` and a
+    // condition's keyword reach parentheses opened on a later physical line.
+    // The guards that make step 7 safe are the argument-list and
+    // `ASSOCIATE`-target tests, and neither may be weakened by that: an extra
+    // pair around an actual argument can carry intent, so it stays.
+    let source = "\
+subroutine p
+  x = 1
+  call foo(a=1, &
+       ((b)) )
+  y = 2; call bar(((c)) &
+       )
+  z = merge(((u)), ((v)), &
+       ((w)) )
+  associate (q => (a), &
+       r => ((b)) )
+    n = ((m) &
+        )
+  end associate
+  write (*, *) ((k))
+end subroutine p
+";
+    let (once, twice) = full_twice(source, &FormatConfig::default());
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+    for kept in ["((b))", "((c))", "((u))", "((v))", "((w))", "((k))"] {
+        assert!(
+            once.contains(kept),
+            "a protected pair {kept} was removed:\n{once}"
+        );
+    }
+    assert!(
+        once.contains("n = (m"),
+        "the eligible right-hand side kept its redundant pair:\n{once}"
+    );
 }

@@ -15,7 +15,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-SOURCE_SUFFIXES = {".f03", ".f08", ".f18", ".f23", ".f90", ".f95"}
+# Several large Fortran projects use uppercase suffixes for free-form sources
+# that are preprocessed by their build systems (notably CP2K and Q-E).  The
+# comparison in `tracked_sources` lowercases suffixes, so `.f` covers `.F`.
+SOURCE_SUFFIXES = {".f", ".f03", ".f08", ".f18", ".f23", ".f90", ".f95"}
 
 FULL = ["--full", "--no-config"]
 INDENT_ONLY = ["--indent-only", "--no-config"]
@@ -275,7 +278,7 @@ def clean_status(repo: Path) -> str:
     return result.stdout.decode(errors="replace")
 
 
-def tracked_sources(repo: Path) -> list[Path]:
+def tracked_sources(repo: Path, binary: Path) -> list[Path]:
     result = git(repo, "ls-files", "--recurse-submodules", "-z", "--")
     if result.returncode:
         raise RuntimeError(result.stderr.decode(errors="replace").strip())
@@ -286,7 +289,24 @@ def tracked_sources(repo: Path) -> list[Path]:
         path = Path(os.fsdecode(raw))
         if path.suffix.lower() in SOURCE_SUFFIXES:
             paths.append(path)
-    return sorted(paths)
+    paths = sorted(paths)
+    if not paths:
+        return paths
+    query = run(
+        [str(binary), "--query-format", *(path.as_posix() for path in paths)],
+        cwd=repo,
+    )
+    if query.returncode:
+        raise RuntimeError(
+            f"format detector failed in {repo}: rc={query.returncode}; "
+            f"{query.stderr.decode(errors='replace').strip()}"
+        )
+    forms = query.stdout.splitlines()
+    if len(forms) != len(paths) or any(form not in {b"free", b"fixed"} for form in forms):
+        raise RuntimeError(
+            f"format detector returned {len(forms)} results for {len(paths)} sources in {repo}"
+        )
+    return [path for path, form in zip(paths, forms) if form == b"free"]
 
 
 def read_sources(repo: Path, sources: list[Path]) -> dict[str, bytes]:
@@ -311,7 +331,7 @@ def invoke(binary: Path, repo: Path, args: list[str], log: Path, *, check: bool 
 
 def profile(
     binary: Path, repo: Path, sources: list[Path], name: str, args: list[str], report: Path
-) -> tuple[ProfileResult, dict[str, bytes], dict[str, bytes], dict[str, bytes]]:
+) -> tuple[ProfileResult, dict[str, tuple[bytes, bytes]]]:
     restore(repo)
     before = read_sources(repo, sources)
     first_rc = invoke(binary, repo, args, report / f"{name}.first")
@@ -320,6 +340,7 @@ def profile(
     after_second = read_sources(repo, sources)
     check_rc = invoke(binary, repo, args, report / f"{name}.check", check=True)
     unstable = changed_paths(after_first, after_second)
+    unstable_states = {path: (after_first[path], after_second[path]) for path in unstable}
     return (
         ProfileResult(
             repo.name,
@@ -331,9 +352,7 @@ def profile(
             len(changed_paths(before, after_first)),
             unstable,
         ),
-        before,
-        after_first,
-        after_second,
+        unstable_states,
     )
 
 
@@ -344,7 +363,7 @@ def sequence(
     name: str,
     stages: list[list[str]],
     report: Path,
-) -> tuple[SequenceResult, list[dict[str, bytes]]]:
+) -> tuple[SequenceResult, dict[str, tuple[bytes, bytes]]]:
     restore(repo)
     snapshots: list[dict[str, bytes]] = []
     return_codes: list[int] = []
@@ -362,7 +381,8 @@ def sequence(
     snapshots.append(read_sources(repo, sources))
     return_codes.append(invoke(binary, repo, final_args, report / f"{name}.check", check=True))
     unstable = changed_paths(snapshots[-2], snapshots[-1])
-    return SequenceResult(repo.name, name, stages, return_codes, unstable), snapshots
+    unstable_states = {path: (snapshots[-2][path], snapshots[-1][path]) for path in unstable}
+    return SequenceResult(repo.name, name, stages, return_codes, unstable), unstable_states
 
 
 def oracle(
@@ -448,8 +468,8 @@ def write_markdown(
     sequences: list[SequenceResult],
     oracle_errors: dict[str, int],
     mismatches: list[OracleMismatch],
-    profile_states: dict[tuple[str, str], tuple[dict[str, bytes], dict[str, bytes], dict[str, bytes]]],
-    sequence_states: dict[tuple[str, str], list[dict[str, bytes]]],
+    profile_states: dict[tuple[str, str], dict[str, tuple[bytes, bytes]]],
+    sequence_states: dict[tuple[str, str], dict[str, tuple[bytes, bytes]]],
 ) -> None:
     failures = [
         result
@@ -506,7 +526,7 @@ def write_markdown(
                     f"check `{result.check_rc}`; files changed on first pass: `{result.changed_count}`.",
                     "",
                 ]
-                _before, first, second = profile_states[(result.repo, result.name)]
+                states = profile_states[(result.repo, result.name)]
                 for path in result.unstable[:8]:
                     lines += [
                         f"#### `{path}`",
@@ -514,7 +534,7 @@ def write_markdown(
                         "The second application changed the first output:",
                         "",
                         "```diff",
-                        short_diff(first[path], second[path], "first pass", "second pass"),
+                        short_diff(states[path][0], states[path][1], "first pass", "second pass"),
                         "```",
                         "",
                         "Reproduce with:",
@@ -551,8 +571,8 @@ def write_markdown(
                         "",
                         "```diff",
                         short_diff(
-                            states[-2][path],
-                            states[-1][path],
+                            states[path][0],
+                            states[path][1],
                             "final stage probe 1",
                             "final stage probe 2",
                         ),
@@ -623,8 +643,8 @@ def main() -> int:
     failed = False
     profile_results: list[ProfileResult] = []
     sequence_results: list[SequenceResult] = []
-    profile_states: dict[tuple[str, str], tuple[dict[str, bytes], dict[str, bytes], dict[str, bytes]]] = {}
-    sequence_states: dict[tuple[str, str], list[dict[str, bytes]]] = {}
+    profile_states: dict[tuple[str, str], dict[str, tuple[bytes, bytes]]] = {}
+    sequence_states: dict[tuple[str, str], dict[str, tuple[bytes, bytes]]] = {}
     oracle_errors: dict[str, int] = {}
     oracle_mismatches: list[OracleMismatch] = []
 
@@ -636,15 +656,15 @@ def main() -> int:
             status = clean_status(repo)
             if status:
                 raise SystemExit(f"dirty repository (use --allow-dirty to override): {repo}\n{status}")
-        sources = tracked_sources(repo)
+        sources = tracked_sources(repo, binary)
         repo_report = report_root / repo.name
         repo_report.mkdir(parents=True, exist_ok=True)
         print(f"\n{repo.name}: {len(sources)} free-form sources")
         try:
             for name in profiles:
-                result, before, first, second = profile(binary, repo, sources, name, PROFILES[name], repo_report)
+                result, states = profile(binary, repo, sources, name, PROFILES[name], repo_report)
                 profile_results.append(result)
-                profile_states[(repo.name, name)] = (before, first, second)
+                profile_states[(repo.name, name)] = states
                 failed |= bool(result.first_rc or result.second_rc or result.check_rc or result.unstable)
                 print(
                     f"  {name:28} rc={result.first_rc},{result.second_rc} check={result.check_rc} "

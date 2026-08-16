@@ -52,6 +52,17 @@ struct LineOptions<'a> {
     /// descriptors are not expressions, so `/)` there is a record separator
     /// before a closing parenthesis and not an array-constructor delimiter.
     continued_format: bool,
+    /// The declaration this line continues has already opened the current
+    /// entity's initializer on an earlier physical line.
+    ///
+    /// A declaration's entity list and its initializers need opposite
+    /// treatment — a name in the list is being declared, a name in an
+    /// initializer is a use — and `::` and `=` both sit on the first line, so
+    /// neither is visible here.  Without this, everything after a wrapped `=`
+    /// read as a declared entity: `INT(dp_size, ...)` kept its authored
+    /// spelling instead of being cased as the intrinsic, which is only a
+    /// difference once the wrapper has moved it off the first line.
+    continued_initializer: bool,
 }
 
 /// Apply the whole chain to every line of the document.
@@ -66,6 +77,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
     let mut continued_infix = false;
     let mut continued_named_parameter = false;
     let mut open_groups: Vec<bool> = Vec::new();
+    let mut entity_list = EntityListCursor::default();
     for index in 0..document.lines.len() {
         let kind = cx
             .analysis
@@ -98,6 +110,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             continued_infix = false;
             continued_named_parameter = false;
             open_groups.clear();
+            entity_list = EntityListCursor::default();
             continue;
         }
         if kind == PhysicalLineKind::Preprocessor {
@@ -108,6 +121,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             continued_infix = false;
             continued_named_parameter = false;
             open_groups.clear();
+            entity_list = EntityListCursor::default();
             continue;
         }
         let preserve_comment_after = preserve_full_comment_spacing(document, index, cx);
@@ -134,6 +148,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 continued_declaration,
                 continued_named_parameter,
                 continued_format,
+                continued_initializer: entity_list.initializer,
                 open_groups: &open_groups,
             },
         );
@@ -149,9 +164,11 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 // given `=` is inside one is decided at the `=`, from
                 // `open_groups`.
                 continued_named_parameter = continued_statement && is_call_group(cx, index);
+                entity_list.advance(code, open_groups.len());
                 fold_open_groups(code, &mut open_groups);
                 if !continued_statement {
                     open_groups.clear();
+                    entity_list = EntityListCursor::default();
                 }
             }
         }
@@ -221,6 +238,7 @@ fn apply_with_options(
         options.continued_declaration,
         options.continued_named_parameter,
         options.continued_format,
+        options.continued_initializer,
         options.open_groups,
         false,
     );
@@ -267,6 +285,7 @@ pub fn respace_joined(
         declared_names,
         line_index,
         &mut state,
+        false,
         false,
         false,
         false,
@@ -363,6 +382,7 @@ pub fn lowercase_line(
         false,
         false,
         false,
+        false,
         &[],
         false,
     )
@@ -380,6 +400,7 @@ fn lowercase_line_with_context(
     continued_declaration: bool,
     continued_named_parameter: bool,
     continued_format: bool,
+    continued_initializer: bool,
     open_groups: &[bool],
     preserve_identifier_case: bool,
 ) -> Vec<u8> {
@@ -387,8 +408,10 @@ fn lowercase_line_with_context(
     let inside_paren = inside_paren_at(open_groups, &tokens);
     // A declaration continued at the statement's top level is still inside its
     // entity list; inside a group it is inside an expression, where a keyword
-    // is a keyword.
-    let continued_entity_list = continued_declaration && open_groups.is_empty();
+    // is a keyword.  So is the rest of an initializer the wrapper has split
+    // away from its `=`.
+    let continued_entity_list =
+        continued_declaration && open_groups.is_empty() && !continued_initializer;
     let mut edits = EditBuffer::new(line);
     let mut spacing = OperatorSpacing::default();
     for (index, token) in tokens.iter().enumerate() {
@@ -1991,6 +2014,43 @@ fn is_continued_named_parameter(
 
 /// Track the groups a line opens and closes, innermost last: `true` for a
 /// parenthesis, `false` for a bracket.
+/// How far a declaration statement has walked through its entity list, folded
+/// one physical line at a time.
+///
+/// The entity list only begins at the `::`, so a comma before it separates
+/// attributes rather than entities.  After that a top-level `=` or `=>` opens
+/// the current entity's initializer and a top-level comma closes it again.
+#[derive(Clone, Copy, Default)]
+struct EntityListCursor {
+    separator: bool,
+    initializer: bool,
+}
+
+impl EntityListCursor {
+    /// Fold one physical line's code bytes.  `depth` is the bracket nesting in
+    /// force where the line starts, since only the statement's top level
+    /// delimits entities.
+    fn advance(&mut self, line: &[u8], depth: usize) {
+        let mut state = LexState::default();
+        let mut depth = depth;
+        for token in tokenize(line, &mut state) {
+            match token.kind {
+                TokenKind::LParen | TokenKind::LBracket => depth += 1,
+                TokenKind::RParen | TokenKind::RBracket => depth = depth.saturating_sub(1),
+                _ if depth > 0 => {}
+                TokenKind::Operator if token.text == b"::" => self.separator = true,
+                TokenKind::Operator
+                    if self.separator && (token.text == b"=" || token.text == b"=>") =>
+                {
+                    self.initializer = true;
+                }
+                TokenKind::Comma if self.separator => self.initializer = false,
+                _ => {}
+            }
+        }
+    }
+}
+
 fn fold_open_groups(line: &[u8], open: &mut Vec<bool>) {
     let mut state = LexState::default();
     for token in tokenize(line, &mut state) {

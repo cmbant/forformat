@@ -90,6 +90,7 @@ pub fn remove_redundant_nested_parentheses(
     }
 
     let protected = protected_offsets(&document.lines);
+    let glue = continuation_glue(&source, &protected);
     let mut removals = HashSet::new();
     let mut stack: Vec<(usize, bool, bool, bool)> = Vec::new();
     let mut line_start = 0usize;
@@ -104,6 +105,14 @@ pub fn remove_redundant_nested_parentheses(
                 line_has_assignment = false;
                 last_non_whitespace = None;
             }
+            continue;
+        }
+        // A continuation marker — and the newline it holds open — is punctuation
+        // of the source layout, not of the expression.  The parentheses of a
+        // statement nest across it, so the scan looks straight through: neither
+        // `directly_nested` nor the search for the matching `)` may be defeated
+        // by where the author chose to break the line.
+        if glue[index] {
             continue;
         }
         if byte == b'=' {
@@ -146,7 +155,9 @@ pub fn remove_redundant_nested_parentheses(
                     if let Some((_, protected, safe, _)) = stack.last() {
                         if *safe && !*protected && directly_nested {
                             let mut following = index + 1;
-                            while source.get(following).is_some_and(u8::is_ascii_whitespace) {
+                            while source.get(following).is_some_and(u8::is_ascii_whitespace)
+                                || glue.get(following) == Some(&true)
+                            {
                                 following += 1;
                             }
                             if source.get(following) == Some(&b')') {
@@ -328,6 +339,47 @@ fn preceding_identifier(source: &[u8], index: usize, start: usize) -> Option<&[u
         begin -= 1;
     }
     (begin != end).then_some(&source[begin..end])
+}
+
+/// Mark the bytes that only hold a statement across a line break.
+///
+/// Those are the trailing `&` that continues a line, the optional `&` that
+/// reopens it on the next, and the newline between them.  A blank or
+/// comment-only line inside a continued statement keeps the statement open
+/// without ending it, so it neither starts nor stops the run.  Marks inside a
+/// string or a comment are not markers at all and are left alone.
+fn continuation_glue(source: &[u8], protected: &[bool]) -> Vec<bool> {
+    let mut glue = vec![false; source.len()];
+    let mut continued = false;
+    let mut start = 0usize;
+    while start <= source.len() {
+        let end = source[start..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(source.len(), |offset| start + offset);
+        let mut code = (start..end)
+            .filter(|index| !protected[*index] && !source[*index].is_ascii_whitespace());
+        let first = code.next();
+        let last = code.next_back().or(first);
+        if let (true, Some(first)) = (continued, first) {
+            if source[first] == b'&' {
+                glue[first] = true;
+            }
+        }
+        if let Some(last) = last {
+            if source[last] == b'&' {
+                glue[last] = true;
+                if end < source.len() {
+                    glue[end] = true;
+                }
+                continued = true;
+            } else {
+                continued = false;
+            }
+        }
+        start = end + 1;
+    }
+    glue
 }
 
 fn protected_offsets(lines: &[Vec<u8>]) -> Vec<bool> {

@@ -59,10 +59,16 @@ When a fixture difference exposes a bug, reduce it to a minimal snippet, add a f
 manifest row, fix it, and rerun the checks. Keep expected findent outputs unchanged unless the
 compatibility contract itself changes.
 
+The devcontainer has original findent installed at /opt/findent.
+
 ## Traps
 
 - Do not use `git stash` to A/B a build: it resets the index for stashed paths, and `pop` does not
   put staged work back. Swap file contents in place instead.
+- `cargo test` has been observed running against a stale library after alternating with
+  `cargo clippy`, which shares the dev profile. If a test result contradicts what the release
+  binary does on the same input, do not debug the difference: run `cargo clean -p forformat` and
+  re-run first. Instrumenting a function and seeing *no* output from it is the giveaway.
 - Full-mode passes must preserve protected literal, Hollerith, preprocessor, and comment bytes
   except for the explicitly documented comment rule.
 - A continuation line has no statement context of its own. Thread facts into line rules rather

@@ -40,7 +40,9 @@ pub mod source;
 pub mod transform;
 
 pub use analysis::{analyze_project, ProjectContext};
-pub use config::{FormatConfig, FormatMode, KeywordCase, MacroDefine, StyleConfig, WrapConfig};
+pub use config::{
+    ConstructIndents, FormatConfig, FormatMode, KeywordCase, MacroDefine, StyleConfig, WrapConfig,
+};
 pub use error::FormatError;
 
 /// The result of formatting a source buffer.

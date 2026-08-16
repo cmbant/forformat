@@ -343,9 +343,7 @@ fn prefixed_procedure(source: &[u8], words: &[Vec<u8>]) -> Option<(StatementKind
             // compress(colvar%combine_cvs_param%function, full=.TRUE.)` names a
             // component called `function`, and treating that as a heading opens
             // a frame that shifts the rest of the procedure.
-            if !procedure_keyword_is_structural(source, &words[i]) {
-                return None;
-            }
+            structural_procedure_keyword(source, &words[i])?;
             // findent's free-form recognizer accepts comma-free prefix words
             // (`pure elemental function`, `integer recursive function`) but
             // leaves declaration-style attribute lists opaque
@@ -368,16 +366,46 @@ fn prefixed_procedure(source: &[u8], words: &[Vec<u8>]) -> Option<(StatementKind
     None
 }
 
-/// Does `keyword` occur where a procedure heading's FUNCTION/SUBROUTINE would,
-/// rather than as a component or argument name somewhere inside the statement?
-fn procedure_keyword_is_structural(source: &[u8], keyword: &[u8]) -> bool {
-    let Some(token) = crate::source::scanner::tokens(source)
-        .into_iter()
-        .find(|token| token.text.eq_ignore_ascii_case(keyword))
-    else {
-        return false;
-    };
-    let before = &source[..token.start];
+/// Byte offset of the FUNCTION/SUBROUTINE that opens a procedure heading.
+///
+/// Fortran reserves no words, so the same spelling can appear earlier in the
+/// statement as an ordinary name: a component (`x%function`), or an argument or
+/// kind parameter (`integer(kind=function) function f()`, whose real keyword
+/// follows a named constant spelled the same way).  Every occurrence is
+/// therefore examined and the first one standing at the statement's own level
+/// wins; answering from the first occurrence alone would reject a genuine
+/// heading and leave the rest of the module unindented.
+fn structural_procedure_keyword(source: &[u8], keyword: &[u8]) -> Option<usize> {
+    let tokens = crate::source::scanner::tokens(source);
+    tokens
+        .iter()
+        .enumerate()
+        .find(|(index, token)| {
+            token.text.eq_ignore_ascii_case(keyword)
+                && keyword_stands_alone(source, token.start)
+                && names_a_procedure(&tokens, *index)
+        })
+        .map(|(_, token)| token.start)
+}
+
+/// A `function-stmt` or `subroutine-stmt` names its procedure immediately after
+/// the keyword.  Requiring that is what separates a heading from a declaration
+/// of a variable spelled like the keyword: findent opens no frame for
+/// `integer :: subroutine`, `integer subroutine` or `type(t) :: function`, and
+/// nothing follows the keyword in any of them.
+fn names_a_procedure(tokens: &[crate::source::scanner::Token<'_>], index: usize) -> bool {
+    tokens.get(index + 1).is_some_and(|token| {
+        token
+            .text
+            .first()
+            .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+    })
+}
+
+/// Is the token starting at `start` the statement's own word, rather than one
+/// selected by `%` or enclosed in an argument list or subscript?
+fn keyword_stands_alone(source: &[u8], start: usize) -> bool {
+    let before = &source[..start];
     // A component selector makes it a name: `x%function`.
     if before
         .iter()
@@ -388,7 +416,14 @@ fn procedure_keyword_is_structural(source: &[u8], keyword: &[u8]) -> bool {
         return false;
     }
     // Anything inside brackets is an argument or a subscript.
+    bracket_scan(before).0 == 0
+}
+
+/// Walk `before` outside string literals, returning the bracket depth it ends
+/// at and whether it holds a comma at depth zero.
+fn bracket_scan(before: &[u8]) -> (usize, bool) {
     let mut depth: usize = 0;
+    let mut comma = false;
     let mut quote = 0u8;
     for (i, c) in before.iter().enumerate() {
         if quote != 0 {
@@ -401,10 +436,11 @@ fn procedure_keyword_is_structural(source: &[u8], keyword: &[u8]) -> bool {
             b'\'' | b'"' => quote = *c,
             b'(' | b'[' => depth += 1,
             b')' | b']' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => comma = true,
             _ => {}
         }
     }
-    depth == 0
+    (depth, comma)
 }
 
 fn comma_prefixed_procedure(source: &[u8], words: &[Vec<u8>]) -> Option<StatementKind> {
@@ -415,10 +451,13 @@ fn comma_prefixed_procedure(source: &[u8], words: &[Vec<u8>]) -> Option<Statemen
         return None;
     }
     let keyword = &words[i];
-    let has_comma = crate::source::scanner::tokens(source)
-        .into_iter()
-        .find(|token| token.text.eq_ignore_ascii_case(keyword))
-        .is_some_and(|token| source[..token.start].contains(&b','));
+    // The comma has to be the statement's own, and precede the heading's own
+    // keyword.  A comma inside brackets is a type parameter or a subscript —
+    // findent still opens a frame for
+    // `character(len=1, kind=k) function g()` — and measuring from an earlier
+    // same-spelled name would put the whole type spec on the wrong side.
+    let at = structural_procedure_keyword(source, keyword)?;
+    let has_comma = bracket_scan(&source[..at]).1;
     has_comma.then_some(if keyword == b"function" {
         StatementKind::Function
     } else {
