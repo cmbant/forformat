@@ -193,6 +193,7 @@ fn read_config(
                 | "last-usable"
                 | "no-config"
                 | "no-submodules"
+                | "project-context"
                 | "stdin"
                 | "stdout"
                 | "show-files"
@@ -365,6 +366,20 @@ mod tests {
         let config = config_from_text("precedence", "indent-select = 2\nindent = 4\n");
         assert!(config_key_priority("indent") < config_key_priority("indent-select"));
         assert_eq!(config.construct_indents.select, 2);
+    }
+
+    #[test]
+    fn project_context_is_not_a_configuration_key() {
+        let path = std::env::temp_dir().join(format!(
+            "forformat-project-context-config-{}.toml",
+            std::process::id()
+        ));
+        fs::write(&path, "project-context = '.'\n").unwrap();
+        let error = config_args(&path, Some(&path)).unwrap_err();
+        let _ = fs::remove_file(&path);
+        assert!(error
+            .to_string()
+            .contains("configuration key `project-context` is a command-line workflow option"));
     }
 
     #[test]

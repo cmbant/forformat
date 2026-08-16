@@ -461,12 +461,15 @@ fn fixed_message(input: &str) -> String {
 /// without this every content-free invocation — `forformat </dev/null` among
 /// them — would report a skip. And `-lastindent`/`-lastusable` only report on
 /// the source rather than rewriting it, so there is nothing to decline.
-fn skips_fixed_form(invocation: &Invocation, source: &[u8]) -> bool {
+fn skips_fixed_form(invocation: &Invocation, input_path: Option<&Path>, source: &[u8]) -> bool {
     !invocation.force_free_input
         && !invocation.config.last_indent
         && !invocation.config.last_usable
         && source.iter().any(|byte| !byte.is_ascii_whitespace())
-        && crate::source::detect(source) == SourceForm::Fixed
+        && input_path.map_or_else(
+            || crate::source::detect(source),
+            |path| crate::source::detect_path(path, source),
+        ) == SourceForm::Fixed
 }
 
 fn write_all_stdout(bytes: &[u8]) -> Result<(), WorkflowError> {
@@ -675,7 +678,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         // file routes get: free-form normalization of a fixed-form source
         // rewrites column-1 `*`/`C` comment markers as operators and destroys
         // the file.  There is no path to name in the diagnostic here.
-        if skips_fixed_form(&invocation, &source) {
+        if skips_fixed_form(&invocation, None, &source) {
             eprintln!("{}", fixed_message("<stdin>"));
             write_all_stdout(&source)?;
             return Ok(0);
@@ -773,6 +776,28 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         return Err(WorkflowError::Usage(
             "--project-context requires a valid Git checkout".into(),
         ));
+    }
+    if stdin_mode {
+        let source = stdin_source
+            .as_deref()
+            .expect("stdin mode must have read stdin");
+        let input_path = project_scope.as_ref().and_then(|(_, path)| path.as_deref());
+        if skips_fixed_form(&invocation, input_path, source) {
+            let input = input_path
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "<stdin>".to_string());
+            eprintln!("{}", fixed_message(&input));
+            write_all_stdout(source)?;
+            return Ok(0);
+        }
+        if invocation.config.mode == FormatMode::IndentOnly {
+            let formatted = format_source(source, &invocation.config)?;
+            let mut declines = DeclineReporter::default();
+            declines.report(&formatted.meta, None, root.as_deref());
+            declines.finish();
+            write_all_stdout(&formatted.bytes)?;
+            return Ok(0);
+        }
     }
     let exclude_matcher = ExcludeMatcher::new(&invocation.exclude_patterns());
     let tracked_source_reader = if invocation.no_submodules {
@@ -952,13 +977,6 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         let source = stdin_source
             .as_deref()
             .expect("stdin mode must have read stdin");
-        // Same guard as the plain-stdin route above; a `--project-context` does
-        // not make a fixed-form buffer safe to normalize.
-        if skips_fixed_form(&invocation, source) {
-            eprintln!("{}", fixed_message("<stdin>"));
-            write_all_stdout(source)?;
-            return Ok(0);
-        }
         let formatted = if invocation.config.mode == FormatMode::IndentOnly {
             format_source(source, &invocation.config)?
         } else {

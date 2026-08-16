@@ -663,6 +663,40 @@ fn project_context_supplies_declarations_without_discovering_config() {
 }
 
 #[test]
+fn project_context_implies_stdin_and_anchors_config_discovery() {
+    let repo = temp_repo();
+    fs::create_dir(repo.join("src")).unwrap();
+    fs::write(repo.join(".forformat.toml"), b"indent = 4\n").unwrap();
+    fs::write(repo.join("src/.forformat.toml"), b"indent = 8\n").unwrap();
+
+    let output = run_stdin(
+        &repo,
+        &["--indent-only", "--project-context", "src"],
+        b"program p\nx=1\nend program p\n",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"program p\n        x=1\nend program p\n");
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn file_project_context_uses_the_context_filename_for_detection() {
+    let repo = temp_repo();
+    let target = repo.join("target.f90");
+    fs::write(&target, b"program p\nend program p\n").unwrap();
+    git_add(&repo);
+
+    let output = run_stdin(
+        &repo,
+        &["--full", "--no-config", "--project-context", "target.f90"],
+        b"      program p\n      end program p\n",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("fixed-form source, skipped"));
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
 fn file_project_context_excludes_the_stale_on_disk_target() {
     let repo = temp_repo();
     let target = repo.join("target.f90");

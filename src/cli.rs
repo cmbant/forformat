@@ -149,6 +149,21 @@ where
 
 fn config_start(command: &Command, cwd: &Path) -> PathBuf {
     if let Command::Run(invocation) = command {
+        if let Some(path) = invocation.project_context.as_deref() {
+            let candidate = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                cwd.join(path)
+            };
+            return if candidate.is_dir() {
+                candidate
+            } else {
+                candidate
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|| cwd.to_path_buf())
+            };
+        }
         if (invocation.all || invocation.all_files) && invocation.paths.len() == 1 {
             let candidate = if invocation.paths[0].is_absolute() {
                 invocation.paths[0].clone()
@@ -327,6 +342,11 @@ where
                     if path.is_empty() {
                         return Err(FormatError::InvalidOption(
                             "--project-context requires a path".into(),
+                        ));
+                    }
+                    if project_context.is_some() {
+                        return Err(FormatError::InvalidOption(
+                            "--project-context may be specified only once".into(),
                         ));
                     }
                     project_context = Some(PathBuf::from(path));
@@ -593,8 +613,7 @@ where
         paths.push(PathBuf::from(arg));
     }
     if project_context.is_some()
-        && (!stdin
-            || !paths.is_empty()
+        && (!paths.is_empty()
             || all
             || all_files
             || stdout
@@ -604,7 +623,7 @@ where
             || show_files)
     {
         return Err(FormatError::InvalidOption(
-            "--project-context requires --stdin and cannot be combined with paths, --all, --all-files, --stdout, --isolated, --check, --diff, or --show-files".into(),
+            "--project-context cannot be combined with paths, --all, --all-files, --stdout, --isolated, --check, --diff, or --show-files".into(),
         ));
     }
     if stdin
@@ -666,6 +685,14 @@ where
             "--query-format cannot be combined with output, check, diff, or other query modes"
                 .into(),
         ));
+    }
+    if query_format && project_context.is_some() {
+        return Err(FormatError::InvalidOption(
+            "--query-format cannot be combined with --project-context".into(),
+        ));
+    }
+    if project_context.is_some() {
+        stdin = true;
     }
     if (c.last_indent || c.last_usable) && (all || all_files || !paths.is_empty() || check || diff)
     {
@@ -913,7 +940,7 @@ Free-form Fortran formatter.\n\
     <paths>, --all [directory]          format explicit files or all tracked sources recursively\n\
     --no-submodules                     omit submodule sources from targets and project context\n\
   --stdin                             read source from stdin (default without paths)\n\
-  --project-context=<path>            analyze a Git checkout while formatting stdin; a source path excludes its on-disk copy\n\
+    --project-context=<path>            treat stdin as belonging to the Git project containing PATH; a source-file PATH identifies stdin as that file and shadows its on-disk contents\n\
   --stdout                            write one file's result to stdout\n\
   --isolated                          do not scan repository sources for case resolution\n\
   --check                             exit 1 if selected files would change\n\
@@ -1085,11 +1112,12 @@ mod tests {
     }
 
     #[test]
-    fn project_context_requires_explicit_stdin_and_no_file_workflow() {
+    fn project_context_implies_stdin_and_rejects_file_workflows() {
         for args in [
-            &["--project-context", "."][..],
-            &["--stdin", "--project-context", ".", "source.f90"][..],
-            &["--stdin", "--project-context", ".", "--check"][..],
+            &["--project-context", ".", "source.f90"][..],
+            &["--project-context", ".", "--check"][..],
+            &["--query-format", "--project-context", "."][..],
+            &["--project-context", ".", "--project-context", "."][..],
         ] {
             assert!(
                 parse(
@@ -1100,8 +1128,17 @@ mod tests {
                 "{args:?}"
             );
         }
-        assert!(parse(
+        let Command::Run(invocation) = parse(
             ["forformat", "--stdin", "--project-context", "."]
+                .into_iter()
+                .map(str::to_owned),
+        )
+        .unwrap() else {
+            panic!("expected run")
+        };
+        assert!(invocation.stdin);
+        assert!(parse(
+            ["forformat", "--project-context", "."]
                 .into_iter()
                 .map(str::to_owned),
         )
