@@ -160,7 +160,8 @@ pub fn normalize(
 /// [`passes::layout_post::declaration_separator_alignment`] and the caller in
 /// `format::full`, which has to lay the text out again when it did.
 pub fn post_layout(document: &mut Document, config: &FormatConfig) -> Result<bool, FormatError> {
-    let widths_changed = passes::layout_post::declaration_separator_alignment(document, config)?;
+    let mut widths_changed =
+        passes::layout_post::declaration_separator_alignment(document, config)?;
     // After step 17, because a comment's column is measured from the code it
     // follows and step 17 is what settles where that code ends.
     passes::layout_post::trailing_comment_alignment(document, config)?;
@@ -170,6 +171,10 @@ pub fn post_layout(document: &mut Document, config: &FormatConfig) -> Result<boo
     if config.style.max_blank_lines.is_some() {
         passes::layout_post::limit_blank_lines(document, config)?;
     }
+    // Blank-line limiting can join declaration carriers that step 17 saw as
+    // separate blocks. Re-run the width-changing alignment after that merge
+    // so the next formatter invocation has no newly introduced padding to add.
+    widths_changed |= passes::layout_post::declaration_separator_alignment(document, config)?;
     passes::layout_post::output_whitespace(document, config)?;
     Ok(widths_changed)
 }

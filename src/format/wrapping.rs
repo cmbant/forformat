@@ -22,6 +22,10 @@ use crate::source::{
 /// preferred, because it separates larger pieces of meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum BreakTier {
+    /// The `::` of a nested type-spec, as in `allocate(T :: obj)` or
+    /// `[integer :: 1, 2]`. Looser than a comma so the type-spec/object-list
+    /// seam is preferred over a break further into the object list.
+    TypeSpec,
     Comma,
     Equivalence,
     Disjunction,
@@ -328,6 +332,14 @@ fn break_tier(tokens: &[Token], index: usize) -> Option<BreakTier> {
             }
         }
         TokenKind::Operator => match token.text {
+            // The statement-level `::` (a declaration's attribute/entity
+            // seam) is handled separately by `statement_head_end`, which
+            // runs before this search and is never revisited here. What
+            // reaches this arm is a `::` nested inside a call or
+            // constructor — `allocate(T :: obj)`, `[integer :: 1, 2]` — for
+            // which there is no head-boundary concept, only a candidate
+            // break among others.
+            b"::" => Some(BreakTier::TypeSpec),
             b"==" | b"/=" | b"<=" | b">=" | b"<" | b">" => Some(BreakTier::Comparison),
             b"//" => Some(BreakTier::Concatenation),
             // A `+` or `-` is a break candidate only when it is spelled as a

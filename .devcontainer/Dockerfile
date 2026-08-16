@@ -14,6 +14,7 @@ RUN apt-get update \
         git \
         ripgrep \
         subversion \
+        procps \
         sudo \
     && rm -rf /var/lib/apt/lists/*
 

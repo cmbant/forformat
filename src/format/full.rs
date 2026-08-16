@@ -705,6 +705,27 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_type_spec_colon_is_a_stable_wrap_point() {
+        // `allocate`'s type-spec `::` sits inside the call's parens, not at
+        // statement depth 0, so it is a different code path from an ordinary
+        // declaration's head. Deep indent plus a compact `::` (no authored
+        // space on either side) pushes the line past the budget only once
+        // step 17 pads the separator — the first pass has to reserve that
+        // budget and still find a break, or it declines and leaves an
+        // over-long line for the second pass to wrap differently (I1).
+        let source = b"subroutine s\nif (a) then\nif (b) then\nif (c) then\nallocate(TMetropolisSampler::this%SamplingAlgorithm)\nend if\nend if\nend if\nend subroutine s\n";
+        let setup = |config: &mut FormatConfig| {
+            config.indent = 8;
+            config.construct_indents.set_all(8);
+            config.wrap.line_length = 80;
+        };
+        let once = full(setup, source);
+        let twice = full(setup, &once);
+        assert_eq!(once, twice);
+        assert!(String::from_utf8_lossy(&once).contains("TMetropolisSampler :: &"));
+    }
+
+    #[test]
     fn detached_comment_uses_the_single_line_layout_indent() {
         let source = br#"module m
 implicit none

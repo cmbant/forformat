@@ -234,7 +234,7 @@ fn apply_with_options(
     if cx.config.style.delimiter_spacing {
         text = normalize_write_output_spacing_with_state(&text, cx, incoming);
     }
-    text = normalize_delimiter_spacing_with_state(&text, cx, incoming);
+    text = normalize_delimiter_spacing_with_state(&text, cx, incoming, options.continued_statement);
     let mut text = normalize_comment_spacing_with_state(
         &text,
         cx,
@@ -242,7 +242,10 @@ fn apply_with_options(
         options.preserve_comment_after,
         code_span_len(&text) as isize - code_span_len(line) as isize,
     );
-    if options.continued_statement && options.continued_named_parameter {
+    if options.continued_statement
+        && options.continued_named_parameter
+        && cx.config.style.continuation_markers
+    {
         text = compact_continued_named_argument(&text, options.open_groups);
     }
     text
@@ -281,7 +284,7 @@ pub fn respace_joined(
         false,
         &cx.config.style,
     );
-    text = normalize_delimiter_spacing_with_state(&text, cx, LexState::default());
+    text = normalize_delimiter_spacing_with_state(&text, cx, LexState::default(), false);
     compact_joined_named_arguments(&text)
 }
 
@@ -973,7 +976,7 @@ fn is_leading_continuation_arithmetic(
     index: usize,
     token: &crate::source::Token<'_>,
 ) -> bool {
-    matches!(token.text, b"+" | b"-" | b"*" | b"/")
+    matches!(token.text, b"+" | b"-" | b"*" | b"/" | b"**")
         && tokens[..index]
             .iter()
             .all(|previous| previous.kind == TokenKind::Ampersand)
@@ -1019,20 +1022,21 @@ fn normalize_write_output_spacing_with_state(
 /// before it, none inside brackets, and the compact behaviour of `*`, `/`,
 /// `**`, `//` ([`vocab::COMPACT_ARITHMETIC_OPERATORS`]).
 pub fn normalize_delimiter_spacing(line: &[u8], cx: &PassContext) -> Vec<u8> {
-    normalize_delimiter_spacing_with_state(line, cx, LexState::default())
+    normalize_delimiter_spacing_with_state(line, cx, LexState::default(), false)
 }
 
 fn normalize_delimiter_spacing_with_state(
     line: &[u8],
     cx: &PassContext,
     incoming: LexState,
+    continued_statement: bool,
 ) -> Vec<u8> {
     if !cx.config.style.delimiter_spacing {
         return line.to_vec();
     }
     let mut text = line.to_vec();
     let tokens = tokenize(&text, &mut incoming.clone());
-    if is_declaration_statement(&tokens) {
+    if !continued_statement && is_declaration_statement(&tokens) {
         if let Some(separator) = top_level_separator(&tokens) {
             text = reorder_optional_attribute(&text, tokens[separator].span.start, incoming);
         } else {
@@ -2406,6 +2410,35 @@ mod tests {
     fn adjacent_operator_padding_is_idempotent() {
         let once = normalized(b"a=.not.b\nx=y.and..not.z\n");
         assert_eq!(normalized(once.as_bytes()), once);
+    }
+
+    #[test]
+    fn spaced_power_operator_stays_spaced_after_a_continuation() {
+        let source = b"x = value &\n  ** 2\n";
+        let mut config = FormatConfig {
+            mode: FormatMode::NormalizeOnly,
+            apply_indent: false,
+            ..FormatConfig::default()
+        };
+        config.style.compact_multiplicative = false;
+        let once = format_source(source, &config).unwrap().bytes;
+        let twice = format_source(&once, &config).unwrap().bytes;
+        assert_eq!(once, twice);
+        assert!(once.windows(4).any(|window| window == b"** 2"));
+    }
+
+    #[test]
+    fn spaced_relational_operator_stays_spaced_after_a_continuation() {
+        let source = b"if (DefaultFalse(filename) .and. &\n  value /= '') value = replace(value)\n";
+        let config = FormatConfig {
+            mode: FormatMode::NormalizeOnly,
+            apply_indent: false,
+            ..FormatConfig::default()
+        };
+        let once = format_source(source, &config).unwrap().bytes;
+        let twice = format_source(&once, &config).unwrap().bytes;
+        assert_eq!(once, twice);
+        assert!(once.windows(5).any(|window| window == b"/= ''"));
     }
 
     #[test]
