@@ -16,7 +16,10 @@ free-form compatibility no-ops.
 | `-Rr`, `-RR`, `--ws_remred` | supported as explicit transformations; bare `--ws_remred` enables it |
 | `-i-`, `--indent=none` | supported; preserve source indentation while retaining other formatting contracts |
 | `-lastindent`, `-lastusable` | supported |
-| `-ifixed`, `-ofixed`, `-iauto`, `--continuation` | rejected with status 2 |
+| `-ifixed`, `-ofixed`, `--continuation` | rejected with status 2 |
+| `-iauto`, `--input-format=auto` | supported; automatic fixed/free input detection is the default |
+| `-ifree`, `--input-format=free` | supported; forces free-form handling, bypassing detection |
+| `--query-fix-free` equivalent: `--query-format` | supported; prints `free` or `fixed` per input |
 | `--relabel`, `--deps`, editor wrappers, `--safe`, `--selfrep` | not implemented |
 
 Rust intentionally does not read `FINDENT_FLAGS` and rejects unknown options. `--indent-only`

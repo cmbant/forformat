@@ -44,6 +44,15 @@ directory prefix and all descendants. A leading `/` anchors at the repository ro
 without it are tried at each path-component boundary. Relative paths are normalized to `/` before
 matching.
 
+Every file target is read before formatting and classified with the findent-compatible fixed/free
+format detector. Fixed-form sources are skipped: their bytes are not written, they do not make
+`--check` fail, and `--stdout` returns the original bytes. Each skipped target receives a
+`forformat: <path>: fixed-form source, skipped` diagnostic on stderr. Use `-ifree` or
+`--input-format=free` when a source uses free form despite a legacy-looking layout; this forces
+free-form handling and bypasses detection. `-iauto` and `--input-format=auto` select the default
+automatic behavior. `--query-format` prints one `free` or `fixed` result per input without
+formatting or modifying it.
+
 All project source bytes are loaded into memory before analysis. One
 ProjectContext is then built and shared by every target in the invocation.
 In-place replacement writes a same-directory temporary, copies the original

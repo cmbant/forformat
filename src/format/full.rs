@@ -407,7 +407,7 @@ fn join_openmp_directive(document: &Document, group: &LogicalGroup) -> Option<Ve
     for (position, index) in indices.into_iter().enumerate() {
         let line = &document.lines[index];
         let start = line.iter().position(|byte| !byte.is_ascii_whitespace())?;
-        if !line[start..].starts_with(b"!$") {
+        if !openmp_candidate(line, start) {
             return None;
         }
         if position == 0 {
@@ -445,6 +445,17 @@ fn join_openmp_directive(document: &Document, group: &LogicalGroup) -> Option<Ve
         joined.extend_from_slice(part);
     }
     Some(joined)
+}
+
+/// findent's free-form sentinel is `!$` at EOL or followed by a blank.  The
+/// `OMP` spelling is the separate uppercase directive form; `!$acc` and other
+/// joined words are ordinary comments and must not be re-emitted as sentinels.
+fn openmp_candidate(line: &[u8], start: usize) -> bool {
+    if !line[start..].starts_with(b"!$") {
+        return false;
+    }
+    line.get(start + 2)
+        .is_none_or(|byte| matches!(byte, b' ' | b'\t') || is_openmp_line(line))
 }
 
 fn is_openmp_line(line: &[u8]) -> bool {

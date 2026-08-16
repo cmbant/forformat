@@ -91,6 +91,14 @@ pub fn classify(input: &[u8]) -> StatementInfo {
         b"else" => (StatementKind::Else, StatementClass::Executable),
         b"do" => (StatementKind::Do, StatementClass::Executable),
         b"select" => (StatementKind::Select, StatementClass::Executable),
+        // The compact spellings are standard free-form Fortran, matching the
+        // compact `end...` spellings above: findent's own recognizer accepts
+        // `selectcase`/`selecttype`/`selectrank` as SELECT openers, so the
+        // indent-only engine must too or its frame nesting diverges from the
+        // oracle for every statement inside the construct.
+        b"selectcase" | b"selecttype" | b"selectrank" => {
+            (StatementKind::Select, StatementClass::Executable)
+        }
         b"case" => (StatementKind::Case, StatementClass::Executable),
         b"rank" => (StatementKind::Case, StatementClass::Executable),
         b"class" if words.get(1).is_some_and(|x| x == b"is" || x == b"default") => {
@@ -242,11 +250,63 @@ fn is_assignment(s: &[u8]) -> bool {
         match c {
             b'(' => depth += 1,
             b')' => depth = depth.saturating_sub(1),
-            b'=' if depth == 0 => return !s.get(i + 1).is_some_and(|x| *x == b'>' || *x == b'='),
+            b'=' if depth == 0 => {
+                return match s.get(i + 1) {
+                    // A pointer assignment is an assignment too: findent's
+                    // grammar spells it `assignment: lvalue '=' skipnoop /*
+                    // this includes '=>' */`.  Without this, `block => list`
+                    // and `entry%next => cursor` fall through to the BLOCK and
+                    // ENTRY arms below and open a frame that is never closed.
+                    // The designator guard is what keeps a pointer-initialised
+                    // declaration (`integer, pointer :: p => null()`,
+                    // `procedure :: run => t_run`) out: those carry a `::` or a
+                    // top-level comma, which no lvalue does.
+                    Some(b'>') => is_designator(&s[..i]),
+                    Some(b'=') => false,
+                    _ => true,
+                };
+            }
             _ => {}
         }
     }
     false
+}
+
+/// Does this text read as a bare variable designator — a name, then any mix of
+/// `%component`, `(subscripts)` and `[coindices]`?
+///
+/// Only the top level is inspected: whatever sits inside brackets is already
+/// bounded by them, so it cannot turn the whole into a declaration.
+fn is_designator(s: &[u8]) -> bool {
+    let t = trim(s);
+    if !t
+        .first()
+        .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
+    {
+        return false;
+    }
+    let mut depth: usize = 0;
+    let mut quote = 0u8;
+    for (i, c) in t.iter().enumerate() {
+        if quote != 0 {
+            if *c == quote && t.get(i + 1) != Some(c) {
+                quote = 0;
+            }
+            continue;
+        }
+        match c {
+            b'\'' | b'"' => quote = *c,
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            _ if depth > 0 => {}
+            c if c.is_ascii_alphanumeric()
+                || *c == b'_'
+                || *c == b'%'
+                || c.is_ascii_whitespace() => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn prefixed_procedure(source: &[u8], words: &[Vec<u8>]) -> Option<(StatementKind, StatementClass)> {
@@ -279,6 +339,13 @@ fn prefixed_procedure(source: &[u8], words: &[Vec<u8>]) -> Option<(StatementKind
         .position(|x| x == b"function" || x == b"subroutine")
     {
         if i > 0 {
+            // The word has to be the statement's own keyword.  `CALL
+            // compress(colvar%combine_cvs_param%function, full=.TRUE.)` names a
+            // component called `function`, and treating that as a heading opens
+            // a frame that shifts the rest of the procedure.
+            if !procedure_keyword_is_structural(source, &words[i]) {
+                return None;
+            }
             // findent's free-form recognizer accepts comma-free prefix words
             // (`pure elemental function`, `integer recursive function`) but
             // leaves declaration-style attribute lists opaque
@@ -299,6 +366,45 @@ fn prefixed_procedure(source: &[u8], words: &[Vec<u8>]) -> Option<(StatementKind
         }
     }
     None
+}
+
+/// Does `keyword` occur where a procedure heading's FUNCTION/SUBROUTINE would,
+/// rather than as a component or argument name somewhere inside the statement?
+fn procedure_keyword_is_structural(source: &[u8], keyword: &[u8]) -> bool {
+    let Some(token) = crate::source::scanner::tokens(source)
+        .into_iter()
+        .find(|token| token.text.eq_ignore_ascii_case(keyword))
+    else {
+        return false;
+    };
+    let before = &source[..token.start];
+    // A component selector makes it a name: `x%function`.
+    if before
+        .iter()
+        .rev()
+        .find(|c| !c.is_ascii_whitespace())
+        .is_some_and(|c| *c == b'%')
+    {
+        return false;
+    }
+    // Anything inside brackets is an argument or a subscript.
+    let mut depth: usize = 0;
+    let mut quote = 0u8;
+    for (i, c) in before.iter().enumerate() {
+        if quote != 0 {
+            if *c == quote && before.get(i + 1) != Some(c) {
+                quote = 0;
+            }
+            continue;
+        }
+        match c {
+            b'\'' | b'"' => quote = *c,
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    depth == 0
 }
 
 fn comma_prefixed_procedure(source: &[u8], words: &[Vec<u8>]) -> Option<StatementKind> {
@@ -333,12 +439,44 @@ fn explicit_end_kind(words: &[Vec<u8>]) -> Option<StatementKind> {
     }
 }
 fn has_then(s: &[u8]) -> bool {
+    // A byte scan, like `single_line_after_paren` above, not the `tokens`
+    // scanner: `tokens` treats an unterminated `.something` (the DEC
+    // RECORD field-access dot in `TYPES_MESH.i == 1 ) THEN`, which has no
+    // closing `.`) as one token running to the end of the statement,
+    // which would swallow a real trailing THEN. Quote-skipping is still
+    // needed so a `then` inside a string-literal argument
+    // (`call foo('..., then ...', x)`) is not mistaken for the keyword.
     let t = trim(s);
-    t.windows(4).enumerate().any(|(i, w)| {
-        w.eq_ignore_ascii_case(b"then")
+    let mut quote = 0u8;
+    let mut i = 0;
+    while i < t.len() {
+        let byte = t[i];
+        if quote != 0 {
+            if byte == quote {
+                if t.get(i + 1) == Some(&quote) {
+                    i += 2;
+                    continue;
+                }
+                quote = 0;
+            }
+            i += 1;
+            continue;
+        }
+        if byte == b'\'' || byte == b'"' {
+            quote = byte;
+            i += 1;
+            continue;
+        }
+        if t[i..].len() >= 4
+            && t[i..i + 4].eq_ignore_ascii_case(b"then")
             && (i == 0 || !is_identifier_byte(t[i - 1]))
             && t.get(i + 4).is_none_or(|c| !is_identifier_byte(*c))
-    })
+        {
+            return true;
+        }
+        i += 1;
+    }
+    false
 }
 
 fn single_line_after_paren(s: &[u8], keyword: &[u8]) -> bool {

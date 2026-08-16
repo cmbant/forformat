@@ -248,6 +248,17 @@ fn classify_spelling(
     procedure_spellings: Option<&CaseMap>,
 ) -> Option<Vec<u8>> {
     let token = &tokens[index];
+
+    // A leading `END` (bare, or opening `END DO`/`END IF`/`END SUBROUTINE`/…)
+    // is the block-end keyword and never a use of a same-spelled declared
+    // name, even when the file also declares a dummy argument or variable
+    // named `end`. Letting the declared-case engine govern it here would
+    // fight with keyword-case on every later pass, since re-tokenizing its
+    // own output feeds this same token straight back in (I1).
+    if super::line_rules::is_end_construct_keyword(tokens, index) {
+        return None;
+    }
+
     let associate_alias = associates.is_some_and(|context| {
         context
             .names

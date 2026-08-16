@@ -27,14 +27,17 @@ expect_diagnostic() {
 
 expect_status 2 -ifixed
 expect_status 2 -ofixed
-expect_status 2 -iauto
 expect_status 2 --continuation=0
-expect_status 2 --input-format=auto
 expect_status 2 --output-format=fixed
 expect_diagnostic 2 'forformat: invalid option: --not-an-option' --not-an-option
 expect_diagnostic 2 'forformat: invalid option: --input-format=unknown' --input-format=unknown
 expect_diagnostic 2 'forformat: invalid option: expected non-negative integer, got -1' --align_paren=-1
 expect_diagnostic 2 'forformat: unsupported: fixed-form input/output is not supported' -ifixed
+
+# Automatic fixed/free input detection is the default, so the legacy spellings
+# that ask for it are accepted rather than rejected.
+expect_status 0 -iauto
+expect_status 0 --input-format=auto
 
 alias_source=$'program p\nx = 1\nend program\n'
 test "$(printf '%s' "$alias_source" | "$binary" --input_format=free)" = "$(printf '%s' "$alias_source" | "$binary" --input-format=free)"

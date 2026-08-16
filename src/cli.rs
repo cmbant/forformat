@@ -26,6 +26,8 @@ pub struct Invocation {
     pub no_submodules: bool,
     pub stdin: bool,
     pub stdout: bool,
+    pub force_free_input: bool,
+    pub query_format: bool,
     pub isolated: bool,
     pub check: bool,
     pub diff: bool,
@@ -180,6 +182,8 @@ where
     let mut no_submodules = false;
     let mut stdin = false;
     let mut stdout = false;
+    let mut force_free_input = false;
+    let mut query_format = false;
     let mut isolated = false;
     let mut check = false;
     let mut diff = false;
@@ -211,17 +215,15 @@ where
             c.last_usable = true;
             continue;
         }
-        if arg == "-ifree"
-            || arg == "-ofree"
-            || arg == "-osame"
-            || arg == "--input-format=free"
-            || arg == "--output-format=free"
-        {
+        if arg == "-ifree" || arg == "--input-format=free" {
+            force_free_input = true;
+            continue;
+        }
+        if arg == "-ofree" || arg == "-osame" || arg == "--output-format=free" {
             continue;
         }
         if arg == "-ifixed"
             || arg == "-ofixed"
-            || arg == "-iauto"
             || arg == "--input-format=fixed"
             || arg == "--output-format=fixed"
         {
@@ -335,6 +337,7 @@ where
                 "check" => check = true,
                 "diff" => diff = true,
                 "show-files" => show_files = true,
+                "query-format" => query_format = true,
                 "exclude" | "extend-exclude" => {
                     let pattern = need(&mut value, &mut a)?;
                     if pattern.is_empty() {
@@ -430,16 +433,17 @@ where
                     set_construct(&mut c, n.trim_start_matches("indent-"), v)?
                 }
                 "input-format" => match need(&mut value, &mut a)?.to_ascii_lowercase().as_str() {
-                    "free" => {}
-                    "fixed" | "auto" => {
+                    "free" => force_free_input = true,
+                    "auto" => force_free_input = false,
+                    "fixed" => {
                         return Err(FormatError::Unsupported(
                             "fixed-form input/output is not supported".into(),
-                        ))
+                        ));
                     }
                     other => {
                         return Err(FormatError::InvalidOption(format!(
                             "--input-format={other}"
-                        )))
+                        )));
                     }
                 },
                 "output-format" => match need(&mut value, &mut a)?.to_ascii_lowercase().as_str() {
@@ -447,12 +451,12 @@ where
                     "fixed" => {
                         return Err(FormatError::Unsupported(
                             "fixed-form input/output is not supported".into(),
-                        ))
+                        ));
                     }
                     other => {
                         return Err(FormatError::InvalidOption(format!(
                             "--output-format={other}"
-                        )))
+                        )));
                     }
                 },
                 _ => return Err(FormatError::InvalidOption(format!("--{name}"))),
@@ -495,10 +499,9 @@ where
                     if value == "-" {
                         c.apply_indent = false
                     } else if value == "free" {
+                        force_free_input = true;
                     } else if value == "auto" {
-                        return Err(FormatError::Unsupported(
-                            "automatic fixed/free format detection is not supported".into(),
-                        ));
+                        force_free_input = false;
                     } else if value == "fixed" {
                         return Err(FormatError::Unsupported(
                             "fixed-form input/output is not supported".into(),
@@ -658,6 +661,12 @@ where
             "--show-files cannot be combined with --check, --diff, or query modes".into(),
         ));
     }
+    if query_format && (stdout || check || diff || show_files || c.last_indent || c.last_usable) {
+        return Err(FormatError::InvalidOption(
+            "--query-format cannot be combined with output, check, diff, or other query modes"
+                .into(),
+        ));
+    }
     if (c.last_indent || c.last_usable) && (all || all_files || !paths.is_empty() || check || diff)
     {
         return Err(FormatError::InvalidOption(
@@ -686,6 +695,8 @@ where
                 no_submodules,
                 stdin,
                 stdout,
+                force_free_input,
+                query_format,
                 isolated,
                 check,
                 diff,
@@ -806,6 +817,7 @@ fn single_dash_long_option_suggestion(arg: &str) -> Option<String> {
             | "stdin"
             | "stdout"
             | "show-files"
+            | "query-format"
             | "strip-empty-args"
             | "uppercase-single-l"
             | "wrap"
@@ -896,6 +908,7 @@ Free-form Fortran formatter.\n\
   --align-declarations=<0|1>         shrink space to align `::` blocks (default 1)\n\
   --align-comments=<0|1>             shrink space to align trailing comment blocks (default 0)\n\
   -lastindent, -lastusable           print query result instead of source\n\
+  --query-format                     print free/fixed for each input and exit\n\
     --all-files [directory]             format this checkout's tracked sources; submodules are context only\n\
     <paths>, --all [directory]          format explicit files or all tracked sources recursively\n\
     --no-submodules                     omit submodule sources from targets and project context\n\
@@ -935,7 +948,8 @@ Free-form Fortran formatter.\n\
   --no-config                        ignore project TOML configuration\n\
   -h, --help                         show this help\n\
   -v, --version                      show version\n\
-Fixed-form input/output and automatic format detection are intentionally unsupported."
+Automatic fixed/free input detection is enabled by default; use -ifree or\n\
+--input-format=free to force free-form input. Fixed-form output remains unsupported."
 }
 
 #[cfg(test)]
@@ -1036,7 +1050,7 @@ mod tests {
         assert_eq!(attached, separated);
         assert!(!run(&["-i-"]).apply_indent);
         assert!(run(&["-Ia"]).auto_start_indent);
-        assert!(parse(["forformat".to_string(), "-iauto".to_string()].into_iter()).is_err());
+        assert!(parse(["forformat".to_string(), "-iauto".to_string()].into_iter()).is_ok());
     }
 
     #[test]

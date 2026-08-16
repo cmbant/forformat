@@ -130,7 +130,16 @@ impl Planner {
             .collect();
 
         if infos.is_empty() {
-            let indent = if line0.kind == PhysicalLineKind::Comment {
+            // A group with no statement carries only a comment, and a comment
+            // belongs at the depth in force around it.  Besides an ordinary
+            // comment line, that includes an OpenMP sentinel whose entire
+            // payload is a comment (`!$    ! merge splitted arrays`): the
+            // buffer classifies it as Code because of the sentinel, so it
+            // would otherwise fall to column zero while the code on either
+            // side of it inside the `!$` block stays indented.
+            let comment_only = line0.kind == PhysicalLineKind::Comment
+                || line0.omp && sentinel_payload_is_blank(buf.code_bytes(line0));
+            let indent = if comment_only {
                 self.stack.current()
             } else {
                 0
@@ -451,6 +460,14 @@ pub fn transition(state: &mut IndentStack, info: &StatementInfo, cfg: &FormatCon
         }
     }
     line_indent
+}
+
+/// True when an OpenMP sentinel line's code bytes hold nothing after the `!$ `
+/// marker, which is what a sentinel line carrying only a comment looks like.
+fn sentinel_payload_is_blank(code: &[u8]) -> bool {
+    let code = code.trim_ascii_start();
+    let payload = code.strip_prefix(b"!$ ".as_slice()).unwrap_or(code);
+    payload.iter().all(u8::is_ascii_whitespace)
 }
 
 pub fn guess_start_indent(line: &[u8]) -> usize {

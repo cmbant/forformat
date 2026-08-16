@@ -124,7 +124,9 @@ pub fn remove_redundant_nested_parentheses(
                         && !vocab::contains(vocab::FORTRAN_SPECIFIERS, name)
                 });
                 let is_condition = condition.is_some_and(|name| {
-                    name.eq_ignore_ascii_case(b"if") || name.eq_ignore_ascii_case(b"while")
+                    name.eq_ignore_ascii_case(b"if")
+                        || name.eq_ignore_ascii_case(b"elseif")
+                        || name.eq_ignore_ascii_case(b"while")
                 });
                 let (parent_protected, parent_safe, directly_nested) = stack
                     .last()

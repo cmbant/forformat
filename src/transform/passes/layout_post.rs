@@ -223,9 +223,16 @@ fn align_comment_runs(
                 }
                 Some(_) => break,
                 None => {
+                    // A continuation is transparent for the same reason step 17's
+                    // `collect_paragraph` treats one that way: whether the wrapper
+                    // put a declaration's tail on its own physical line must not
+                    // change which run its neighbours belong to, or the column
+                    // (and so the width) the *next* run measures depends on where
+                    // the wrapper broke, and the two never agree (I1).
                     let transparent = !cpp_lines[scan]
                         && (lines[scan].trim_ascii().is_empty()
-                            || lines[scan].trim_ascii_start().starts_with(b"!"));
+                            || lines[scan].trim_ascii_start().starts_with(b"!")
+                            || continues_previous_line(lines, scan));
                     if !transparent {
                         break;
                     }

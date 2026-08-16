@@ -4,7 +4,10 @@
 
 `forformat` is a standalone formatter for free-form Fortran. Its native implementation is written
 in Rust and provides findent-compatible indentation together with an optional full-format mode for
-lexical normalization and wrapping long statements.
+lexical normalization and wrapping long statements. Source suffix matching is case-insensitive,
+so legacy `.F` and `.F90` spellings are accepted for free-form code that is preprocessed at build
+time. Genuine fixed-form sources are detected and skipped unchanged; use `-ifree` when a source
+needs to be forced through the free-form formatter.
 
 The repository builds both the `forformat` Rust binary and a Python package that bundles that binary.
 Installing a published Python wheel does not require Rust or a Fortran compiler. The wheel provides

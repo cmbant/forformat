@@ -13,10 +13,17 @@ indent, continuation policies, labels, includes, OpenMP free-form sentinels, CPP
 
 The Rust release intentionally diverges from legacy findent in three ways:
 
-- Fixed-form requests (`-ifixed`, `-ofixed`, `-iauto`, and fixed format long options) fail with
-  status 2 instead of being silently accepted.
+- Fixed-form *output* requests (`-ifixed`, `-ofixed`, and the fixed format long options) fail with
+  status 2 instead of being silently accepted. Fixed-form *input* is detected and skipped rather
+  than rejected: see below.
 - Unknown options fail with status 2, making misspelled options visible.
 - `FINDENT_FLAGS` is not read; configuration comes only from the command line or library API.
+
+Input format detection follows findent's own `determine_fix_or_free` and is enabled by default, so
+`-iauto` and `--input-format=auto` are accepted as the default rather than rejected. A source the
+detector calls fixed-form is left byte-identical and reported on stderr; `-ifree` forces free-form
+handling, and `--query-format` reports the detector's verdict without formatting. The port is
+checked against `findent -q` over the whole corpus, currently 4,992 files with no disagreement.
 
 The accepted format is free-form only. The parser is deliberately a shallow structural classifier,
 not a full Fortran semantic parser. Unknown or incomplete statements are emitted conservatively.
@@ -24,6 +31,42 @@ One narrow legacy recovery is retained for editor-like input: `su broutine` is t
 subroutine boundary, and a comma-prefixed external procedure may affect a matching explicit END
 fallback without opening a procedure body. Both behaviors are fixture-backed and isolated from
 generic malformed-END handling.
+
+## Accepted `--indent-only` divergences
+
+`--indent-only` is otherwise a byte-for-byte contract against `findent -ifree`, and a difference is
+treated as a bug in this crate. Three families are the exception: findent 4.3.7 is demonstrably
+wrong and reproducing it would mean writing the defect into this crate. Each is reduced to a
+standalone case below, and each is excluded from the corpus oracle count on that basis. Seven files
+across the five corpus checkouts are affected.
+
+- **`ELSE <construct-name>`.** A named ELSE is standard (F2018 R1105 `else-stmt` is
+  `ELSE [if-construct-name]`), but findent's lexer joins the two words, matches neither `else` nor
+  `else if`, and leaves the statement at body depth instead of dedenting it to its IF.
+
+  ```fortran
+  IF_G : IF (gamma_only) THEN
+     x = 1
+     ELSE IF_G          ! findent; forformat dedents this to the IF
+     y = 2
+  END IF IF_G
+  ```
+
+  Q-E `PW/src/exx_bp.f90`, `PW/src/exx_std.f90`, `PW/src/newd_acc.f90`.
+- **A module whose name begins with a keyword.** findent's keyword-greedy lexer reads
+  `MODULE function_types` as a module-procedure heading rather than a module named
+  `function_types`, and stops indenting the module body entirely. Renaming the module to `m` makes
+  findent indent it correctly, which is what identifies this as a lexer defect rather than a policy.
+  CP2K `tools/Fun2D/function_types.f90`, `tools/Fun2D/functions.f90`.
+- **A macro or CUDA attribute prefix before FUNCTION/SUBROUTINE.** findent opens no frame for
+  `PURE_ARRAY_EQ FUNCTION array_eq_i(arr1, arr2)` (a CPP macro standing in for `PURE`) or for
+  `attributes(global) subroutine k(a)` (CUDA Fortran), so their bodies and matching `END` are left
+  unindented. CP2K `src/dbt/tas/dbt_tas_util.F`, Q-E `upflib/ylmr2_gpu.f90`.
+
+Everything else that still differs is input that is not valid free-form Fortran — fypp template
+bodies, files whose `#ifdef` branches open and close constructs asymmetrically, and one source using
+Matlab operators. Those, and the current per-checkout counts, are tracked in
+[`outstanding-issues.md`](outstanding-issues.md).
 
 ## Intentional full-format divergences
 

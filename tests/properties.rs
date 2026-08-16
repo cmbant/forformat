@@ -122,6 +122,267 @@ fn style_switches_have_exact_spelling_and_fixed_points() {
 }
 
 #[test]
+fn compact_select_spellings_indent_like_the_two_word_form() {
+    // findent's own recognizer accepts `selectcase`/`selecttype`/`selectrank`
+    // as SELECT openers (verified against findent 4.3.7), and the compact
+    // `end...` spellings are already split by `--split-compound-keywords`;
+    // the same must hold for these so the indent-only engine's frame
+    // nesting does not diverge from the oracle for every statement inside
+    // the construct. Reduced from OpenFAST `modules/nwtc-library/src/NWTC_IO.f90`.
+    let compact = format_source(
+        b"subroutine s(x)\ninteger :: x\nselectcase(x)\ncase(1)\nx=1\nendselect\nend subroutine s\n",
+        &indent_only_config(),
+    )
+    .unwrap()
+    .bytes;
+    let text = String::from_utf8(compact).unwrap();
+    let indent_of = |needle: &str| {
+        text.lines()
+            .find(|line| line.trim_start() == needle)
+            .unwrap_or_else(|| panic!("missing {needle:?} in\n{text}"))
+            .len()
+            - needle.len()
+    };
+    // Two words, unspaced, and preserved through indent-only (which never
+    // rewrites spelling): the compact form must still open a deeper frame
+    // for CASE and its body, and close it again at ENDSELECT, exactly like
+    // the two-word `select case`/`end select` spelling does.
+    assert!(indent_of("case(1)") > indent_of("selectcase(x)"));
+    assert!(indent_of("x=1") > indent_of("case(1)"));
+    assert_eq!(indent_of("endselect"), indent_of("selectcase(x)"));
+
+    let style = StyleConfig {
+        keyword_case: KeywordCase::Upper,
+        ..StyleConfig::default()
+    };
+    let full = format_source(b"selectcase(x)\nend select\n", &style_config(style))
+        .unwrap()
+        .bytes;
+    let text = String::from_utf8(full).unwrap();
+    assert!(
+        text.contains("SELECT CASE(x)"),
+        "expected SELECT CASE in\n{text}"
+    );
+}
+
+#[test]
+fn a_then_inside_a_string_literal_does_not_open_an_if_block() {
+    // Reduced from OpenFAST `modules/wakedynamics/src/WakeDynamics.f90`: a
+    // single-line `if (...) call foo('...then...')` whose message string
+    // happens to contain the word "then" must not be misread as an
+    // `IF ... THEN` block opener, or every statement for the rest of the
+    // file inherits an extra, never-closed indent level.
+    let source = b"program p\nif (a) call foo('when x is not set, then y must be set', b)\nx = 1\nend program p\n";
+    let text =
+        String::from_utf8(format_source(source, &indent_only_config()).unwrap().bytes).unwrap();
+    let x_line = text.lines().find(|line| line.contains("x = 1")).unwrap();
+    assert_eq!(x_line, "   x = 1", "expected no extra indent in\n{text}");
+}
+
+#[test]
+fn a_pointer_assignment_to_a_keyword_name_does_not_open_a_construct() {
+    // Reduced from MPAS `src/core_atmosphere/dynamics/mpas_atm_boundaries.F`,
+    // which walks a linked list through a variable literally named `block`, and
+    // from Q-E `PW/src/buffers.f90`, which does the same through `entry`.
+    // findent's grammar spells the rule `assignment: lvalue '=' skipnoop /*
+    // this includes '=>' */`, so a pointer assignment is an assignment even
+    // when its target is spelled like a construct keyword.  Reading either as
+    // BLOCK or ENTRY leaves a frame open for the rest of the file: this was 104
+    // of MPAS's 106 indent-only oracle mismatches.
+    let source = b"subroutine s\ntype(t), pointer :: block, entry, list\nblock => list\nentry%next => list\nx = 1\nend subroutine s\n";
+    let text =
+        String::from_utf8(format_source(source, &indent_only_config()).unwrap().bytes).unwrap();
+    for body in ["block => list", "entry%next => list", "x = 1"] {
+        let line = text
+            .lines()
+            .find(|line| line.trim_start() == body)
+            .unwrap_or_else(|| panic!("missing {body:?} in\n{text}"));
+        assert_eq!(line, format!("   {body}"), "wrong depth in\n{text}");
+    }
+
+    // The guard is the designator shape of the left-hand side, so a
+    // pointer-initialised declaration keeps its own classification.
+    let declarations = b"module m\ntype :: t\ninteger, pointer :: p => null()\ncontains\nprocedure :: run => t_run\nend type t\nend module m\n";
+    let text = String::from_utf8(
+        format_source(declarations, &indent_only_config())
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    assert!(
+        text.contains("      integer, pointer :: p => null()"),
+        "declaration lost its depth in\n{text}"
+    );
+    assert!(
+        text.contains("      procedure :: run => t_run"),
+        "type-bound binding lost its depth in\n{text}"
+    );
+}
+
+#[test]
+fn a_component_named_function_does_not_open_a_procedure() {
+    // Reduced from CP2K `src/colvar_methods.F`.  The recognizer scans a
+    // statement's words for FUNCTION/SUBROUTINE, which found the component in
+    // `colvar%combine_cvs_param%function` and opened a procedure frame that was
+    // never closed.  The keyword only counts at bracket depth zero and when no
+    // `%` selects it.
+    let source = b"subroutine s\ncall compress(colvar%combine_cvs_param%function, full=.true.)\nx = 1\nend subroutine s\n";
+    let text =
+        String::from_utf8(format_source(source, &indent_only_config()).unwrap().bytes).unwrap();
+    let x_line = text.lines().find(|line| line.contains("x = 1")).unwrap();
+    assert_eq!(x_line, "   x = 1", "expected no extra indent in\n{text}");
+
+    // A real heading still opens one.
+    let heading = b"module m\ncontains\npure integer function f(a)\ninteger :: a\nf = a\nend function f\nend module m\n";
+    let text =
+        String::from_utf8(format_source(heading, &indent_only_config()).unwrap().bytes).unwrap();
+    assert!(
+        text.contains("      f = a"),
+        "prefixed function heading stopped opening a frame in\n{text}"
+    );
+}
+
+#[test]
+fn a_comment_under_an_openmp_sentinel_follows_the_sentinel_body_depth() {
+    // Reduced from SPECFEM3D
+    // `external_libs/.../MESHER/sorting.f90`.  A `!$ ` line is buffered as Code
+    // because of the sentinel, so a sentinel whose entire payload is a comment
+    // had no statement to plan and fell to column zero, while the conditional
+    // code on either side of it stayed indented.  findent reindents it with the
+    // block.
+    let source = b"subroutine s\n!$ do i = 1, p\n!$    x = 1\n!$    ! merge splitted arrays\n!$ end do\nend subroutine s\n";
+    let text =
+        String::from_utf8(format_source(source, &indent_only_config()).unwrap().bytes).unwrap();
+    assert!(
+        text.contains("!$    ! merge splitted arrays"),
+        "sentinel comment lost its depth in\n{text}"
+    );
+    assert!(
+        text.contains("!$    x = 1"),
+        "sentinel code lost its depth in\n{text}"
+    );
+}
+
+#[test]
+fn one_line_if_goto_keeps_its_separator() {
+    // Reduced from MPAS `src/core_atmosphere/physics/physics_wrf/module_cu_gf.mpas.F`.
+    let source =
+        b"subroutine p\ninteger :: i\nIF(ierr(i).ne.0)GO TO 62\n62 continue\nend subroutine p\n";
+    let once = format_source(source, &FormatConfig::default())
+        .unwrap()
+        .bytes;
+    let twice = format_source(&once, &FormatConfig::default())
+        .unwrap()
+        .bytes;
+    assert!(once
+        .windows(b"if (ierr(i) /= 0) goto 62".len())
+        .any(|window| { window == b"if (ierr(i) /= 0) goto 62" }));
+    assert_eq!(once, twice);
+}
+
+#[test]
+fn split_end_do_collapses_the_named_construct_gap() {
+    // Reduced from MPAS `src/core_atmosphere/physics/physics_wrf/module_mp_kessler.F`.
+    let source =
+        b"subroutine p\ninteger :: i\ndo 10 i = 1, 2\n10 ENDDO  loop_k\nend subroutine p\n";
+    let once = format_source(source, &FormatConfig::default())
+        .unwrap()
+        .bytes;
+    let twice = format_source(&once, &FormatConfig::default())
+        .unwrap()
+        .bytes;
+    assert!(once
+        .windows(b"10 end do loop_k".len())
+        .any(|window| { window == b"10 end do loop_k" }));
+    assert_eq!(once, twice);
+}
+
+#[test]
+fn compact_elseif_removes_redundant_condition_parentheses() {
+    // Reduced from Q-E `EPW/src/printing.f90`.
+    let source = b"subroutine p\nlogical :: a, b\nIF (a) THEN\nx = 1\nELSEIF ((b)) THEN\nx = 2\nEND IF\nend subroutine p\n";
+    let once = format_source(source, &FormatConfig::default())
+        .unwrap()
+        .bytes;
+    let twice = format_source(&once, &FormatConfig::default())
+        .unwrap()
+        .bytes;
+    assert!(once
+        .windows(b"else if (b) then".len())
+        .any(|window| { window == b"else if (b) then" }));
+    assert_eq!(once, twice);
+}
+
+#[test]
+fn acc_sentinel_without_a_blank_keeps_clause_identifier_case() {
+    // Reduced from Q-E `LR_Modules/ccgsolve_all.f90` line 146.
+    let source = b"subroutine p\ninteger :: my_nbnd\n!$ x = omp_get_num_threads()\n!$omp parallel do\n!$acc enter data create(rho(1:MY_NBND), alpha_long_name, beta_long_name, gamma_long_name, delta_long_name, epsilon_long_name, zeta_long_name, eta_long_name, theta_long_name, iota_long_name, kappa_long_name, lambda_long_name, mu_long_name, nu_long_name, xi_long_name, omicron_long_name, pi_long_name, rho_long_name, sigma_long_name)\n!$acc enter data create(rho(1:MY_NBND))\nend subroutine p\n";
+    let once = format_source(source, &FormatConfig::default())
+        .unwrap()
+        .bytes;
+    let twice = format_source(&once, &FormatConfig::default())
+        .unwrap()
+        .bytes;
+    let text = String::from_utf8(once.clone()).unwrap();
+    assert!(text.contains("!$ x = omp_get_num_threads()"));
+    assert!(text.contains("!$OMP PARALLEL DO"));
+    assert!(text.contains("!$acc enter data create(rho(1:MY_NBND)"));
+    assert!(text.contains("!$acc enter data create(rho(1:MY_NBND))"));
+    assert_eq!(once, twice);
+}
+
+#[test]
+fn format_edit_descriptors_keep_authored_slashes() {
+    // Reduced from Q-E `atomic/src/compute_phi.f90`.
+    let source = b"subroutine s\n130  format (/ /5x, 3hfoo, &\n     f6.3)\nend subroutine s\n";
+    let once = format_source(source, &FormatConfig::default())
+        .unwrap()
+        .bytes;
+    let twice = format_source(&once, &FormatConfig::default())
+        .unwrap()
+        .bytes;
+    assert!(once
+        .windows(b"130 format (/ /5x, 3hfoo, &".len())
+        .any(|window| { window == b"130 format (/ /5x, 3hfoo, &" }));
+    assert_eq!(once, twice);
+
+    // The guard keys on the statement label, because a `format-stmt` cannot be
+    // reached without one.  An assignment to an array that happens to be named
+    // `format` is an ordinary expression and keeps its operator spacing.
+    let assignment =
+        b"subroutine s\nreal :: format(10), x\ninteger :: i\nformat(i)=x*2+1\nend subroutine s\n";
+    let text = String::from_utf8(
+        format_source(assignment, &FormatConfig::default())
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    assert!(
+        text.contains("format(i) = x*2 + 1"),
+        "an array named `format` lost its operator spacing in\n{text}"
+    );
+}
+
+#[test]
+fn commented_relational_operators_are_spaced_in_one_pass() {
+    // Reduced from Q-E `CPV/src/qmatrixd.f90`.
+    let source = b"subroutine s\n  ! a=<b <= c >= d == e /= f => g\n  x = 1\nend subroutine s\n";
+    let once = format_source(source, &FormatConfig::default())
+        .unwrap()
+        .bytes;
+    let twice = format_source(&once, &FormatConfig::default())
+        .unwrap()
+        .bytes;
+    assert!(once
+        .windows(b"! a = < b".len())
+        .any(|window| window == b"! a = < b"));
+    assert!(once
+        .windows(b"<= c >= d == e /= f => g".len())
+        .any(|window| window == b"<= c >= d == e /= f => g"));
+    assert_eq!(once, twice);
+}
+
+#[test]
 #[allow(clippy::field_reassign_with_default)]
 fn compact_multiplicative_ignores_a_type_keyword_used_as_an_identifier() {
     // `integer` is both the leading type keyword of the declaration and,
@@ -640,6 +901,72 @@ fn a_declaration_entity_after_an_array_constructor_is_not_a_named_argument() {
 }
 
 #[test]
+#[allow(clippy::field_reassign_with_default)]
+fn a_continued_named_argument_stays_compact_even_with_continuation_markers_off() {
+    // Reduced from OpenFAST. `compact_continued_named_argument` used to run
+    // only when `--continuation-markers` was on, even though it is fixing a
+    // rule-4 spacing decision that has nothing to do with marker
+    // normalization. With markers off, a long statement that gets rejoined
+    // and rewrapped across a physical continuation boundary picked up spaces
+    // around `SHAPE=` on the first pass that this fixup never removed, and
+    // the second pass (reading the statement pre-split instead of
+    // pre-joined) got the compact spelling right — so the two passes
+    // disagreed.
+    let mut style = StyleConfig::default();
+    style.continuation_markers = false;
+    style.delimiter_spacing = false;
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        wrap: forformat::WrapConfig {
+            enabled: true,
+            line_length: 80,
+        },
+        style,
+        ..FormatConfig::default()
+    };
+    let source = b"module repro\ncontains\nsubroutine s\nreal(DbKi), parameter :: RotGtoL(3,3) = reshape( [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0], SHAPE=[3,3] )\nend subroutine s\nend module repro\n";
+    let once = format_source(source, &config).unwrap().bytes;
+    let text = String::from_utf8(once.clone()).unwrap();
+    assert!(
+        text.contains("SHAPE=[3,3]"),
+        "expected SHAPE=[3,3] in\n{text}"
+    );
+    let twice = format_source(&once, &config).unwrap().bytes;
+    assert_eq!(once, twice, "full mode I1 failed for {source:?}");
+}
+
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn a_named_argument_continued_by_a_marker_alone_keeps_its_gap() {
+    // A named argument whose value is entirely on the next physical line
+    // (`stat= &` with nothing but the continuation marker after the `=`) is
+    // not `name=value` split across a boundary — there is no value on this
+    // line to compact against. Reaching past the marker onto its own space
+    // produced `stat=&`, corrupting the marker's spacing on every following
+    // run of `--continuation-markers=0` corpora that contain this shape.
+    let mut style = StyleConfig::default();
+    style.continuation_markers = false;
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        wrap: forformat::WrapConfig {
+            enabled: false,
+            ..FormatConfig::default().wrap
+        },
+        style,
+        ..FormatConfig::default()
+    };
+    let source = b"program p\nallocate(a(n), b(n), stat= &\n   ierr)\nend program p\n";
+    let once = format_source(source, &config).unwrap().bytes;
+    let text = String::from_utf8(once.clone()).unwrap();
+    assert!(
+        text.contains("stat= &"),
+        "expected the marker's own space to survive in\n{text}"
+    );
+    let twice = format_source(&once, &config).unwrap().bytes;
+    assert_eq!(once, twice, "full mode I1 failed for {source:?}");
+}
+
+#[test]
 fn wrapping_measures_the_declaration_separator_step_17_will_emit() {
     // Reduced from SPECFEM3D at `--line-length=80`. The author lined these
     // `::` up in a very wide block; step 17 compresses that block, so the line
@@ -772,6 +1099,36 @@ fn end_keyword_spacing_stops_at_the_statement_it_owns() {
         let twice = format_source(&once, &config).unwrap().bytes;
         assert_eq!(once, twice, "full mode I1 failed for {source:?}");
     }
+}
+
+#[test]
+fn end_construct_keyword_wins_over_a_same_spelled_declared_name() {
+    // Reduced from SPECFEM3D. `end` is both the block-end keyword and, here, a
+    // declared dummy argument and local variable. The declared-case engine
+    // used to govern every occurrence of the spelling `end` on a line,
+    // including the leading keyword of `end do` and `end subroutine` — so
+    // under `--keyword-case=upper` the first run emitted `END DO` correctly,
+    // and only the *second* run (which starts from a document where `END` and
+    // `DO` are already separate tokens) recast the leading `END` down to
+    // `end`, because the declared-name lookup ran on that token too.
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        style: StyleConfig {
+            keyword_case: KeywordCase::Upper,
+            ..StyleConfig::default()
+        },
+        ..FormatConfig::default()
+    };
+    let source = b"subroutine p(end)\nreal end\ndo i = 1, 2\nenddo\nend subroutine p\n";
+    let once = format_source(source, &config).unwrap().bytes;
+    let text = String::from_utf8(once.clone()).unwrap();
+    assert!(text.contains("END DO"), "expected END DO in\n{text}");
+    assert!(
+        text.contains("END SUBROUTINE"),
+        "expected END SUBROUTINE in\n{text}"
+    );
+    let twice = format_source(&once, &config).unwrap().bytes;
+    assert_eq!(once, twice, "full mode I1 failed for {source:?}");
 }
 
 #[test]

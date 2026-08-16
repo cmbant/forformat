@@ -220,6 +220,7 @@ fn apply_with_options(
         options.continued_infix,
         options.continued_declaration,
         options.continued_named_parameter,
+        options.continued_format,
         options.open_groups,
         false,
     );
@@ -242,10 +243,7 @@ fn apply_with_options(
         options.preserve_comment_after,
         code_span_len(&text) as isize - code_span_len(line) as isize,
     );
-    if options.continued_statement
-        && options.continued_named_parameter
-        && cx.config.style.continuation_markers
-    {
+    if options.continued_statement && options.continued_named_parameter {
         text = compact_continued_named_argument(&text, options.open_groups);
     }
     text
@@ -269,6 +267,7 @@ pub fn respace_joined(
         declared_names,
         line_index,
         &mut state,
+        false,
         false,
         false,
         false,
@@ -325,6 +324,12 @@ fn compact_continued_named_argument(line: &[u8], open_groups: &[bool]) -> Vec<u8
         let Some(next) = tokens.get(index + 1) else {
             continue;
         };
+        // A trailing `&` is the continuation marker, not the argument value —
+        // the value is on the next physical line. The space before it is the
+        // marker's own, not this rule's authored gap to compact away.
+        if next.kind == TokenKind::Ampersand {
+            continue;
+        }
         edits.replace(previous.span.end..next.span.start, b"=");
     }
     edits.finish()
@@ -357,6 +362,7 @@ pub fn lowercase_line(
         false,
         false,
         false,
+        false,
         &[],
         false,
     )
@@ -373,6 +379,7 @@ fn lowercase_line_with_context(
     continued_infix: bool,
     continued_declaration: bool,
     continued_named_parameter: bool,
+    continued_format: bool,
     open_groups: &[bool],
     preserve_identifier_case: bool,
 ) -> Vec<u8> {
@@ -421,7 +428,10 @@ fn lowercase_line_with_context(
                 }
             }
             TokenKind::Operator => {
-                if is_spaced_operator_token(line, &tokens, index, token) {
+                if !is_labelled_format_statement(&tokens)
+                    && !continued_format
+                    && is_spaced_operator_token(line, &tokens, index, token)
+                {
                     let named = token.text == b"="
                         && (is_named_parameter_token(&tokens, index)
                             || continued_statement
@@ -434,7 +444,10 @@ fn lowercase_line_with_context(
                                 ));
                     add_operator_edit(line, &mut edits, token, token.text, !named, &mut spacing);
                     spacing.previous_compact_named = named;
-                } else if is_arithmetic_operator(token.text) {
+                } else if !is_labelled_format_statement(&tokens)
+                    && !continued_format
+                    && is_arithmetic_operator(token.text)
+                {
                     if is_binary_arithmetic_operator(line, token.span.start, token.text)
                         || (continued_infix
                             && is_leading_continuation_arithmetic(&tokens, index, token))
@@ -477,12 +490,20 @@ fn lowercase_line_with_context(
                 {
                     continue;
                 }
+                // A leading `END` (bare, or followed by `DO`/`IF`/`SUBROUTINE`/…)
+                // is always the block-end keyword, never a use of a
+                // same-spelled declared name — unlike a bare `end` elsewhere in
+                // the statement, which can be exactly such a use (`p(end)`,
+                // `x = end`). A declaration suppressing `END` there must not
+                // also suppress it here.
+                let end_construct_keyword = is_end_construct_keyword(&tokens, index);
                 if vocab::contains(vocab::FORTRAN_KEYWORDS, token.text)
-                    && !declared_names.suppresses_keyword(
-                        line_index,
-                        token.text,
-                        specifier_argument,
-                    )
+                    && (end_construct_keyword
+                        || !declared_names.suppresses_keyword(
+                            line_index,
+                            token.text,
+                            specifier_argument,
+                        ))
                     && keyword_in_context(&tokens, index)
                 {
                     if token.text != cased {
@@ -491,7 +512,9 @@ fn lowercase_line_with_context(
                     continue;
                 }
 
-                if declared_names.suppresses_keyword(line_index, token.text, specifier_argument) {
+                if !end_construct_keyword
+                    && declared_names.suppresses_keyword(line_index, token.text, specifier_argument)
+                {
                     continue;
                 }
                 if vocab::contains(vocab::INTRINSIC_NAMES, token.text)
@@ -520,6 +543,51 @@ fn lowercase_line_with_context(
         }
     }
     edits.finish()
+}
+
+/// True when `tokens[index]` is `END` leading a block-end statement: bare
+/// `END`, or `END` immediately followed by the construct word (`DO`, `IF`,
+/// `SUBROUTINE`, a construct name via `END DO name`, …). That position can
+/// never hold a use of a same-spelled declared name — only a bare `end`
+/// elsewhere in the statement (an argument, an expression operand) can.
+pub(crate) fn is_end_construct_keyword(tokens: &[crate::source::Token], index: usize) -> bool {
+    if !tokens[index].is_name(b"end") {
+        return false;
+    }
+    let Some(first) = tokens.iter().position(|t| t.kind != TokenKind::Number) else {
+        return false;
+    };
+    if index != first {
+        return false;
+    }
+    match tokens.get(first + 1) {
+        None => true,
+        Some(next) => matches!(
+            next.text.to_ascii_lowercase().as_slice(),
+            b"do"
+                | b"if"
+                | b"where"
+                | b"forall"
+                | b"select"
+                | b"associate"
+                | b"block"
+                | b"critical"
+                | b"type"
+                | b"interface"
+                | b"enum"
+                | b"function"
+                | b"subroutine"
+                | b"program"
+                | b"module"
+                | b"submodule"
+                | b"procedure"
+                | b"blockdata"
+                | b"team"
+                | b"structure"
+                | b"union"
+                | b"map"
+        ),
+    }
 }
 
 /// Words that are keywords only in a particular shape. Outside that shape they
@@ -638,6 +706,11 @@ fn normalize_keyword_spacing_with_state(
             {
                 let mut replacement = apply_case(pair[0].text, style.keyword_case);
                 replacement.extend_from_slice(&apply_case(pair[1].text, style.keyword_case));
+                if if_condition_close(&tokens)
+                    .is_some_and(|close| tokens[close].span.end == pair[0].span.start)
+                {
+                    replacement.insert(0, b' ');
+                }
                 edits.replace(pair[0].span.start..pair[1].span.end, &replacement);
             }
         }
@@ -673,6 +746,13 @@ fn normalize_keyword_spacing_with_state(
                         replacement = apply_case(&replacement, style.keyword_case);
                     }
                     edits.replace(first.span.clone(), &replacement);
+                    if let Some(next) = next {
+                        if next.kind == TokenKind::Name
+                            && horizontal_gap(line, first.span.end, next.span.start)
+                        {
+                            edits.replace(first.span.end..next.span.start, b" ");
+                        }
+                    }
                     // The compound replacement itself changes `elseif(` into
                     // `else if(`. The token-local `name(` rule inspected the
                     // original `elseif(` token, so it never saw the new `if`.
@@ -1273,6 +1353,19 @@ fn if_condition_close(tokens: &[crate::source::Token<'_>]) -> Option<usize> {
     matching_close(tokens, open)
 }
 
+/// A FORMAT statement's argument list holds edit descriptors, not an
+/// expression, so operator spacing has to leave it alone — otherwise `/ /5x`
+/// closes up to `//5x` on one pass and is respaced as concatenation on the
+/// next.
+///
+/// The statement label is what separates it from an assignment to an array
+/// that happens to be named `format`: a `format-stmt` is unreachable without a
+/// label, and `format(i) = x*2` never carries one.  Guarding on
+/// [`is_format_statement`] alone would strip the spacing from that assignment.
+fn is_labelled_format_statement(tokens: &[crate::source::Token<'_>]) -> bool {
+    first_statement_index(tokens) == 1 && is_format_statement(tokens)
+}
+
 fn is_format_statement(tokens: &[crate::source::Token<'_>]) -> bool {
     let index = first_statement_index(tokens);
     tokens
@@ -1535,6 +1628,12 @@ fn openmp_clause_body_start(line: &[u8]) -> Option<usize> {
         return None;
     }
     let body_start = start + 2;
+    if line
+        .get(body_start)
+        .is_some_and(|byte| !matches!(byte, b' ' | b'\t'))
+    {
+        return None;
+    }
     let body = line.get(body_start..)?.trim_ascii_start();
     if body.len() >= 3
         && body[..3].eq_ignore_ascii_case(b"omp")
@@ -1644,7 +1743,7 @@ fn format_comment_operators(comment: &[u8]) -> Vec<u8> {
             index = skip_horizontal(comment, index + length);
             continue;
         }
-        if let Some(length) = spaced_operator_len(comment, index) {
+        if let Some(length) = spaced_operator_len(comment, index, output.last().copied()) {
             let named = comment[index] == b'=' && is_named_parameter_at(comment, index);
             append_comment_operator(&mut output, &comment[index..index + length], !named);
             index = skip_horizontal(comment, index + length);
@@ -2257,7 +2356,7 @@ fn legacy_operator_at(line: &[u8], index: usize) -> Option<(usize, &'static [u8]
     None
 }
 
-fn spaced_operator_len(line: &[u8], index: usize) -> Option<usize> {
+fn spaced_operator_len(line: &[u8], index: usize, previous: Option<u8>) -> Option<usize> {
     for operator in [b".and.".as_slice(), b".or.", b".not.", b".eqv.", b".neqv."] {
         if line[index..].len() >= operator.len()
             && line[index..index + operator.len()].eq_ignore_ascii_case(operator)
@@ -2271,7 +2370,6 @@ fn spaced_operator_len(line: &[u8], index: usize) -> Option<usize> {
         }
     }
     let byte = *line.get(index)?;
-    let previous = index.checked_sub(1).and_then(|at| line.get(at)).copied();
     let next = line.get(index + 1).copied();
     let valid = match byte {
         b'<' => !matches!(previous, Some(b'=' | b'<' | b'>')) && !matches!(next, Some(b'<' | b'>')),
@@ -2562,6 +2660,9 @@ WRITE( UNIT = 1 , FMT = 2 )'x'\n";
         let once = normalized(source);
         assert_eq!(
             once,
+            // `format(...)` with no statement label is not a FORMAT statement —
+            // it cannot be reached without one — so the edit-descriptor guard
+            // does not apply and the array constructor keeps its normal spacing.
             "end if\nelse if (X)\nblock data\ngoto 10\ndouble precision :: X\nif (X) then\nselect type is (X)\ndo while (X)\ncommon /blk/ x\nsubroutine s\nx = [1, 2]\nformat((/1, 2 /))\nwrite(unit=1, fmt=2) 'x'\n"
         );
         assert_eq!(normalized(once.as_bytes()), once);

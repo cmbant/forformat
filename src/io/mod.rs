@@ -9,7 +9,9 @@ use crate::{
     cli::Invocation,
     config::FormatMode,
     error::FormatError,
-    format_source, format_source_with_context, FormatResult,
+    format_source, format_source_with_context,
+    source::SourceForm,
+    FormatResult,
 };
 mod exclude;
 use exclude::ExcludeMatcher;
@@ -102,7 +104,7 @@ pub fn validate_extension(path: &Path) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "expected a free-form Fortran source (.f03, .f08, .f18, .f23, .f90, .f95): {}",
+            "expected a free-form Fortran source (suffix match is case-insensitive: .f, .f03, .f08, .f18, .f23, .f90, .f95): {}",
             path.display()
         ))
     }
@@ -193,6 +195,7 @@ fn tracked_sources_with_submodules(
 struct Source {
     path: PathBuf,
     bytes: Vec<u8>,
+    form: SourceForm,
 }
 
 fn resolve_input(path: &Path, root: Option<&Path>) -> PathBuf {
@@ -210,7 +213,7 @@ fn resolve_input(path: &Path, root: Option<&Path>) -> PathBuf {
     }
 }
 
-fn read_source(path: &Path) -> Result<Option<Source>, WorkflowError> {
+fn read_source(path: &Path, force_free_input: bool) -> Result<Option<Source>, WorkflowError> {
     validate_extension(path).map_err(WorkflowError::Usage)?;
     let canonical = match fs::canonicalize(path) {
         Ok(canonical) => canonical,
@@ -231,9 +234,15 @@ fn read_source(path: &Path) -> Result<Option<Source>, WorkflowError> {
     }
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
+    let form = if force_free_input {
+        SourceForm::Free
+    } else {
+        crate::source::detect_path(path, &bytes)
+    };
     Ok(Some(Source {
         bytes,
         path: canonical,
+        form,
     }))
 }
 
@@ -388,6 +397,11 @@ struct DeclineReporter {
 }
 
 impl DeclineReporter {
+    fn report_fixed(&mut self, path: &Path, root: Option<&Path>) {
+        let input = display_path(path, root).display().to_string();
+        eprintln!("{}", fixed_message(&input));
+    }
+
     fn report(&mut self, meta: &crate::FormatMeta, path: Option<&Path>, root: Option<&Path>) {
         let input = path
             .map(|path| display_path(path, root).display().to_string())
@@ -434,6 +448,25 @@ impl DeclineReporter {
 
 fn decline_message(input: &str, line: usize, reason: crate::format::wrapping::Decline) -> String {
     format!("forformat: {input}:{}: declined wrap: {reason:?}", line + 1)
+}
+
+fn fixed_message(input: &str) -> String {
+    format!("forformat: {input}: fixed-form source, skipped")
+}
+
+/// Should this unnamed buffer be declined as fixed form?
+///
+/// Two carve-outs beyond the `-ifree` override. A buffer with no non-blank byte
+/// has nothing to protect, and findent's detector answers FIXED at EOF, so
+/// without this every content-free invocation — `forformat </dev/null` among
+/// them — would report a skip. And `-lastindent`/`-lastusable` only report on
+/// the source rather than rewriting it, so there is nothing to decline.
+fn skips_fixed_form(invocation: &Invocation, source: &[u8]) -> bool {
+    !invocation.force_free_input
+        && !invocation.config.last_indent
+        && !invocation.config.last_usable
+        && source.iter().any(|byte| !byte.is_ascii_whitespace())
+        && crate::source::detect(source) == SourceForm::Fixed
 }
 
 fn write_all_stdout(bytes: &[u8]) -> Result<(), WorkflowError> {
@@ -543,14 +576,110 @@ fn unified_diff(path: &Path, old: &[u8], new: &[u8], root: Option<&Path>) -> Vec
     output
 }
 
+fn execute_query_format(invocation: Invocation) -> Result<i32, WorkflowError> {
+    if invocation.stdin || (invocation.paths.is_empty() && !invocation.all && !invocation.all_files)
+    {
+        let mut source = Vec::new();
+        io::stdin().read_to_end(&mut source)?;
+        println!("{}", source_form_name(crate::source::detect(&source)));
+        return Ok(0);
+    }
+
+    let cwd = env::current_dir()?;
+    let all_scope = if invocation.all || invocation.all_files {
+        invocation
+            .paths
+            .first()
+            .map(|path| {
+                let candidate = resolve_input(path, None);
+                let canonical = fs::canonicalize(&candidate).map_err(|error| {
+                    WorkflowError::Usage(format!(
+                        "--all/--all-files directory does not exist: {} ({error})",
+                        candidate.display()
+                    ))
+                })?;
+                if !fs::metadata(&canonical)?.is_dir() {
+                    return Err(WorkflowError::Usage(format!(
+                        "--all/--all-files requires a directory: {}",
+                        candidate.display()
+                    )));
+                }
+                Ok(canonical)
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let root = if let Some(scope) = all_scope.as_deref() {
+        repository_root(scope)?
+    } else {
+        repository_root(&cwd)?
+    };
+
+    let paths = if invocation.all || invocation.all_files {
+        let root = root
+            .as_deref()
+            .ok_or_else(|| WorkflowError::Usage("--all requires a valid Git checkout".into()))?;
+        let reader = if invocation.no_submodules || invocation.all_files {
+            tracked_sources_without_submodules
+        } else {
+            tracked_sources
+        };
+        let paths = reader(root)?;
+        match all_scope.as_deref() {
+            Some(scope) => paths
+                .into_iter()
+                .filter(|path| path.starts_with(scope))
+                .collect(),
+            None => paths,
+        }
+    } else {
+        invocation
+            .paths
+            .iter()
+            .map(|path| resolve_input(path, root.as_deref()))
+            .collect()
+    };
+
+    for path in paths {
+        let source = read_source(&path, false)?.ok_or_else(|| {
+            WorkflowError::Usage(format!(
+                "Fortran source file does not exist: {}",
+                path.display()
+            ))
+        })?;
+        println!("{}", source_form_name(source.form));
+    }
+    Ok(0)
+}
+
+fn source_form_name(form: SourceForm) -> &'static str {
+    match form {
+        SourceForm::Free => "free",
+        SourceForm::Fixed => "fixed",
+    }
+}
+
 /// Execute one parsed invocation. Return value is the process status for a
 /// successful operation: 0 clean/success, 1 differences found.
 pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
+    if invocation.query_format {
+        return execute_query_format(invocation);
+    }
     let all_selection = invocation.all || invocation.all_files;
     let stdin_mode = invocation.stdin || (invocation.paths.is_empty() && !all_selection);
     if stdin_mode && invocation.project_context.is_none() {
         let mut source = Vec::new();
         io::stdin().read_to_end(&mut source)?;
+        // stdin is the primary documented route, so it needs the same guard the
+        // file routes get: free-form normalization of a fixed-form source
+        // rewrites column-1 `*`/`C` comment markers as operators and destroys
+        // the file.  There is no path to name in the diagnostic here.
+        if skips_fixed_form(&invocation, &source) {
+            eprintln!("{}", fixed_message("<stdin>"));
+            write_all_stdout(&source)?;
+            return Ok(0);
+        }
         let config = invocation.config;
         let result = format_source(&source, &config)?;
         let mut declines = DeclineReporter::default();
@@ -762,7 +891,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     let mut loaded = Vec::with_capacity(all_paths.len());
     let mut loaded_index = HashMap::with_capacity(all_paths.len());
     for path in &all_paths {
-        match read_source(path)? {
+        match read_source(path, invocation.force_free_input)? {
             Some(source) => {
                 loaded_index.insert(path.clone(), loaded.len());
                 loaded.push(source);
@@ -771,13 +900,15 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
                 return Err(WorkflowError::Usage(format!(
                     "Fortran source file does not exist: {}",
                     path.display()
-                )))
+                )));
             }
             None => {}
         }
     }
     target_paths.retain(|path| loaded_index.contains_key(path));
-    project_paths.retain(|path| loaded_index.contains_key(path));
+    project_paths.retain(|path| {
+        loaded_index.contains_key(path) && loaded[loaded_index[path]].form == SourceForm::Free
+    });
     if profile {
         eprintln!(
             "forformat profile: read={:?} sources={}",
@@ -785,7 +916,13 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
             loaded.len()
         );
     }
-    let target_indices: Vec<usize> = target_paths.iter().map(|path| loaded_index[path]).collect();
+    let target_indices: Vec<usize> = target_paths
+        .iter()
+        .filter_map(|path| {
+            let index = loaded_index[path];
+            (loaded[index].form == SourceForm::Free).then_some(index)
+        })
+        .collect();
     let project_indices: Vec<usize> = project_paths
         .iter()
         .map(|path| loaded_index[path])
@@ -815,6 +952,13 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         let source = stdin_source
             .as_deref()
             .expect("stdin mode must have read stdin");
+        // Same guard as the plain-stdin route above; a `--project-context` does
+        // not make a fixed-form buffer safe to normalize.
+        if skips_fixed_form(&invocation, source) {
+            eprintln!("{}", fixed_message("<stdin>"));
+            write_all_stdout(source)?;
+            return Ok(0);
+        }
         let formatted = if invocation.config.mode == FormatMode::IndentOnly {
             format_source(source, &invocation.config)?
         } else {
@@ -828,11 +972,17 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     }
 
     if invocation.stdout {
-        let formatted = format_one(&loaded[target_indices[0]], &context, &invocation.config)?;
         let mut declines = DeclineReporter::default();
-        declines.report(&formatted.meta, Some(&target_paths[0]), root.as_deref());
+        let source_index = loaded_index[&target_paths[0]];
+        if loaded[source_index].form == SourceForm::Fixed {
+            declines.report_fixed(&target_paths[0], root.as_deref());
+            write_all_stdout(&loaded[source_index].bytes)?;
+        } else {
+            let formatted = format_one(&loaded[source_index], &context, &invocation.config)?;
+            declines.report(&formatted.meta, Some(&target_paths[0]), root.as_deref());
+            write_all_stdout(&formatted.bytes)?;
+        }
         declines.finish();
-        write_all_stdout(&formatted.bytes)?;
         return Ok(0);
     }
 
@@ -840,10 +990,17 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     let formatted = format_targets(&loaded, &target_indices, &context, &invocation.config)?;
     let mut changed = Vec::new();
     let mut declines = DeclineReporter::default();
-    for ((&source_index, path), (meta, output)) in
-        target_indices.iter().zip(&target_paths).zip(formatted)
-    {
+    let mut formatted = formatted.into_iter();
+    for path in &target_paths {
+        let source_index = loaded_index[path];
         let target = &loaded[source_index];
+        if target.form == SourceForm::Fixed {
+            declines.report_fixed(path, root.as_deref());
+            continue;
+        }
+        let (meta, output) = formatted
+            .next()
+            .expect("one formatting result per free-form target");
         declines.report(&meta, Some(path), root.as_deref());
         let Some(formatted) = output else {
             continue;

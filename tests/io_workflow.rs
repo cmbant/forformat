@@ -512,6 +512,60 @@ fn check_diff_and_query_mode_have_real_process_statuses() {
 }
 
 #[test]
+fn fixed_form_targets_are_skipped_without_affecting_status_or_stdout() {
+    let repo = temp_repo();
+    let source = b"* legacy fixed-form comment\n      x = 1\n";
+    let path = repo.join("legacy.f");
+    fs::write(&path, source).unwrap();
+    git_add(&repo);
+
+    let stdout = run(&repo, &["--full", "--no-config", "--stdout", "legacy.f"]);
+    assert_eq!(stdout.status.code(), Some(0));
+    assert_eq!(stdout.stdout, source);
+    assert_eq!(
+        stdout.stderr,
+        b"forformat: legacy.f: fixed-form source, skipped\n"
+    );
+
+    let check = run(&repo, &["--full", "--no-config", "--check", "legacy.f"]);
+    assert_eq!(check.status.code(), Some(0));
+    assert_eq!(fs::read(&path).unwrap(), source);
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn ifree_forces_formatting_of_a_detected_fixed_form_target() {
+    let repo = temp_repo();
+    let source = b"* legacy fixed-form comment\n      x = 1\n";
+    let path = repo.join("legacy.f");
+    fs::write(&path, source).unwrap();
+    git_add(&repo);
+
+    let output = run(
+        &repo,
+        &["--full", "--no-config", "-ifree", "--stdout", "legacy.f"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_ne!(output.stdout, source);
+    assert!(output.stderr.is_empty());
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn query_format_reports_each_input_without_writing() {
+    let repo = temp_repo();
+    fs::write(repo.join("legacy.f"), b"* comment\n").unwrap();
+    fs::write(repo.join("modern.F90"), b"MODULE m\nEND MODULE m\n").unwrap();
+    git_add(&repo);
+
+    let output = run(&repo, &["--query-format", "legacy.f", "modern.F90"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"fixed\nfree\n");
+    assert!(output.stderr.is_empty());
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
 fn stdin_and_file_routes_produce_identical_bytes_for_the_same_source() {
     let repo = temp_repo();
     let mut fixtures: Vec<_> =
