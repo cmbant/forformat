@@ -488,3 +488,5 @@ fn fold_open_groups(line: &[u8], open: &mut Vec<bool>) {
         }
     }
 }
+
+include!("tests.rs");
