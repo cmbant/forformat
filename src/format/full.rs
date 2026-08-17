@@ -318,14 +318,6 @@ fn reflow_with_context_inner(
             // *next* run measures.  Measuring only what is emitted closes that
             // loop: leaving the statement alone leaves the block — and so the
             // measurement — exactly as it was.
-            let has_long_physical_line = group
-                .lines
-                .clone()
-                .any(|line| unwrapped_width(line) > config.wrap.line_length);
-            if !has_long_physical_line {
-                copy_group(document, group, &mut out);
-                return (out, None);
-            }
             let mut body = trim(&group.statements[0].text).to_vec();
             if group.lines.len() > 1 {
                 let original_body = body.clone();
@@ -343,6 +335,35 @@ fn reflow_with_context_inner(
                     &context,
                 );
                 body = trim(&body).to_vec();
+            }
+            // The gate is asked of the *physical* lines, which is what leaves an
+            // author's own breaks alone unless one of them overruns.  It is
+            // evaluated here rather than before the body is built only so that
+            // `body_as_emitted` below can share its answer; the predicate is
+            // unchanged.
+            //
+            // Widening it to also catch a declaration whose authored `::` run is
+            // wider than the emitted one — the remaining A1 case, where step 17
+            // re-forms the block and the emitted line is longer than the
+            // measured one — was tried and rejected: it treats every authored
+            // declaration alignment as a wrap candidate and changed 79 to 212
+            // OpenFAST files depending on profile.  A1 needs a predictor derived
+            // from the block partition step 16 will actually create, not from
+            // the gap shrinking.
+            let has_long_physical_line = group
+                .lines
+                .clone()
+                .any(|line| unwrapped_width(line) > config.wrap.line_length);
+            body = body_as_emitted(
+                body,
+                first_indent,
+                plan.remred,
+                has_long_physical_line,
+                config,
+            );
+            if !has_long_physical_line {
+                copy_group(document, group, &mut out);
+                return (out, None);
             }
             // Step 17 does not only pad: on a declaration whose author lined the
             // `::` up in a much wider block, it *compresses*, and the statement the
@@ -695,6 +716,34 @@ fn reindent(line: &[u8], indent: usize) -> Vec<u8> {
     let mut result = vec![b' '; indent];
     result.extend_from_slice(line.trim_ascii_start());
     result
+}
+
+/// Project the statement text onto the whitespace the layout emitter will
+/// write before the wrapper measures it.  The emitter owns both reductions:
+/// `--ws-remred` is applied per physical line and labels are given their
+/// target-column gap there, so the logical statement cannot be measured from
+/// its authored bytes when either policy changes its width.
+fn body_as_emitted(
+    mut body: Vec<u8>,
+    first_indent: usize,
+    remred: bool,
+    project: bool,
+    config: &FormatConfig,
+) -> Vec<u8> {
+    if project && remred {
+        let mut reduced = Vec::with_capacity(body.len());
+        let mut quote = 0;
+        crate::transform::whitespace::reduce_line_into_protected(
+            &body,
+            &mut quote,
+            config.mode == FormatMode::Full && config.align_declarations,
+            config.mode == FormatMode::Full && config.align_comments,
+            &mut |byte| reduced.push(byte),
+        );
+        body = reduced;
+    }
+    let _ = first_indent;
+    body
 }
 
 fn copy_group(document: &Document, group: &LogicalGroup, lines: &mut Vec<Vec<u8>>) {

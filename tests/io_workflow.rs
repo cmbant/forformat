@@ -680,6 +680,30 @@ fn project_context_implies_stdin_and_anchors_config_discovery() {
 }
 
 #[test]
+fn file_project_context_matches_normal_file_config_discovery() {
+    let repo = temp_repo();
+    let source = b"program p\nx=1\nend program p\n";
+    fs::create_dir(repo.join("src")).unwrap();
+    fs::write(repo.join(".forformat.toml"), b"indent = 4\n").unwrap();
+    fs::write(repo.join("src/.forformat.toml"), b"indent = 8\n").unwrap();
+    fs::write(repo.join("src/foo.f90"), source).unwrap();
+    git_add(&repo);
+
+    let file = run(&repo, &["--indent-only", "--stdout", "src/foo.f90"]);
+    let project = run_stdin(
+        &repo,
+        &["--indent-only", "--project-context", "src/foo.f90"],
+        source,
+    );
+    assert_eq!(file.status.code(), Some(0));
+    assert_eq!(project.status.code(), Some(0));
+    assert_eq!(project.stdout, file.stdout);
+    assert_eq!(project.stdout, b"program p\n        x=1\nend program p\n");
+
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
 fn file_project_context_uses_the_context_filename_for_detection() {
     let repo = temp_repo();
     let target = repo.join("target.f90");

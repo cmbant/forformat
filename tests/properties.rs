@@ -1776,6 +1776,53 @@ END MODULE m
 }
 
 #[test]
+fn wrapping_measures_internal_whitespace_after_remred_before_searching_for_a_break() {
+    let source = "\
+module NoahmpIOVarInitMod
+contains
+  subroutine NoahmpIOVarInitDefault(NoahmpIO)
+    associate(its => NoahmpIO%its, ite => NoahmpIO%ite)
+    if (NoahmpIO%sf_urban_physics > 0) then
+    if ( .not. allocated (NoahmpIO%trb_urb4d)  ) allocate ( NoahmpIO%trb_urb4d   (its:ite,NoahmpIO%urban_map_zrd) )
+    endif
+    end associate
+  end subroutine NoahmpIOVarInitDefault
+end module NoahmpIOVarInitMod
+";
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        indent: 8,
+        start_indent: 2,
+        indent_continuation: true,
+        continuation_indent: 6,
+        indent_ampersand: true,
+        align_paren: true,
+        align_paren_value: 4,
+        ws_remred: true,
+        ws_remred_value: 1,
+        align_declarations: true,
+        align_comments: true,
+        contains_restart: true,
+        openmp: true,
+        max_indent: 32,
+        construct_indents: forformat::ConstructIndents::with_indent(8),
+        contains_indent: 8,
+        wrap: forformat::WrapConfig {
+            line_length: 120,
+            ..FormatConfig::default().wrap
+        },
+        ..FormatConfig::default()
+    };
+    let (once, twice) = full_twice(source, &config);
+    assert!(
+        once.lines()
+            .any(|line| line.contains("trb_urb4d (its:ite, &")),
+        "the remred-width guard was not exercised:\n{once}"
+    );
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+}
+
+#[test]
 fn a_redundant_pair_is_still_redundant_when_the_author_broke_the_line_between_them() {
     // Reduced from Q-E `PP/src/write_hamiltonians.f90`.  The author closed this
     // condition on a continuation, so the inner `)` is followed by `&`, a
@@ -1845,4 +1892,216 @@ end subroutine p
         once.contains("n = (m"),
         "the eligible right-hand side kept its redundant pair:\n{once}"
     );
+}
+
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn a_binary_minus_stays_spaced_across_a_conditional_sentinel_continuation() {
+    // The `!$` sentinel is a layout prefix, not the end of the expression.
+    // The wrapper moves the minus to the next sentinel line; the next pass
+    // must still see the operand on the preceding physical line and retain
+    // binary spacing.
+    let mut style = StyleConfig::default();
+    style.keyword_case = KeywordCase::Preserve;
+    style.relational_symbols = false;
+    style.array_brackets = false;
+    style.compact_multiplicative = false;
+    style.delimiter_spacing = false;
+    style.comment_spacing = false;
+    style.continuation_markers = false;
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        indent: 8,
+        construct_indents: forformat::ConstructIndents::with_indent(8),
+        align_paren: true,
+        align_paren_value: 4,
+        wrap: forformat::WrapConfig {
+            enabled: true,
+            line_length: 80,
+        },
+        style,
+        ..FormatConfig::default()
+    };
+    let source = "\
+subroutine b1
+  integer :: iatom, nkind, jatom, nlock, hash, natom
+  if (.true.) then
+    if (.true.) then
+      if (.true.) then
+        if (.true.) then
+          if (.true.) then
+            if (.true.) then
+              if (.true.) then
+                !$ hash = mod((iatom - 1)*natom + jatom, nlock) + 1
+              end if
+            end if
+          end if
+        end if
+      end if
+    end if
+  end if
+end subroutine b1
+";
+    let (once, twice) = full_twice(source, &config);
+    assert!(
+        once.contains("- 1)"),
+        "the reduced break was not exercised:\n{once}"
+    );
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+}
+
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn an_io_format_star_stays_spaced_when_wrapping_moves_it_before_a_marker() {
+    // `PRINT *` uses `*` as its output unit.  Once wrapping puts the marker
+    // after that star, a per-line multiplication test must not compact it.
+    let mut style = StyleConfig::default();
+    style.relational_symbols = true;
+    style.array_brackets = true;
+    style.compact_multiplicative = true;
+    style.join_goto = true;
+    style.split_compound_keywords = true;
+    style.strip_empty_args = true;
+    style.remove_redundant_parens = true;
+    style.remove_terminal_return = true;
+    style.program_unit_spacing = true;
+    style.max_blank_lines = Some(2);
+    style.delimiter_spacing = true;
+    style.comment_spacing = true;
+    style.continuation_markers = true;
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        indent: 8,
+        construct_indents: forformat::ConstructIndents::with_indent(8),
+        continuation_indent: 6,
+        align_paren: true,
+        align_paren_value: 8,
+        align_comments: true,
+        wrap: forformat::WrapConfig {
+            enabled: true,
+            line_length: 80,
+        },
+        style,
+        ..FormatConfig::default()
+    };
+    let source = "\
+subroutine c1(ex)
+  logical, optional :: ex
+  if (.true.) then
+    if (.true.) then
+      if (.true.) then
+        if (.true.) then
+          if (.true.) then
+            if ( .not.present(ex) ) &
+              print *, 'error: closed tag that was not open'
+          end if
+        end if
+      end if
+    end if
+  end if
+end subroutine c1
+";
+    let (once, twice) = full_twice(source, &config);
+    assert!(
+        once.contains("print * &"),
+        "the reduced break was not exercised:\n{once}"
+    );
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+}
+
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn an_io_format_star_is_recognized_whatever_case_the_keyword_is_written_in() {
+    // Fortran reserves no case, so `PRINT` under `--keyword-case=preserve` is
+    // the same statement as `print` under `=lower`.  Matching the keyword's raw
+    // bytes rather than comparing case-insensitively left the specifier rule
+    // switched off for every source that spells its I/O keywords in upper case.
+    let mut style = StyleConfig::default();
+    style.keyword_case = KeywordCase::Preserve;
+    style.compact_multiplicative = true;
+    style.delimiter_spacing = true;
+    style.continuation_markers = true;
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        indent: 8,
+        construct_indents: forformat::ConstructIndents::with_indent(8),
+        continuation_indent: 6,
+        align_paren: true,
+        align_paren_value: 8,
+        wrap: forformat::WrapConfig {
+            enabled: true,
+            line_length: 80,
+        },
+        style,
+        ..FormatConfig::default()
+    };
+    let source = "\
+subroutine c1(ex)
+  logical, optional :: ex
+  if (.true.) then
+    if (.true.) then
+      if (.true.) then
+        if (.true.) then
+          if (.true.) then
+            IF ( .not.present(ex) ) &
+              PRINT *, 'error: closed tag that was not open'
+          end if
+        end if
+      end if
+    end if
+  end if
+end subroutine c1
+";
+    let (once, twice) = full_twice(source, &config);
+    assert!(
+        once.contains("PRINT * &"),
+        "the reduced break was not exercised:\n{once}"
+    );
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+}
+
+#[test]
+#[allow(clippy::field_reassign_with_default)]
+fn a_bind_keyword_argument_stays_compact_when_its_call_head_wraps_away() {
+    // `BIND(C,` opens the argument list on the preceding physical line.  The
+    // `name=` token remains a keyword argument after the wrapper moves it to a
+    // continuation, so it must not be respaced as an ordinary assignment.
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        indent: 8,
+        start_indent: 2,
+        max_indent: 32,
+        continuation_indent: 6,
+        indent_ampersand: true,
+        align_paren: true,
+        align_paren_value: 4,
+        ws_remred: true,
+        ws_remred_value: 1,
+        align_comments: true,
+        contains_restart: true,
+        construct_indents: forformat::ConstructIndents::with_indent(8),
+        wrap: forformat::WrapConfig {
+            enabled: true,
+            line_length: 120,
+        },
+        ..FormatConfig::default()
+    };
+    let source = "\
+module c2
+  use iso_c_binding
+  interface
+    integer(C_INT) FUNCTION libvori_pushAtoms(n, pord, pchg, posx, posy, posz) BIND(C, NAME='libvori_pushAtoms')
+      use iso_c_binding, only: c_int
+      integer(c_int), value :: n
+      integer(c_int) :: pord(*), pchg(*), posx(*), posy(*), posz(*)
+    end function libvori_pushAtoms
+  end interface
+end module c2
+";
+    let (once, twice) = full_twice(source, &config);
+    assert!(
+        once.contains("name= &"),
+        "the reduced break was not exercised:\n{once}"
+    );
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
 }

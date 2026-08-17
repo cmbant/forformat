@@ -38,6 +38,7 @@ struct LineOptions<'a> {
     continued_infix: bool,
     continued_declaration: bool,
     continued_named_parameter: bool,
+    continued_bind_parameter: bool,
     /// The groups still open when this line starts, innermost last: `true` for
     /// a parenthesis, `false` for a bracket.
     ///
@@ -75,7 +76,14 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
     let mut state = LexState::default();
     let mut continued_statement = false;
     let mut continued_infix = false;
+    // `!$` conditional-compilation lines are formatted through a separate
+    // body-only branch below.  Keep the expression context in that branch as
+    // well: the sentinel is source-layout punctuation, not a statement
+    // boundary, so a minus after `&` is still binary when the previous `!$`
+    // line ended on its left operand.
+    let mut continued_openmp_infix = false;
     let mut continued_named_parameter = false;
+    let mut continued_bind_parameter = false;
     let mut open_groups: Vec<bool> = Vec::new();
     let mut entity_list = EntityListCursor::default();
     for index in 0..document.lines.len() {
@@ -97,7 +105,10 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 &declared_names,
                 index,
                 &mut LexState::default(),
-                LineOptions::default(),
+                LineOptions {
+                    continued_infix: continued_openmp_infix,
+                    ..LineOptions::default()
+                },
             );
             let mut rebuilt = document.lines[index][..body_start].to_vec();
             rebuilt.extend_from_slice(&body);
@@ -105,14 +116,20 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 document.lines[index] = rebuilt;
                 changed = changed.or(Changed::Text);
             }
+            continued_openmp_infix = trailing_continuation_operand(&body);
             state = LexState::default();
             continued_statement = false;
             continued_infix = false;
             continued_named_parameter = false;
+            continued_bind_parameter = false;
             open_groups.clear();
             entity_list = EntityListCursor::default();
             continue;
         }
+        // A normal physical line cannot continue an expression through a
+        // conditional-compilation sentinel; only adjacent `!$` body lines
+        // share `continued_openmp_infix`.
+        continued_openmp_infix = false;
         if kind == PhysicalLineKind::Preprocessor {
             // A directive body is never Fortran; its spelling is preserved (I3)
             // and it does not carry literal state into the next line.
@@ -120,6 +137,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             continued_statement = false;
             continued_infix = false;
             continued_named_parameter = false;
+            continued_bind_parameter = false;
             open_groups.clear();
             entity_list = EntityListCursor::default();
             continue;
@@ -147,6 +165,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 continued_infix,
                 continued_declaration,
                 continued_named_parameter,
+                continued_bind_parameter,
                 continued_format,
                 continued_initializer: entity_list.initializer,
                 open_groups: &open_groups,
@@ -162,8 +181,10 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 continued_infix = trailing_continuation_operand(code);
                 // Whether the *statement* has argument lists at all.  Whether a
                 // given `=` is inside one is decided at the `=`, from
-                // `open_groups`.
+                // `open_groups`.  The statement scan also recognizes `BIND`,
+                // whose call head commonly wraps away from its keyword.
                 continued_named_parameter = continued_statement && is_call_group(cx, index);
+                continued_bind_parameter = continued_statement && is_bind_group(cx, index);
                 entity_list.advance(code, open_groups.len());
                 fold_open_groups(code, &mut open_groups);
                 if !continued_statement {
@@ -197,6 +218,23 @@ fn is_call_group(cx: &PassContext, line_index: usize) -> bool {
             .iter()
             .enumerate()
             .any(|(index, token)| token.text == b"=" && is_named_parameter_token(&tokens, index))
+}
+
+fn is_bind_group(cx: &PassContext, line_index: usize) -> bool {
+    let Some(statement) = cx
+        .analysis
+        .group_of_line(line_index)
+        .and_then(|group| group.statements.first())
+    else {
+        return false;
+    };
+    let tokens = crate::source::tokens::tokens(&statement.text);
+    tokens.iter().enumerate().any(|(index, token)| {
+        token.is_name(b"bind")
+            && tokens
+                .get(index + 1)
+                .is_some_and(|next| next.kind == TokenKind::LParen)
+    })
 }
 
 /// The full chain for one physical line, carrying literal state across
@@ -237,6 +275,7 @@ fn apply_with_options(
         options.continued_infix,
         options.continued_declaration,
         options.continued_named_parameter,
+        options.continued_bind_parameter,
         options.continued_format,
         options.continued_initializer,
         options.open_groups,
@@ -285,6 +324,7 @@ pub fn respace_joined(
         declared_names,
         line_index,
         &mut state,
+        false,
         false,
         false,
         false,
@@ -383,6 +423,7 @@ pub fn lowercase_line(
         false,
         false,
         false,
+        false,
         &[],
         false,
     )
@@ -399,6 +440,7 @@ fn lowercase_line_with_context(
     continued_infix: bool,
     continued_declaration: bool,
     continued_named_parameter: bool,
+    continued_bind_parameter: bool,
     continued_format: bool,
     continued_initializer: bool,
     open_groups: &[bool],
@@ -458,8 +500,8 @@ fn lowercase_line_with_context(
                     let named = token.text == b"="
                         && (is_named_parameter_token(&tokens, index)
                             || continued_statement
-                                && !continued_declaration
-                                && continued_named_parameter
+                                && (!continued_declaration && continued_named_parameter
+                                    || continued_bind_parameter)
                                 && is_continued_named_parameter(
                                     &tokens,
                                     index,
@@ -471,9 +513,15 @@ fn lowercase_line_with_context(
                     && !continued_format
                     && is_arithmetic_operator(token.text)
                 {
-                    if is_binary_arithmetic_operator(line, token.span.start, token.text)
-                        || (continued_infix
-                            && is_leading_continuation_arithmetic(&tokens, index, token))
+                    // An I/O specifier `*` is not an operator at all, so it takes
+                    // the same path as any other non-binary occurrence rather
+                    // than skipping the arm.  Skipping it left the surrounding
+                    // whitespace untouched, which preserved an authored `* ,`
+                    // that every earlier release had tidied to `*,`.
+                    if !is_io_specifier_star(&tokens, index, token)
+                        && (is_binary_arithmetic_operator(line, token.span.start, token.text)
+                            || (continued_infix
+                                && is_leading_continuation_arithmetic(&tokens, index, token)))
                     {
                         let declaration_star = is_declaration_type_star(&tokens, index, token.text);
                         add_operator_edit(
@@ -1995,6 +2043,61 @@ fn is_named_parameter_token(tokens: &[crate::source::Token<'_>], index: usize) -
         && tokens[index - 1].kind == TokenKind::Name
         && (tokens[index - 2].kind == TokenKind::LParen
             || (tokens[index - 2].kind == TokenKind::Comma && tokens[index - 2].depth > 0))
+}
+
+/// `*` in an I/O control list is a unit or format specifier, never a
+/// multiplicative operator.  This must be a statement-level check rather than
+/// a check for the last token on a physical line: wrapping can move the `*`
+/// next to `&`, but it remains part of `PRINT`, `READ`, or `WRITE`'s control
+/// syntax wherever that boundary lands.
+fn is_io_specifier_star(
+    tokens: &[crate::source::Token<'_>],
+    index: usize,
+    token: &crate::source::Token<'_>,
+) -> bool {
+    if token.text != b"*" {
+        return false;
+    }
+    let Some(io) = tokens.iter().enumerate().find_map(|(io, candidate)| {
+        // Fortran reserves no case, so the keyword is matched case-insensitively
+        // here as everywhere else.  Matching the raw bytes instead left the rule
+        // switched off for `PRINT *` under `--keyword-case=preserve` and
+        // `=upper`, where the spelling never reaches lower case.
+        if !(candidate.is_name(b"print")
+            || candidate.is_name(b"read")
+            || candidate.is_name(b"write"))
+        {
+            return None;
+        }
+        let first = first_statement_index(tokens);
+        let is_head =
+            io == first || if_condition_close(tokens).is_some_and(|close| io == close + 1);
+        is_head.then_some(io)
+    }) else {
+        return false;
+    };
+    // A parenthesized control list (`WRITE(…)`, `READ(…)`) holds items, and a
+    // `*` is only one of them when nothing could be its left operand.  Anchor
+    // on the left: an item can be preceded by the opening parenthesis or by an
+    // item separator, and by nothing else.  Accepting every `*` between the
+    // parentheses instead swallowed the ordinary multiplications that a control
+    // list routinely contains — `WRITE(UNIT=line(20*(k - 1) + 1:20*k), …)` lost
+    // its operator spacing on six corpus files.
+    let open = io + 1;
+    if tokens
+        .get(open)
+        .is_some_and(|next| next.kind == TokenKind::LParen)
+    {
+        let Some(close) = matching_close(tokens, open) else {
+            return false;
+        };
+        return index > open
+            && index < close
+            && matches!(tokens[index - 1].kind, TokenKind::LParen | TokenKind::Comma);
+    }
+    // The list-directed forms `PRINT *` and `READ *` name the format straight
+    // after the keyword.
+    index == io + 1
 }
 
 fn is_continued_named_parameter(
