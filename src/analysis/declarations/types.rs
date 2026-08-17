@@ -121,12 +121,7 @@ impl TypeMaps {
         );
     }
 
-    pub(super) fn insert_module_variable(
-        &mut self,
-        module: &[u8],
-        name: &[u8],
-        type_name: &[u8],
-    ) {
+    pub(super) fn insert_module_variable(&mut self, module: &[u8], name: &[u8], type_name: &[u8]) {
         insert_agreed_component_type(
             &mut self.module_variable_types,
             &mut self.module_variable_type_ambiguities,

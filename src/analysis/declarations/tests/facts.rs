@@ -66,9 +66,8 @@ fn conflicting_spellings_in_one_file_make_the_name_untouchable() {
 
 #[test]
 fn define_directives_contribute_macro_spellings() {
-    let facts = facts(
-        b"#define FEATURE_FLAG 1\n#  define Has_Fun(x) (x)\n#undef NOPE\nprogram p\nend\n",
-    );
+    let facts =
+        facts(b"#define FEATURE_FLAG 1\n#  define Has_Fun(x) (x)\n#undef NOPE\nprogram p\nend\n");
     assert_eq!(
         facts.macros.get(b"feature_flag"),
         Some(b"FEATURE_FLAG".as_slice())

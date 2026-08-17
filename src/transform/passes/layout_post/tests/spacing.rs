@@ -70,8 +70,7 @@ fn adjacent_program_units_have_one_blank_line_and_are_idempotent() {
         ),
         (
             b"subroutine f\nend subroutine f\nsubroutine s\nend subroutine s\n".as_slice(),
-            b"subroutine f\n\nend subroutine f\n\nsubroutine s\n\nend subroutine s\n"
-                .as_slice(),
+            b"subroutine f\n\nend subroutine f\n\nsubroutine s\n\nend subroutine s\n".as_slice(),
         ),
         (
             b"module m\nend module m\nprogram p\nend program p\n".as_slice(),

@@ -186,7 +186,11 @@ pub(super) fn select_type_alias(text: &[u8]) -> Option<Vec<u8>> {
     (alias.kind == TokenKind::Name && arrow.text == b"=>").then(|| alias.text.to_vec())
 }
 
-pub(super) fn type_spec_name<'a>(tokens: &[Token<'a>], start: usize, limit: usize) -> Option<&'a [u8]> {
+pub(super) fn type_spec_name<'a>(
+    tokens: &[Token<'a>],
+    start: usize,
+    limit: usize,
+) -> Option<&'a [u8]> {
     let open = tokens.get(start + 1)?;
     if open.kind != TokenKind::LParen {
         return None;
@@ -254,7 +258,10 @@ pub(super) fn is_old_style_type_context(tokens: &[Token<'_>], first_index: usize
         .is_none_or(|token| token.is_name(b"is") || token.is_name(b"default"))
 }
 
-pub(super) fn old_style_type_name<'a>(tokens: &'a [Token<'a>], first_index: usize) -> Option<&'a [u8]> {
+pub(super) fn old_style_type_name<'a>(
+    tokens: &'a [Token<'a>],
+    first_index: usize,
+) -> Option<&'a [u8]> {
     let open = tokens.get(first_index + 1)?;
     if open.kind != TokenKind::LParen {
         return None;
@@ -266,4 +273,3 @@ pub(super) fn old_style_type_name<'a>(tokens: &'a [Token<'a>], first_index: usiz
         .find(|token| token.kind == TokenKind::Name)
         .map(|token| token.text)
 }
-

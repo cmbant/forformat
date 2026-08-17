@@ -16,7 +16,9 @@ enum Pending {
     #[default]
     None,
     Exactly,
-    AtLeast { authored: usize },
+    AtLeast {
+        authored: usize,
+    },
 }
 
 impl Pending {
@@ -117,8 +119,7 @@ pub fn program_unit_spacing(
             unit_depth += 1;
         }
 
-        let is_contains =
-            unit_depth > 0 && type_depth == 0 && info.kind == StatementKind::Contains;
+        let is_contains = unit_depth > 0 && type_depth == 0 && info.kind == StatementKind::Contains;
         if is_contains || is_end {
             while normalized
                 .last()

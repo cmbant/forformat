@@ -9,8 +9,8 @@ mod blank_lines;
 mod output;
 mod unit_spacing;
 
-pub use alignment::{declaration_separator_alignment, trailing_comment_alignment};
 pub(crate) use alignment::declaration_separator_info;
+pub use alignment::{declaration_separator_alignment, trailing_comment_alignment};
 pub use blank_lines::limit_blank_lines;
 pub use output::output_whitespace;
 pub use unit_spacing::program_unit_spacing;

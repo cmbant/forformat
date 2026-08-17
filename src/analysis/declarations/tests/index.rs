@@ -83,8 +83,7 @@ fn implicit_typing_policies_follow_scope_inheritance_and_resets() {
     let none_type = scoped(b"subroutine s\nimplicit none(type)\nx = I\nend subroutine s\n");
     assert!(!none_type.implicit_allows(2, b"I"));
 
-    let none_external =
-        scoped(b"subroutine s\nimplicit none(external)\nx = I\nend subroutine s\n");
+    let none_external = scoped(b"subroutine s\nimplicit none(external)\nx = I\nend subroutine s\n");
     assert!(none_external.implicit_allows(2, b"I"));
 
     let contained = scoped(
@@ -103,9 +102,8 @@ fn implicit_typing_policies_follow_scope_inheritance_and_resets() {
     );
     assert!(interface.implicit_allows(4, b"I"));
 
-    let malformed = scoped(
-        b"subroutine s\nimplicit none(type)\nimplicit real(a-)\nx = I\nend subroutine s\n",
-    );
+    let malformed =
+        scoped(b"subroutine s\nimplicit none(type)\nimplicit real(a-)\nx = I\nend subroutine s\n");
     assert!(malformed.implicit_allows(3, b"I"));
 
     let malformed_before_none =
@@ -185,4 +183,3 @@ fn procedure_headers_results_and_interface_dummies_are_local() {
     assert!(names.local_contains(7, b"resultvalue"));
     assert!(!names.file_declared_contains(2, b"arg"));
 }
-
