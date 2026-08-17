@@ -295,7 +295,10 @@ where
                     let path = need(&mut value, &mut a)?;
                     config_selection.explicit.push(path);
                 }
-                "no-config" => config_selection.no_config = true,
+                "no-config" => {
+                    reject_value(&name, &value)?;
+                    config_selection.no_config = true;
+                }
                 "indent" => {
                     let v = need(&mut value, &mut a)?;
                     if v == "none" {
@@ -353,9 +356,21 @@ where
                 "align-comments" => c.align_comments = parse_bool(&need(&mut value, &mut a)?)?,
                 "last-indent" => c.last_indent = true,
                 "last-usable" => c.last_usable = true,
-                "all" => all = true,
-                "all-files" => all_files = true,
-                "no-submodules" => no_submodules = true,
+                "all" => {
+                    reject_value(&name, &value)?;
+                    all = true;
+                }
+                "all-files" => {
+                    reject_value(&name, &value)?;
+                    all_files = true;
+                }
+                "no-submodules" => {
+                    no_submodules = value
+                        .as_deref()
+                        .map(parse_bool)
+                        .transpose()?
+                        .unwrap_or(true)
+                }
                 "context-path" => {
                     let path = need(&mut value, &mut a)?;
                     if path.is_empty() {
@@ -379,13 +394,34 @@ where
                     }
                     project_context = Some(PathBuf::from(path));
                 }
-                "stdin" => stdin = true,
-                "stdout" => stdout = true,
-                "isolated" => isolated = true,
-                "check" => check = true,
-                "diff" => diff = true,
-                "show-files" => show_files = true,
-                "query-format" => query_format = true,
+                "stdin" => {
+                    reject_value(&name, &value)?;
+                    stdin = true;
+                }
+                "stdout" => {
+                    reject_value(&name, &value)?;
+                    stdout = true;
+                }
+                "isolated" => {
+                    reject_value(&name, &value)?;
+                    isolated = true;
+                }
+                "check" => {
+                    reject_value(&name, &value)?;
+                    check = true;
+                }
+                "diff" => {
+                    reject_value(&name, &value)?;
+                    diff = true;
+                }
+                "show-files" => {
+                    reject_value(&name, &value)?;
+                    show_files = true;
+                }
+                "query-format" => {
+                    reject_value(&name, &value)?;
+                    query_format = true;
+                }
                 "exclude" | "extend-exclude" => {
                     let pattern = need(&mut value, &mut a)?;
                     if pattern.is_empty() {
@@ -402,9 +438,18 @@ where
                 // Mode selection.  `indent-only` must be matched before the
                 // generic `indent-*` construct arm below, which would otherwise
                 // read it as a construct name.
-                "indent-only" => c.mode = FormatMode::IndentOnly,
-                "full" => c.mode = FormatMode::Full,
-                "normalize-only" => c.mode = FormatMode::NormalizeOnly,
+                "indent-only" => {
+                    reject_value(&name, &value)?;
+                    c.mode = FormatMode::IndentOnly;
+                }
+                "full" => {
+                    reject_value(&name, &value)?;
+                    c.mode = FormatMode::Full;
+                }
+                "normalize-only" => {
+                    reject_value(&name, &value)?;
+                    c.mode = FormatMode::NormalizeOnly;
+                }
                 "wrap" => {
                     c.wrap.enabled = value
                         .as_deref()
@@ -412,7 +457,14 @@ where
                         .transpose()?
                         .unwrap_or(true)
                 }
-                "no-wrap" => c.wrap.enabled = false,
+                "no-wrap" => {
+                    let disabled = value
+                        .as_deref()
+                        .map(parse_bool)
+                        .transpose()?
+                        .unwrap_or(true);
+                    c.wrap.enabled = !disabled;
+                }
                 "line-length" => c.wrap.line_length = parse_num(&need(&mut value, &mut a)?)?,
                 "uppercase-single-l" => c.uppercase_single_l = true,
                 "define" => push_define(&mut c, &need(&mut value, &mut a)?),
@@ -719,9 +771,9 @@ where
                 .into(),
         ));
     }
-    if query_format && project_context.is_some() {
+    if query_format && (project_context.is_some() || !context_paths.is_empty() || isolated) {
         return Err(FormatError::InvalidOption(
-            "--query-format cannot be combined with --project-context".into(),
+            "--query-format cannot be combined with --project-context, --context-path, or --isolated".into(),
         ));
     }
     if project_context.is_some() {
@@ -767,6 +819,16 @@ where
             })),
             config_selection,
         })
+    }
+}
+
+fn reject_value(name: &str, value: &Option<String>) -> Result<(), FormatError> {
+    if value.is_some() {
+        Err(FormatError::InvalidOption(format!(
+            "--{name} does not accept a value"
+        )))
+    } else {
+        Ok(())
     }
 }
 
@@ -962,7 +1024,7 @@ Free-form Fortran formatter.\n\
   -Ia, --start-indent=a               infer starting indentation\n\
   -M<n>, --max-indent=<n>             maximum indentation (0 = unlimited)\n\
   -k<n>, --indent-continuation=<n>    continuation indentation\n\
-  -K, --indent-ampersand              indent leading continuation ampersands\n\
+    -K, --indent-ampersand[=<BOOL>]     indent leading continuation ampersands\n\
   --align-paren[=<n>]                align continuation lines at parentheses\n\
   --include-left=<0|1>               put INCLUDE at the starting indent\n\
   -Rr, -RR, --refactor-end[=upcase]  complete END definition statements\n\
@@ -973,8 +1035,8 @@ Free-form Fortran formatter.\n\
   --query-format                     print free/fixed for each input and exit\n\
     --all-files [directory]             format this checkout's tracked sources; submodules are context only\n\
     <paths>, --all [directory]          format explicit files or all tracked sources recursively\n\
-    --no-submodules                     omit submodule sources from targets and project context\n\
-    --context-path=<directory>           limit tracked sources used for project context (repeatable)\n\
+    --no-submodules[=true|false]        omit submodule sources from targets and project context\n\
+    --context-path=<directory>           limit project context to sources beneath DIRECTORY; repeatable\n\
   --stdin                             read source from stdin (default without paths)\n\
     --project-context=<path>            treat stdin as belonging to the Git project containing PATH; a source-file PATH identifies stdin as that file and shadows its on-disk contents\n\
   --stdout                            write one file's result to stdout\n\
@@ -988,7 +1050,7 @@ Free-form Fortran formatter.\n\
   --indent-only                      findent-compatible indentation only\n\
   --full                             full formatting: normalization and wrapping (default)\n\
   --normalize-only                   normalization without structural layout\n\
-  --wrap[=<0|1>], --no-wrap          reflow over-long statements (full mode)\n\
+    --wrap[=<BOOL>], --no-wrap[=<BOOL>] reflow over-long statements (full mode)\n\
   --line-length=<n>                  wrapping budget (default 120)\n\
   --keyword-case=<lower|upper|preserve>\n\
                                       recognized keyword case (default lower)\n\
@@ -1125,6 +1187,81 @@ mod tests {
         assert_eq!(run(&["--align_paren=4"]).align_paren_value, 4);
         assert!(run(&["--ws-remred"]).ws_remred);
         assert_eq!(run(&["--ws_remred=0"]).ws_remred_value, 0);
+    }
+
+    #[test]
+    fn no_submodules_accepts_explicit_boolean_values() {
+        let parse_no_submodules = |args: &[&str]| {
+            let argv = std::iter::once("forformat")
+                .chain(args.iter().copied())
+                .map(str::to_owned);
+            let Command::Run(invocation) = parse(argv).unwrap() else {
+                panic!("expected a formatting command");
+            };
+            invocation.no_submodules
+        };
+
+        assert!(parse_no_submodules(&["--no-config", "--no-submodules"]));
+        assert!(parse_no_submodules(&[
+            "--no-config",
+            "--no-submodules=true"
+        ]));
+        assert!(!parse_no_submodules(&[
+            "--no-config",
+            "--no-submodules=false"
+        ]));
+    }
+
+    #[test]
+    fn optional_boolean_switches_accept_bare_and_explicit_values() {
+        let parse_config = |args: &[&str]| {
+            let argv = std::iter::once("forformat")
+                .chain(args.iter().copied())
+                .map(str::to_owned);
+            let Command::Run(invocation) = parse(argv).unwrap() else {
+                panic!("expected a formatting command");
+            };
+            invocation.config
+        };
+
+        assert!(parse_config(&["--no-config", "--wrap"]).wrap.enabled);
+        assert!(!parse_config(&["--no-config", "--wrap=false"]).wrap.enabled);
+        assert!(!parse_config(&["--no-config", "--no-wrap"]).wrap.enabled);
+        assert!(
+            parse_config(&["--no-config", "--no-wrap=false"])
+                .wrap
+                .enabled
+        );
+        assert!(
+            !parse_config(&["--no-config", "--no-wrap=true"])
+                .wrap
+                .enabled
+        );
+        assert!(parse_config(&["--no-config", "--indent-ampersand"]).indent_ampersand);
+        assert!(!parse_config(&["--no-config", "--indent-ampersand=false"]).indent_ampersand);
+    }
+
+    #[test]
+    fn valueless_workflow_and_mode_switches_reject_attached_values() {
+        for option in [
+            "all",
+            "all-files",
+            "stdin",
+            "stdout",
+            "isolated",
+            "check",
+            "diff",
+            "show-files",
+            "query-format",
+            "full",
+            "indent-only",
+            "normalize-only",
+            "no-config",
+        ] {
+            let argument = format!("--{option}=false");
+            let argv = ["forformat".to_string(), argument.clone()];
+            assert!(parse(argv.into_iter()).is_err(), "{argument} was accepted");
+        }
     }
 
     #[test]

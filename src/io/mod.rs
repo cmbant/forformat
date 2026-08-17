@@ -270,7 +270,8 @@ fn display_path(path: &Path, root: Option<&Path>) -> PathBuf {
 
 fn resolve_context_paths(
     context_paths: &[PathBuf],
-    root: &Path,
+    root: Option<&Path>,
+    cwd: &Path,
 ) -> Result<Vec<PathBuf>, WorkflowError> {
     context_paths
         .iter()
@@ -278,7 +279,7 @@ fn resolve_context_paths(
             let candidate = if path.is_absolute() {
                 path.clone()
             } else {
-                root.join(path)
+                root.unwrap_or(cwd).join(path)
             };
             let resolved = fs::canonicalize(&candidate).map_err(|error| {
                 WorkflowError::Usage(format!(
@@ -292,15 +293,85 @@ fn resolve_context_paths(
                     candidate.display()
                 )));
             }
-            if !resolved.starts_with(root) {
-                return Err(WorkflowError::Usage(format!(
-                    "--context-path must be inside the Git checkout: {}",
-                    candidate.display()
-                )));
+            if let Some(root) = root {
+                if !resolved.starts_with(root) {
+                    return Err(WorkflowError::Usage(format!(
+                        "--context-path must be inside the Git checkout: {}",
+                        candidate.display()
+                    )));
+                }
             }
             Ok(resolved)
         })
         .collect()
+}
+
+fn filesystem_sources(
+    context_paths: &[PathBuf],
+    exclude_matcher: &ExcludeMatcher,
+) -> io::Result<Vec<PathBuf>> {
+    fn visit(directory: &Path, sources: &mut Vec<PathBuf>) -> io::Result<()> {
+        let mut entries = fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries {
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_dir() {
+                visit(&path, sources)?;
+            } else if file_type.is_file() && validate_extension(&path).is_ok() {
+                sources.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    let mut sources = Vec::new();
+    for context_path in context_paths {
+        let mut root_sources = Vec::new();
+        visit(context_path, &mut root_sources)?;
+        sources.extend(
+            root_sources
+                .into_iter()
+                .filter(|path| !exclude_matcher.is_excluded(context_path, path)),
+        );
+    }
+    sources.sort();
+    sources.dedup();
+    Ok(sources)
+}
+
+fn context_sources(
+    tracked: Option<&Vec<PathBuf>>,
+    context_paths: &[PathBuf],
+    exclude_matcher: &ExcludeMatcher,
+    exclusion_root: &Path,
+) -> Result<Option<Vec<PathBuf>>, WorkflowError> {
+    let sources = if let Some(tracked) = tracked {
+        tracked
+            .iter()
+            .filter(|path| {
+                context_paths.is_empty()
+                    || context_paths
+                        .iter()
+                        .any(|context_path| path.starts_with(context_path))
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    } else if !context_paths.is_empty() {
+        filesystem_sources(context_paths, exclude_matcher)?
+    } else {
+        return Ok(None);
+    };
+    if tracked.is_some() {
+        Ok(Some(
+            sources
+                .into_iter()
+                .filter(|path| !exclude_matcher.is_excluded(exclusion_root, path))
+                .collect(),
+        ))
+    } else {
+        Ok(Some(sources))
+    }
 }
 
 fn project_context(
@@ -653,8 +724,9 @@ fn execute_query_format(invocation: Invocation) -> Result<i32, WorkflowError> {
     } else {
         repository_root(&cwd)?
     };
+    let exclude_matcher = ExcludeMatcher::new(&invocation.exclude_patterns());
 
-    let paths = if invocation.all || invocation.all_files {
+    let paths: Vec<PathBuf> = if invocation.all || invocation.all_files {
         let root = root
             .as_deref()
             .ok_or_else(|| WorkflowError::Usage("--all requires a valid Git checkout".into()))?;
@@ -663,13 +735,12 @@ fn execute_query_format(invocation: Invocation) -> Result<i32, WorkflowError> {
         } else {
             tracked_sources
         };
-        let paths = reader(root)?;
+        let paths = reader(root)?
+            .into_iter()
+            .filter(|path| !exclude_matcher.is_excluded(root, path));
         match all_scope.as_deref() {
-            Some(scope) => paths
-                .into_iter()
-                .filter(|path| path.starts_with(scope))
-                .collect(),
-            None => paths,
+            Some(scope) => paths.filter(|path| path.starts_with(scope)).collect(),
+            None => paths.collect(),
         }
     } else {
         invocation
@@ -706,7 +777,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     }
     let all_selection = invocation.all || invocation.all_files;
     let stdin_mode = invocation.stdin || (invocation.paths.is_empty() && !all_selection);
-    if stdin_mode && invocation.project_context.is_none() {
+    if stdin_mode && invocation.project_context.is_none() && invocation.context_paths.is_empty() {
         let mut source = Vec::new();
         io::stdin().read_to_end(&mut source)?;
         // stdin is the primary documented route, so it needs the same guard the
@@ -815,10 +886,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     let context_paths = if invocation.context_paths.is_empty() {
         Vec::new()
     } else {
-        let root = root.as_deref().ok_or_else(|| {
-            WorkflowError::Usage("--context-path requires a valid Git checkout".into())
-        })?;
-        resolve_context_paths(&invocation.context_paths, root)?
+        resolve_context_paths(&invocation.context_paths, root.as_deref(), &cwd)?
     };
     if stdin_mode {
         let source = stdin_source
@@ -856,23 +924,17 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     } else {
         None
     };
-    let context_tracked = tracked.as_ref().map(|paths| {
-        paths
-            .iter()
-            .filter(|path| {
-                context_paths.is_empty()
-                    || context_paths
-                        .iter()
-                        .any(|context_path| path.starts_with(context_path))
-            })
-            .filter(|path| !exclude_matcher.is_excluded(root.as_deref().unwrap(), path))
-            .cloned()
-            .collect::<Vec<_>>()
-    });
+    let exclusion_root = root.as_deref().unwrap_or(cwd.as_path());
+    let context_tracked = context_sources(
+        tracked.as_ref(),
+        &context_paths,
+        &exclude_matcher,
+        exclusion_root,
+    )?;
     let tracked = tracked.map(|paths| {
         paths
             .into_iter()
-            .filter(|path| !exclude_matcher.is_excluded(root.as_deref().unwrap(), path))
+            .filter(|path| !exclude_matcher.is_excluded(exclusion_root, path))
             .collect::<Vec<_>>()
     });
     let mut target_paths = if invocation.all {

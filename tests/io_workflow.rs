@@ -149,6 +149,23 @@ fn all_files_excludes_submodules_from_targets_but_keeps_them_as_context() {
         b"program p\n   use sharedname\n\nend program p\n"
     );
 
+    fs::write(&root_source, root_bytes).unwrap();
+    let output = run(
+        &repo,
+        &[
+            "--full",
+            "--all-files",
+            "--context-path",
+            ".",
+            "--no-submodules=false",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        fs::read(&root_source).unwrap(),
+        b"program p\n   use SharedName\n\nend program p\n"
+    );
+
     let listed = run(&repo, &["--indent-only", "--all-files", "--show-files"]);
     assert_eq!(listed.status.code(), Some(0));
     assert_eq!(listed.stdout, b"root.f90\n");
@@ -579,6 +596,43 @@ fn query_format_reports_each_input_without_writing() {
 }
 
 #[test]
+fn query_format_bulk_selection_applies_exclusions() {
+    let repo = temp_repo();
+    fs::create_dir(repo.join("vendor")).unwrap();
+    fs::write(repo.join("main.f90"), b"program p\nend program p\n").unwrap();
+    fs::write(
+        repo.join("vendor/third_party.f90"),
+        b"program vendor\nend program vendor\n",
+    )
+    .unwrap();
+    git_add(&repo);
+
+    let output = run(&repo, &["--query-format", "--all", "--exclude=vendor/"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"free\n");
+    assert!(output.stderr.is_empty());
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn query_format_rejects_project_context_only_options() {
+    let repo = temp_repo();
+    fs::write(repo.join("main.f90"), b"program p\nend program p\n").unwrap();
+    git_add(&repo);
+
+    for option in ["--context-path", "--isolated"] {
+        let args = if option == "--context-path" {
+            vec!["--query-format", option, "."]
+        } else {
+            vec!["--query-format", option, "main.f90"]
+        };
+        let output = run(&repo, &args);
+        assert_eq!(output.status.code(), Some(2), "{option}");
+    }
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
 fn stdin_and_file_routes_produce_identical_bytes_for_the_same_source() {
     let repo = temp_repo();
     let mut fixtures: Vec<_> =
@@ -760,6 +814,189 @@ fn context_paths_limit_project_context_and_form_a_union() {
     assert!(output.contains("use FirstName"));
     assert!(output.contains("use SecondName"));
     let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn context_paths_discover_recursive_filesystem_sources_for_anonymous_stdin() {
+    let directory = std::env::temp_dir().join(format!(
+        "forformat-context-filesystem-{}-{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(directory.join("src/nested")).unwrap();
+    fs::write(
+        directory.join("src/nested/first.f90"),
+        b"module FirstName\nend module FirstName\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("src/generated.f90"),
+        b"module GeneratedName\nend module GeneratedName\n",
+    )
+    .unwrap();
+    fs::write(directory.join("src/notes.txt"), b"module NotFortran\n").unwrap();
+
+    let output = run_stdin(
+        &directory,
+        &[
+            "--stdin",
+            "--full",
+            "--no-config",
+            "--context-path",
+            "src",
+            "--exclude",
+            "generated.f90",
+        ],
+        b"program p\nuse firstname\nuse generatedname\nend program p\n",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let output = String::from_utf8_lossy(&output.stdout);
+    assert!(output.contains("use FirstName"));
+    assert!(output.contains("use generatedname"));
+
+    fs::write(
+        directory.join("target.f90"),
+        b"program p\nuse firstname\nend program p\n",
+    )
+    .unwrap();
+    let output = run(
+        &directory,
+        &[
+            "--full",
+            "--no-config",
+            "--stdout",
+            "target.f90",
+            "--context-path",
+            "src",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("use FirstName"));
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn filesystem_context_exclusions_are_relative_to_each_context_root() {
+    let directory = std::env::temp_dir().join(format!(
+        "forformat-context-exclusions-{}-{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(directory.join("a/vendor")).unwrap();
+    fs::create_dir_all(directory.join("a/nested/vendor")).unwrap();
+    fs::create_dir_all(directory.join("b/vendor")).unwrap();
+    fs::write(
+        directory.join("a/vendor/a_root.f90"),
+        b"module ARootName\nend module ARootName\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("a/nested/vendor/a_nested.f90"),
+        b"module ANestedName\nend module ANestedName\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("b/vendor/b_root.f90"),
+        b"module BRootName\nend module BRootName\n",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("a/visible.f90"),
+        b"module VisibleName\nend module VisibleName\n",
+    )
+    .unwrap();
+
+    let source = b"program p\nuse arootname\nuse anestedname\nuse brootname\nuse visiblename\nend program p\n";
+    let output = run_stdin(
+        &directory,
+        &[
+            "--stdin",
+            "--full",
+            "--no-config",
+            "--context-path",
+            "a",
+            "--context-path",
+            "b",
+            "--exclude=vendor/",
+        ],
+        source,
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let output = String::from_utf8_lossy(&output.stdout);
+    assert!(output.contains("use arootname"));
+    assert!(output.contains("use anestedname"));
+    assert!(output.contains("use brootname"));
+    assert!(output.contains("use VisibleName"));
+
+    let output = run_stdin(
+        &directory,
+        &[
+            "--stdin",
+            "--full",
+            "--no-config",
+            "--context-path",
+            "a",
+            "--context-path",
+            "b",
+            "--exclude=/vendor/",
+        ],
+        source,
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let output = String::from_utf8_lossy(&output.stdout);
+    assert!(output.contains("use arootname"));
+    assert!(output.contains("use ANestedName"));
+    assert!(output.contains("use brootname"));
+    assert!(output.contains("use VisibleName"));
+
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[cfg(unix)]
+#[test]
+fn filesystem_context_does_not_follow_directory_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let directory = std::env::temp_dir().join(format!(
+        "forformat-context-symlink-{}-{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let outside = std::env::temp_dir().join(format!(
+        "forformat-context-symlink-outside-{}-{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&directory);
+    let _ = fs::remove_dir_all(&outside);
+    fs::create_dir_all(directory.join("src")).unwrap();
+    fs::create_dir(&outside).unwrap();
+    fs::write(
+        directory.join("src/visible.f90"),
+        b"module VisibleName\nend module VisibleName\n",
+    )
+    .unwrap();
+    fs::write(
+        outside.join("hidden.f90"),
+        b"module HiddenName\nend module HiddenName\n",
+    )
+    .unwrap();
+    symlink(&outside, directory.join("src/outside")).unwrap();
+
+    let output = run_stdin(
+        &directory,
+        &["--stdin", "--full", "--no-config", "--context-path", "src"],
+        b"program p\nuse visiblename\nuse hiddenname\nend program p\n",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let output = String::from_utf8_lossy(&output.stdout);
+    assert!(output.contains("use VisibleName"));
+    assert!(output.contains("use hiddenname"));
+
+    let _ = fs::remove_dir_all(&directory);
+    let _ = fs::remove_dir_all(&outside);
 }
 
 #[test]
@@ -1030,6 +1267,46 @@ fn a_local_declaration_outranks_conflicting_project_spelling() {
     let output = run(&repo, &["--full", "--stdout", "target.f90"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("real(dl) Sigma"));
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn a_glued_end_construct_split_over_an_unmarked_continuation_keeps_its_case() {
+    // Reduced from Q-E `PW/src/exx_bp.f90` / `exx_std.f90` under
+    // `style-lex-spacing-layout`, found only by the harness's whole-tree run
+    // since it needs project context that per-file sweeps do not carry. The
+    // continuation line naming the loop has no leading `&`, so joining it to
+    // the split `ENDDO&` line without the blank the continuation rule
+    // requires spliced `DO` and the construct name into one bogus token;
+    // `END` then failed the end-construct check on the second pass and was
+    // recast to the project's declared spelling of `end`.
+    let repo = temp_repo();
+    fs::write(
+        repo.join("project.f90"),
+        b"module m\nreal :: end\nend module m\n",
+    )
+    .unwrap();
+    git_add(&repo);
+
+    let args = [
+        "--stdin",
+        "--full",
+        "--no-config",
+        "--keyword-case=preserve",
+        "--continuation-markers=0",
+        "--project-context",
+        ".",
+    ];
+    let source = b"SUBROUTINE p\n   IMPLICIT NONE\n   INTEGER :: i\n   loop : &\n   DO i = 1, 2\n   ENDDO&\n   loop\nEND SUBROUTINE p\n";
+    let once = run_stdin(&repo, &args, source);
+    assert_eq!(once.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&once.stdout).contains("END DO"),
+        "expected END DO in {:?}",
+        String::from_utf8_lossy(&once.stdout)
+    );
+    let twice = run_stdin(&repo, &args, &once.stdout);
+    assert_eq!(once.stdout, twice.stdout);
     let _ = fs::remove_dir_all(repo);
 }
 

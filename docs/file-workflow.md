@@ -1,7 +1,7 @@
 # File and project workflow
 
-The command-line workflow discovers the repository with git rev-parse and
-enumerates tracked free-form sources with git ls-files. Both commands pass
+The command-line workflow discovers the repository with git rev-parse and,
+when one is available, enumerates tracked free-form sources with git ls-files. Both commands pass
 through one helper that removes GIT_DIR, GIT_WORK_TREE, GIT_COMMON_DIR, and
 GIT_INDEX_FILE, so a hook's Git environment cannot redirect nested queries.
 
@@ -15,22 +15,31 @@ explicitly remains a formatting target; exclusions are not force exclusions.
 
 `--project-context=<path>` identifies the Git checkout for project analysis and, when PATH is a
 tracked source file, identifies the source whose stdin bytes replace the stale on-disk copy. It does
-not restrict the analysis scope. Repeatable `--context-path=<directory>` options do that: relative
-directories are resolved from the discovered repository root, absolute directories must resolve
-inside that checkout, and each directory must exist. A tracked source contributes project context
-when it is beneath any selected directory. With no `context_paths`, all eligible tracked sources
+not restrict the analysis scope. Repeatable `--context-path=<directory>` options do that. In a Git
+checkout, relative directories are resolved from the repository root and eligible tracked sources
+beneath their union are selected. Without Git, relative directories are resolved from the current
+working directory and eligible Fortran files are discovered recursively from the filesystem. In
+both cases each directory must exist, exclusions are applied afterward, and directory symlinks are
+not followed during filesystem discovery. With no `context_paths`, all eligible tracked sources
 retain the existing behavior. Explicit formatting targets, bulk target selection, config discovery,
-and stdin identity are unaffected by `context_paths`.
+and anonymous stdin identity are unaffected by `context_paths`. Context paths change semantic
+context, not explicit formatting targets. `--project-context=<source-file>` remains the explicit
+form for stdin file identity and stale on-disk shadowing.
 
 The policy order is repository discovery, tracked-source enumeration, `context_paths` filtering,
-then `exclude`/`extend-exclude` filtering, followed by project analysis. `--isolated` disables
-project context entirely and is rejected with `--context-path`.
+then `exclude`/`extend-exclude` filtering, followed by project analysis. In Git, exclusions are
+repository-relative. Outside Git, each explicit context directory is resolved from the current
+working directory, eligible sources are recursively discovered using the existing source-extension
+set, exclusions are evaluated relative to that context root, and the union is deduplicated before
+project analysis. No `.gitignore` semantics are invented outside Git. `--isolated` disables project
+context entirely and is rejected with `--context-path`.
 
 `--show-files` prints the selected target paths and exits without reading or modifying source
 files. It accepts explicit paths, `--all`, or `--all-files`; either bulk mode accepts one optional
 directory, for example `forformat --all-files ./src --show-files`.
 
-`--no-submodules` disables recursive submodule discovery entirely. The superproject's tracked
+`--no-submodules[=BOOL]` disables recursive submodule discovery entirely when true. The bare
+spelling means true, and `--no-submodules=false` overrides a true project setting. The superproject's tracked
 sources remain available for project context, but initialized submodule sources are neither
 targets nor context. With `--all`, this makes target selection equivalent to `--all-files` while
 retaining the recursive target-selection behavior. It is also available as `no_submodules = true`

@@ -231,16 +231,25 @@ a declaration in one module controls the spelling or formatting of code in anoth
 
 `--project-context=<path>` identifies the Git project, or the tracked source that stdin replaces.
 It does not limit which files supply project context. Use repeatable `--context-path=<directory>`
-options to limit semantic analysis to tracked sources beneath selected repository directories:
+options to limit semantic analysis. In Git, forformat discovers the repository, enumerates eligible
+tracked sources, filters them beneath the selected repository directories, applies exclusions
+repository-relative, and analyzes the result. Without Git, it resolves each explicit context
+directory, recursively discovers eligible Fortran sources, applies exclusions relative to each
+context root, deduplicates the union, and analyzes the result. Anonymous stdin works in both cases:
 
 ```sh
 forformat --full --stdout src/main.f90 --context-path=src/ --context-path=modules/
 ```
 
-Relative context paths are resolved from the Git repository root. Absolute paths are accepted only
-when they resolve inside that checkout, and every selected path must be an existing directory. With
-no context paths, the whole eligible checkout is used as before. `--isolated` disables project
-context and cannot be combined with `--context-path`.
+Relative context paths are resolved from the Git repository root when Git is available, otherwise
+from the current working directory. Absolute paths are accepted outside Git and must be existing
+directories; absolute Git paths must be inside the checkout. Filesystem discovery does not follow
+directory symlinks and does not invent `.gitignore` semantics. Context paths affect semantic
+context, not explicit formatting targets. With no context paths, the whole eligible checkout is
+used as before. Anonymous stdin may use discovered context, while
+`--project-context=src/foo.f90` still identifies and replaces that stale on-disk source for
+file-identity/shadowing semantics. `--isolated` disables project context and cannot be combined
+with `--context-path`.
 
 For independent file processing, disable repository scanning with `--isolated`:
 
@@ -269,9 +278,16 @@ Use `--all` when recursive submodule sources should also be formatting targets:
 forformat --all
 ```
 
-Add `--no-submodules` when submodule sources should not be included even as project context. With
-`--all`, this also prevents submodule sources from being targets; with explicit paths, the
-superproject's other tracked sources remain available for context.
+Add `--no-submodules` (or `--no-submodules=true`) when submodule sources should not be included
+even as project context. `--no-submodules=false` explicitly re-enables them and overrides a true
+project setting. With `--all`, this also prevents submodule sources from being targets; with
+explicit paths, the superproject's other tracked sources remain available for context.
+
+Boolean switches that enable a state accept `--option`, `--option=true`, and `--option=false`.
+This includes `--wrap`, `--no-wrap`, `--indent-ampersand`, and `--no-submodules`; the negated
+forms apply the boolean to the named disabled state. Workflow and mode switches such as `--all`,
+`--full`, and `--no-config` are valueless. `--query-format` rejects project-context-only options
+such as `--context-path` and `--isolated`, while bulk query selection honors exclusions.
 
 Use `--show-files` with explicit paths, `--all`, or `--all-files` to print the selected targets
 without reading or modifying them:
