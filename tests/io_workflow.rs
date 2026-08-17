@@ -877,6 +877,43 @@ fn context_paths_discover_recursive_filesystem_sources_for_anonymous_stdin() {
 }
 
 #[test]
+fn configured_context_paths_resolve_from_config_directory_outside_git() {
+    let project = std::env::temp_dir().join(format!(
+        "forformat-config-context-project-{}-{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let cwd = std::env::temp_dir().join(format!(
+        "forformat-config-context-cwd-{}-{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&project);
+    let _ = fs::remove_dir_all(&cwd);
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::create_dir_all(&cwd).unwrap();
+    fs::write(
+        project.join(".forformat.toml"),
+        b"context_paths = [\"src\"]\n",
+    )
+    .unwrap();
+    fs::write(
+        project.join("src/shared.f90"),
+        b"module SharedName\nend module SharedName\n",
+    )
+    .unwrap();
+    let target = project.join("main.f90");
+    fs::write(&target, b"program p\nuse sharedname\nend program p\n").unwrap();
+
+    let output = run(&cwd, &["--full", "--stdout", target.to_str().unwrap()]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("use SharedName"));
+
+    let _ = fs::remove_dir_all(project);
+    let _ = fs::remove_dir_all(cwd);
+}
+
+#[test]
 fn filesystem_context_exclusions_are_relative_to_each_context_root() {
     let directory = std::env::temp_dir().join(format!(
         "forformat-context-exclusions-{}-{}",
@@ -950,6 +987,56 @@ fn filesystem_context_exclusions_are_relative_to_each_context_root() {
     assert!(output.contains("use ANestedName"));
     assert!(output.contains("use brootname"));
     assert!(output.contains("use VisibleName"));
+
+    let _ = fs::remove_dir_all(directory);
+}
+
+#[test]
+fn overlapping_filesystem_context_roots_cannot_bypass_exclusions() {
+    let directory = std::env::temp_dir().join(format!(
+        "forformat-context-overlap-{}-{}",
+        std::process::id(),
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&directory);
+    fs::create_dir_all(directory.join("vendor")).unwrap();
+    fs::write(
+        directory.join("visible.f90"),
+        b"module VisibleName
+end module VisibleName
+",
+    )
+    .unwrap();
+    fs::write(
+        directory.join("vendor/hidden.f90"),
+        b"module HiddenName
+end module HiddenName
+",
+    )
+    .unwrap();
+
+    let output = run_stdin(
+        &directory,
+        &[
+            "--stdin",
+            "--full",
+            "--no-config",
+            "--context-path",
+            directory.to_str().unwrap(),
+            "--context-path",
+            directory.join("vendor").to_str().unwrap(),
+            "--exclude=vendor/",
+        ],
+        b"program p
+use visiblename
+use hiddenname
+end program p
+",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let output = String::from_utf8_lossy(&output.stdout);
+    assert!(output.contains("use VisibleName"));
+    assert!(output.contains("use hiddenname"));
 
     let _ = fs::remove_dir_all(directory);
 }

@@ -6,7 +6,7 @@
 
 use crate::{
     analysis::{analyze_project, ProjectContext},
-    cli::Invocation,
+    cli::{ContextPath, Invocation},
     config::FormatMode,
     error::FormatError,
     format_source, format_source_with_context,
@@ -269,17 +269,23 @@ fn display_path(path: &Path, root: Option<&Path>) -> PathBuf {
 }
 
 fn resolve_context_paths(
-    context_paths: &[PathBuf],
+    context_paths: &[ContextPath],
     root: Option<&Path>,
     cwd: &Path,
 ) -> Result<Vec<PathBuf>, WorkflowError> {
     context_paths
         .iter()
-        .map(|path| {
+        .map(|context_path| {
+            let path = &context_path.path;
             let candidate = if path.is_absolute() {
                 path.clone()
             } else {
-                root.unwrap_or(cwd).join(path)
+                context_path
+                    .base
+                    .as_deref()
+                    .or(root)
+                    .unwrap_or(cwd)
+                    .join(path)
             };
             let resolved = fs::canonicalize(&candidate).map_err(|error| {
                 WorkflowError::Usage(format!(
@@ -327,14 +333,13 @@ fn filesystem_sources(
 
     let mut sources = Vec::new();
     for context_path in context_paths {
-        let mut root_sources = Vec::new();
-        visit(context_path, &mut root_sources)?;
-        sources.extend(
-            root_sources
-                .into_iter()
-                .filter(|path| !exclude_matcher.is_excluded(context_path, path)),
-        );
+        visit(context_path, &mut sources)?;
     }
+    sources.retain(|path| {
+        !context_paths
+            .iter()
+            .any(|root| exclude_matcher.is_excluded(root, path))
+    });
     sources.sort();
     sources.dedup();
     Ok(sources)

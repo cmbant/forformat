@@ -1,5 +1,5 @@
 use crate::{
-    config::{FormatConfig, FormatMode, KeywordCase, MacroDefine},
+    config::{ConfigArguments, FormatConfig, FormatMode, KeywordCase, MacroDefine},
     error::FormatError,
 };
 use std::path::{Path, PathBuf};
@@ -14,6 +14,14 @@ pub enum Command {
     Version,
 }
 
+/// A context directory and the directory against which a relative path is
+/// interpreted. `None` means the path came directly from the command line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextPath {
+    pub path: PathBuf,
+    pub base: Option<PathBuf>,
+}
+
 /// Parsed command-line state. Formatting remains configured by
 /// [`FormatConfig`]; file/project policy lives here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,7 +29,7 @@ pub struct Invocation {
     pub config: FormatConfig,
     pub paths: Vec<PathBuf>,
     pub project_context: Option<PathBuf>,
-    pub context_paths: Vec<PathBuf>,
+    pub context_paths: Vec<ContextPath>,
     pub all: bool,
     pub all_files: bool,
     pub no_submodules: bool,
@@ -117,8 +125,8 @@ where
         return Ok(preliminary.command);
     }
     let (no_config, explicit_config) = preliminary.config_selection.resolve()?;
-    let mut config_args = if no_config {
-        Vec::new()
+    let mut config = if no_config {
+        ConfigArguments::default()
     } else {
         let cwd = std::env::current_dir().map_err(|error| {
             FormatError::InvalidOption(format!("cannot determine current directory: {error}"))
@@ -135,21 +143,30 @@ where
     // of the command line alone, so it answers "was `--exclude` given there?"
     // using the real option grammar rather than a second-guessing rescan.
     if matches!(&preliminary.command, Command::Run(invocation) if invocation.exclude.is_some()) {
-        config_args.retain(|arg| !arg.starts_with("--exclude="));
+        config.args.retain(|arg| !arg.starts_with("--exclude="));
     }
     if matches!(&preliminary.command, Command::Run(invocation) if !invocation.context_paths.is_empty())
     {
-        config_args.retain(|arg| !arg.starts_with("--context-path="));
+        config.context_paths.clear();
     }
-    let mut combined = Vec::with_capacity(1 + config_args.len() + args.len());
+    let config_context_paths = config.context_paths;
+    let mut combined = Vec::with_capacity(1 + config.args.len() + args.len());
     combined.push(
         args.first()
             .cloned()
             .unwrap_or_else(|| "forformat".to_string()),
     );
-    combined.extend(config_args);
+    combined.extend(config.args);
     combined.extend(args.into_iter().skip(1));
-    Ok(parse_inner(combined)?.command)
+    let mut command = parse_inner(combined)?.command;
+    if !config_context_paths.is_empty() {
+        if let Command::Run(invocation) = &mut command {
+            if invocation.context_paths.is_empty() {
+                invocation.context_paths = config_context_paths;
+            }
+        }
+    }
+    Ok(command)
 }
 
 fn config_start(command: &Command, cwd: &Path) -> PathBuf {
@@ -354,8 +371,14 @@ where
                     c.align_declarations = parse_bool(&need(&mut value, &mut a)?)?
                 }
                 "align-comments" => c.align_comments = parse_bool(&need(&mut value, &mut a)?)?,
-                "last-indent" => c.last_indent = true,
-                "last-usable" => c.last_usable = true,
+                "last-indent" => {
+                    reject_value(&name, &value)?;
+                    c.last_indent = true;
+                }
+                "last-usable" => {
+                    reject_value(&name, &value)?;
+                    c.last_usable = true;
+                }
                 "all" => {
                     reject_value(&name, &value)?;
                     all = true;
@@ -378,7 +401,10 @@ where
                             "--context-path requires a path".into(),
                         ));
                     }
-                    context_paths.push(PathBuf::from(path));
+                    context_paths.push(ContextPath {
+                        path: PathBuf::from(path),
+                        base: None,
+                    });
                 }
                 "project-context" => {
                     let path = need(&mut value, &mut a)?;
@@ -466,7 +492,13 @@ where
                     c.wrap.enabled = !disabled;
                 }
                 "line-length" => c.wrap.line_length = parse_num(&need(&mut value, &mut a)?)?,
-                "uppercase-single-l" => c.uppercase_single_l = true,
+                "uppercase-single-l" => {
+                    c.uppercase_single_l = value
+                        .as_deref()
+                        .map(parse_bool)
+                        .transpose()?
+                        .unwrap_or(true)
+                }
                 "define" => push_define(&mut c, &need(&mut value, &mut a)?),
                 "keyword-case" => {
                     c.style.keyword_case = parse_style_choice(
@@ -525,8 +557,13 @@ where
                     c.construct_indents.changeteam = parse_num(&need(&mut value, &mut a)?)?
                 }
                 "refactor-end" | "refactor-procedures" => {
-                    c.refactor_end = true;
-                    c.uppercase_end = value.as_deref() == Some("upcase")
+                    let (enabled, uppercase) = match value.as_deref() {
+                        None => (true, false),
+                        Some("upcase") => (true, true),
+                        Some(value) => (parse_bool(value)?, false),
+                    };
+                    c.refactor_end = enabled;
+                    c.uppercase_end = uppercase;
                 }
                 n if n.starts_with("indent-") => {
                     let v = parse_num(&need(&mut value, &mut a)?)?;
@@ -1026,16 +1063,16 @@ Free-form Fortran formatter.\n\
   -k<n>, --indent-continuation=<n>    continuation indentation\n\
     -K, --indent-ampersand[=<BOOL>]     indent leading continuation ampersands\n\
   --align-paren[=<n>]                align continuation lines at parentheses\n\
-  --include-left=<0|1>               put INCLUDE at the starting indent\n\
-  -Rr, -RR, --refactor-end[=upcase]  complete END definition statements\n\
+    --include-left=<BOOL>              put INCLUDE at the starting indent\n\
+    -Rr, -RR, --refactor-end[=<BOOL>|upcase]  complete END definition statements\n\
   --ws-remred[=<n>]                  reduce redundant whitespace\n\
-  --align-declarations=<0|1>         shrink space to align `::` blocks (default 1)\n\
-  --align-comments=<0|1>             shrink space to align trailing comment blocks (default 0)\n\
+        --align-declarations=<BOOL>        shrink space to align `::` blocks (default 1)\n\
+    --align-comments=<BOOL>            shrink space to align trailing comment blocks (default 0)\n\
   -lastindent, -lastusable           print query result instead of source\n\
   --query-format                     print free/fixed for each input and exit\n\
     --all-files [directory]             format this checkout's tracked sources; submodules are context only\n\
     <paths>, --all [directory]          format explicit files or all tracked sources recursively\n\
-    --no-submodules[=true|false]        omit submodule sources from targets and project context\n\
+    --no-submodules[=<BOOL>]            omit submodule sources from targets and project context\n\
     --context-path=<directory>           limit project context to sources beneath DIRECTORY; repeatable\n\
   --stdin                             read source from stdin (default without paths)\n\
     --project-context=<path>            treat stdin as belonging to the Git project containing PATH; a source-file PATH identifies stdin as that file and shadows its on-disk contents\n\
@@ -1054,21 +1091,21 @@ Free-form Fortran formatter.\n\
   --line-length=<n>                  wrapping budget (default 120)\n\
   --keyword-case=<lower|upper|preserve>\n\
                                       recognized keyword case (default lower)\n\
-  --relational-symbols=<0|1>         rewrite `.eq.` and friends as `==` (default 1)\n\
-  --array-brackets=<0|1>             rewrite `(/ ... /)` as `[ ... ]` (default 1)\n\
-  --compact-multiplicative=<0|1>     no spaces around binary `*`, `/`, `**` (default 1)\n\
-  --split-compound-keywords=<0|1>    write `endif` as `end if` (default 1)\n\
-  --join-goto=<0|1>                  write `go to` as `goto` (default 1)\n\
-  --strip-empty-args=<0|1>           strip empty SUBROUTINE definition arg lists (default 1)\n\
-  --remove-redundant-parens=<0|1>    remove redundant parentheses (default 1)\n\
-  --remove-terminal-return=<0|1>     remove terminal procedure RETURN (default 1)\n\
-  --program-unit-spacing=<0|1>       canonical blank lines around program units (default 1)\n\
+    --relational-symbols=<BOOL>        rewrite `.eq.` and friends as `==` (default true)\n\
+    --array-brackets=<BOOL>            rewrite `(/ ... /)` as `[ ... ]` (default true)\n\
+    --compact-multiplicative=<BOOL>    no spaces around binary `*`, `/`, `**` (default true)\n\
+    --split-compound-keywords=<BOOL>   write `endif` as `end if` (default true)\n\
+    --join-goto=<BOOL>                 write `go to` as `goto` (default true)\n\
+    --strip-empty-args=<BOOL>          strip empty SUBROUTINE definition arg lists (default true)\n\
+    --remove-redundant-parens=<BOOL>   remove redundant parentheses (default true)\n\
+    --remove-terminal-return=<BOOL>    remove terminal procedure RETURN (default true)\n\
+    --program-unit-spacing=<BOOL>      canonical blank lines around program units (default true)\n\
   --max-blank-lines=<n|preserve>     blank-line cap (default 2)\n\
-  --delimiter-spacing=<0|1>          normalize spaces after delimiters (default 1)\n\
-  --comment-spacing=<0|1>            normalize the gap before a trailing `!` (default 1)\n\
-  --continuation-markers=<0|1>       normalize continuation markers and OpenMP sentinels (default 1)\n\
+    --delimiter-spacing=<BOOL>         normalize spaces after delimiters (default true)\n\
+    --comment-spacing=<BOOL>           normalize the gap before a trailing `!` (default true)\n\
+    --continuation-markers=<BOOL>      normalize continuation markers and OpenMP sentinels (default true)\n\
   -D NAME[=VALUE], --define=...      define a macro name (repeatable)\n\
-  --uppercase-single-l               uppercase a lone `l` used as a name\n\
+    --uppercase-single-l[=<BOOL>]      uppercase a lone `l` used as a name\n\
   --config=<path>                    use a project TOML configuration explicitly\n\
   --no-config                        ignore project TOML configuration\n\
   -h, --help                         show this help\n\
@@ -1239,6 +1276,60 @@ mod tests {
         );
         assert!(parse_config(&["--no-config", "--indent-ampersand"]).indent_ampersand);
         assert!(!parse_config(&["--no-config", "--indent-ampersand=false"]).indent_ampersand);
+    }
+
+    #[test]
+    fn legacy_boolean_and_refactor_options_honor_explicit_values() {
+        let parse_invocation = |args: &[&str]| {
+            let argv = std::iter::once("forformat")
+                .chain(args.iter().copied())
+                .map(str::to_owned);
+            let Command::Run(invocation) = parse(argv).unwrap() else {
+                panic!("expected a formatting command");
+            };
+            invocation
+        };
+
+        let invocation = parse_invocation(&[
+            "--no-config",
+            "--last-indent",
+            "--last-usable",
+            "--uppercase-single-l=false",
+            "--refactor-end=false",
+        ]);
+        assert!(invocation.config.last_indent);
+        assert!(invocation.config.last_usable);
+        assert!(!invocation.config.uppercase_single_l);
+        assert!(!invocation.config.refactor_end);
+
+        let invocation = parse_invocation(&[
+            "--no-config",
+            "--uppercase-single-l=true",
+            "--refactor-end=true",
+        ]);
+        assert!(invocation.config.uppercase_single_l);
+        assert!(invocation.config.refactor_end);
+        assert!(!invocation.config.uppercase_end);
+
+        let invocation = parse_invocation(&["--no-config", "--refactor-end=upcase"]);
+        assert!(invocation.config.refactor_end);
+        assert!(invocation.config.uppercase_end);
+
+        let invocation = parse_invocation(&["--no-config", "--refactor-procedures=false"]);
+        assert!(!invocation.config.refactor_end);
+
+        for option in ["last-indent", "last-usable"] {
+            let argument = format!("--{option}=false");
+            assert!(parse(["forformat".to_string(), argument].into_iter()).is_err());
+        }
+        assert!(parse(
+            [
+                "forformat".to_string(),
+                "--refactor-end=unexpected".to_string()
+            ]
+            .into_iter()
+        )
+        .is_err());
     }
 
     #[test]

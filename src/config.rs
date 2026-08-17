@@ -1,4 +1,13 @@
-use std::{fmt, fs, path::Path};
+use std::{
+    fmt, fs,
+    path::{Path, PathBuf},
+};
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct ConfigArguments {
+    pub args: Vec<String>,
+    pub context_paths: Vec<crate::cli::ContextPath>,
+}
 
 /// What the formatter is allowed to change.
 ///
@@ -106,12 +115,13 @@ impl Default for StyleConfig {
 /// The standalone format is a top-level TOML table in `.forformat.toml`.
 /// `.findent.toml` is accepted as a compatibility spelling. Python projects
 /// can keep the same settings in `[tool.forformat]` in `pyproject.toml`.
-/// Values are returned as long-option arguments so the CLI parser remains the
-/// single implementation of option names, aliases, and validation.
+/// Ordinary values are returned as long-option arguments so the CLI parser
+/// remains the single implementation of option names, aliases, and validation.
+/// Context paths retain their configuration-directory origin separately.
 pub(crate) fn config_args(
     start: &Path,
     explicit: Option<&Path>,
-) -> Result<Vec<String>, crate::error::FormatError> {
+) -> Result<ConfigArguments, crate::error::FormatError> {
     if let Some(path) = explicit {
         let path = if path.is_absolute() {
             path.to_path_buf()
@@ -133,22 +143,22 @@ pub(crate) fn config_args(
         }
         let pyproject = directory.join("pyproject.toml");
         if pyproject.is_file() {
-            let args = read_config(&pyproject, Some("tool.forformat"))?;
-            if !args.is_empty() {
-                return Ok(args);
+            let config = read_config(&pyproject, Some("tool.forformat"))?;
+            if !config.args.is_empty() || !config.context_paths.is_empty() {
+                return Ok(config);
             }
         }
         if !directory.pop() {
             break;
         }
     }
-    Ok(Vec::new())
+    Ok(ConfigArguments::default())
 }
 
 fn read_config(
     path: &Path,
     table_path: Option<&str>,
-) -> Result<Vec<String>, crate::error::FormatError> {
+) -> Result<ConfigArguments, crate::error::FormatError> {
     let text = fs::read_to_string(path).map_err(|error| config_error(path, error))?;
     let document = text
         .parse::<toml::Value>()
@@ -157,7 +167,7 @@ fn read_config(
         let mut value = &document;
         for component in table_path.split('.') {
             let Some(next) = value.get(component) else {
-                return Ok(Vec::new());
+                return Ok(ConfigArguments::default());
             };
             value = next;
         }
@@ -179,6 +189,7 @@ fn read_config(
     });
 
     let mut args = Vec::new();
+    let mut context_paths = Vec::new();
     for (key, value) in entries {
         let key = normalize_config_key(key);
         if matches!(
@@ -292,7 +303,10 @@ fn read_config(
                         path.display()
                     )));
                 }
-                args.push(format!("--context-path={context_path}"));
+                context_paths.push(crate::cli::ContextPath {
+                    path: PathBuf::from(context_path),
+                    base: Some(config_directory(path)),
+                });
             }
             continue;
         }
@@ -308,19 +322,20 @@ fn read_config(
             }
             continue;
         }
-        if matches!(
-            key.as_str(),
-            "uppercase-single-l" | "refactor-end" | "no-wrap"
-        ) && value.as_bool() == Some(false)
-        {
-            // These are enabling switches in the CLI; false is already the
-            // default and has no corresponding disabling option.
-            continue;
-        }
         let value = config_value(value, &key, path)?;
         args.push(format!("--{key}={value}"));
     }
-    Ok(args)
+    Ok(ConfigArguments {
+        args,
+        context_paths,
+    })
+}
+
+fn config_directory(path: &Path) -> PathBuf {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
 }
 
 // TOML tables are BTreeMaps, but CLI option order is meaningful: --indent
@@ -357,7 +372,7 @@ mod tests {
         let _ = fs::remove_file(&path);
 
         let mut args = vec!["forformat".to_string(), "--no-config".to_string()];
-        args.extend(config_args);
+        args.extend(config_args.args);
         match parse(args).unwrap() {
             Command::Run(invocation) => invocation.config,
             _ => panic!("expected a formatting command"),
@@ -454,7 +469,7 @@ mod tests {
         let _ = fs::remove_file(&pyproject);
         let _ = fs::remove_dir(&directory);
         let mut argv = vec!["forformat".to_string(), "--no-config".to_string()];
-        argv.extend(from_pyproject);
+        argv.extend(from_pyproject.args);
         argv.extend([
             "--keyword-case=preserve".to_string(),
             "--strip-empty-args=1".to_string(),
@@ -467,6 +482,18 @@ mod tests {
         assert!(!invocation.config.style.compact_multiplicative);
         assert!(invocation.config.style.strip_empty_args);
         assert_eq!(invocation.config.style.max_blank_lines, Some(0));
+    }
+
+    #[test]
+    fn boolean_switches_keep_false_values_when_loaded_from_toml() {
+        let config = config_from_text(
+            "boolean-switches",
+            "uppercase_single_l = false\nrefactor_end = false\nno_wrap = false\n",
+        );
+
+        assert!(!config.uppercase_single_l);
+        assert!(!config.refactor_end);
+        assert!(config.wrap.enabled);
     }
 }
 
