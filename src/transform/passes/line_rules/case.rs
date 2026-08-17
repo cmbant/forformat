@@ -73,13 +73,19 @@ pub(crate) fn lowercase_line_with_context(
                     } else if is_spaced_dotted_operator(token.text) {
                         let operator = dotted_case(token.text, cx.config.style.keyword_case);
                         add_operator_edit(line, &mut edits, token, &operator, true, &mut spacing);
-                    } else if let Some(cased) = dotted_word_case(token.text, cx.config.style.keyword_case) {
+                    } else if let Some(cased) =
+                        dotted_word_case(token.text, cx.config.style.keyword_case)
+                    {
                         edits.replace(token.span.clone(), &cased);
                     }
-                } else if modern_operator(token.text).is_some() || is_spaced_dotted_operator(token.text) {
+                } else if modern_operator(token.text).is_some()
+                    || is_spaced_dotted_operator(token.text)
+                {
                     let operator = dotted_case(token.text, cx.config.style.keyword_case);
                     add_operator_edit(line, &mut edits, token, &operator, true, &mut spacing);
-                } else if let Some(cased) = dotted_word_case(token.text, cx.config.style.keyword_case) {
+                } else if let Some(cased) =
+                    dotted_word_case(token.text, cx.config.style.keyword_case)
+                {
                     edits.replace(token.span.clone(), &cased);
                 }
             }
@@ -93,7 +99,11 @@ pub(crate) fn lowercase_line_with_context(
                             || continued_statement
                                 && (!continued_declaration && continued_named_parameter
                                     || continued_bind_parameter)
-                                && is_continued_named_parameter(&tokens, index, inside_paren[index]));
+                                && is_continued_named_parameter(
+                                    &tokens,
+                                    index,
+                                    inside_paren[index],
+                                ));
                     add_operator_edit(line, &mut edits, token, token.text, !named, &mut spacing);
                     spacing.previous_compact_named = named;
                 } else if !is_labelled_format_statement(&tokens)
@@ -102,7 +112,8 @@ pub(crate) fn lowercase_line_with_context(
                 {
                     if !is_io_specifier_star(&tokens, index, token)
                         && (is_binary_arithmetic_operator(line, token.span.start, token.text)
-                            || continued_infix && is_leading_continuation_arithmetic(&tokens, index, token))
+                            || continued_infix
+                                && is_leading_continuation_arithmetic(&tokens, index, token))
                     {
                         let declaration_star = is_declaration_type_star(&tokens, index, token.text);
                         add_operator_edit(
@@ -111,7 +122,10 @@ pub(crate) fn lowercase_line_with_context(
                             token,
                             token.text,
                             !declaration_star
-                                && binary_operator_spaced(token.text, cx.config.style.compact_multiplicative),
+                                && binary_operator_spaced(
+                                    token.text,
+                                    cx.config.style.compact_multiplicative,
+                                ),
                             &mut spacing,
                         );
                     } else {
@@ -140,7 +154,11 @@ pub(crate) fn lowercase_line_with_context(
                 let end_construct_keyword = is_end_construct_keyword(&tokens, index);
                 if vocab::contains(vocab::FORTRAN_KEYWORDS, token.text)
                     && (end_construct_keyword
-                        || !declared_names.suppresses_keyword(line_index, token.text, specifier_argument))
+                        || !declared_names.suppresses_keyword(
+                            line_index,
+                            token.text,
+                            specifier_argument,
+                        ))
                     && keyword_in_context(&tokens, index)
                 {
                     if token.text != cased {
@@ -191,10 +209,28 @@ pub(crate) fn is_end_construct_keyword(tokens: &[crate::source::Token], index: u
         None => true,
         Some(next) => matches!(
             next.text.to_ascii_lowercase().as_slice(),
-            b"do" | b"if" | b"where" | b"forall" | b"select" | b"associate" | b"block"
-                | b"critical" | b"type" | b"interface" | b"enum" | b"function"
-                | b"subroutine" | b"program" | b"module" | b"submodule" | b"procedure"
-                | b"blockdata" | b"team" | b"structure" | b"union" | b"map"
+            b"do"
+                | b"if"
+                | b"where"
+                | b"forall"
+                | b"select"
+                | b"associate"
+                | b"block"
+                | b"critical"
+                | b"type"
+                | b"interface"
+                | b"enum"
+                | b"function"
+                | b"subroutine"
+                | b"program"
+                | b"module"
+                | b"submodule"
+                | b"procedure"
+                | b"blockdata"
+                | b"team"
+                | b"structure"
+                | b"union"
+                | b"map"
         ),
     }
 }
@@ -211,7 +247,9 @@ fn keyword_in_context(tokens: &[crate::source::Token], index: usize) -> bool {
     if token.is(b"bind") {
         return next.is_some_and(|t| t.kind == TokenKind::LParen)
             && tokens.get(index + 2).is_some_and(|t| t.is_name(b"c"))
-            && tokens.get(index + 3).is_some_and(|t| t.kind == TokenKind::RParen);
+            && tokens
+                .get(index + 3)
+                .is_some_and(|t| t.kind == TokenKind::RParen);
     }
     if token.is(b"kind") {
         return next.is_some_and(|t| t.kind == TokenKind::LParen || t.text == b"=");
