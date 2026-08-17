@@ -15,17 +15,11 @@
 
 mod common;
 
+pub(crate) use common::{case::is_end_construct_keyword, comment_spacing::is_directive_comment};
 pub use common::{
-    case::lowercase_line,
-    comment_spacing::normalize_comment_spacing,
-    delimiter_spacing::normalize_delimiter_spacing,
-    is_protected,
-    keyword_spacing::normalize_keyword_spacing,
-    write_spacing::normalize_write_output_spacing,
-};
-pub(crate) use common::{
-    case::is_end_construct_keyword,
-    comment_spacing::is_directive_comment,
+    case::lowercase_line, comment_spacing::normalize_comment_spacing,
+    delimiter_spacing::normalize_delimiter_spacing, is_protected,
+    keyword_spacing::normalize_keyword_spacing, write_spacing::normalize_write_output_spacing,
 };
 
 use crate::{
@@ -193,12 +187,9 @@ fn is_call_group(cx: &PassContext, line_index: usize) -> bool {
         .iter()
         .find(|token| token.kind == TokenKind::Name)
         .is_some_and(|token| token.is_name(b"call"))
-        || tokens
-            .iter()
-            .enumerate()
-            .any(|(index, token)| {
-                token.text == b"=" && common::is_named_parameter_token(&tokens, index)
-            })
+        || tokens.iter().enumerate().any(|(index, token)| {
+            token.text == b"=" && common::is_named_parameter_token(&tokens, index)
+        })
 }
 
 fn is_bind_group(cx: &PassContext, line_index: usize) -> bool {
@@ -276,7 +267,8 @@ fn apply_with_options(
     );
     // 3. WRITE output spacing.
     if cx.config.style.delimiter_spacing {
-        text = common::write_spacing::normalize_write_output_spacing_with_state(&text, cx, incoming);
+        text =
+            common::write_spacing::normalize_write_output_spacing_with_state(&text, cx, incoming);
     }
     // 4. Delimiter spacing.
     text = common::delimiter_spacing::normalize_delimiter_spacing_with_state(
