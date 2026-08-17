@@ -222,6 +222,19 @@ Fortran sources and uses declarations from those files to resolve names during f
 the paths supplied on the command line are changed. This makes project-wide formatting useful when
 a declaration in one module controls the spelling or formatting of code in another file.
 
+`--project-context=<path>` identifies the Git project, or the tracked source that stdin replaces.
+It does not limit which files supply project context. Use repeatable `--context-path=<directory>`
+options to limit semantic analysis to tracked sources beneath selected repository directories:
+
+```sh
+forformat --full --stdout src/main.f90 --context-path=src/ --context-path=modules/
+```
+
+Relative context paths are resolved from the Git repository root. Absolute paths are accepted only
+when they resolve inside that checkout, and every selected path must be an existing directory. With
+no context paths, the whole eligible checkout is used as before. `--isolated` disables project
+context and cannot be combined with `--context-path`.
+
 For independent file processing, disable repository scanning with `--isolated`:
 
 ```sh
@@ -262,8 +275,9 @@ forformat --all-files ./src --show-files --exclude='**/generated-*.f90'
 ```
 
 Use repeatable `--exclude=<glob>` options to omit vendored or generated sources from automatic
-`--all-files` and `--all` targets and from the tracked-source project-context scan. Explicit paths
-are always formatted even when they match an exclusion:
+`--all-files` and `--all` targets and from the tracked-source project-context scan. Exclusions are
+applied after `context_paths` selects the project-context scope. Explicit paths are always formatted
+even when they match an exclusion or fall outside `context_paths`:
 
 ```sh
 forformat --all --exclude=vendor/ --exclude='**/generated-*.f90'
@@ -277,7 +291,8 @@ Repository-wide formatting settings are discovered from the nearest project root
 repository, put formatter options in a top-level `.forformat.toml`; Python projects can use the
 same option names in `[tool.forformat]` in `pyproject.toml`. The formatting options example above
 shows a longer indentation and wrapping configuration; other settings include `align-paren` and
-`defines = ["USE_MPI", "REAL_KIND"]`. The exclusion keys are arrays of patterns:
+`defines = ["USE_MPI", "REAL_KIND"]`. Project-analysis settings include `context_paths`, an array
+of repository directories, and `no_submodules = true`. The exclusion keys are arrays of patterns:
 `exclude = ["vendor/"]` replaces the default exclusion set, while
 `extend-exclude = ["**/generated-*.f90"]` adds patterns. The default exclusion set is empty:
 `forformat` selects files with `git ls-files`, so anything it sees was tracked deliberately and

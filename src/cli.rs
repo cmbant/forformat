@@ -21,6 +21,7 @@ pub struct Invocation {
     pub config: FormatConfig,
     pub paths: Vec<PathBuf>,
     pub project_context: Option<PathBuf>,
+    pub context_paths: Vec<PathBuf>,
     pub all: bool,
     pub all_files: bool,
     pub no_submodules: bool,
@@ -136,6 +137,10 @@ where
     if matches!(&preliminary.command, Command::Run(invocation) if invocation.exclude.is_some()) {
         config_args.retain(|arg| !arg.starts_with("--exclude="));
     }
+    if matches!(&preliminary.command, Command::Run(invocation) if !invocation.context_paths.is_empty())
+    {
+        config_args.retain(|arg| !arg.starts_with("--context-path="));
+    }
     let mut combined = Vec::with_capacity(1 + config_args.len() + args.len());
     combined.push(
         args.first()
@@ -205,6 +210,7 @@ where
     let mut options_ended = false;
     let mut paths = Vec::new();
     let mut project_context = None;
+    let mut context_paths = Vec::new();
     let mut all = false;
     let mut all_files = false;
     let mut no_submodules = false;
@@ -350,6 +356,15 @@ where
                 "all" => all = true,
                 "all-files" => all_files = true,
                 "no-submodules" => no_submodules = true,
+                "context-path" => {
+                    let path = need(&mut value, &mut a)?;
+                    if path.is_empty() {
+                        return Err(FormatError::InvalidOption(
+                            "--context-path requires a path".into(),
+                        ));
+                    }
+                    context_paths.push(PathBuf::from(path));
+                }
                 "project-context" => {
                     let path = need(&mut value, &mut a)?;
                     if path.is_empty() {
@@ -673,6 +688,11 @@ where
             "--isolated requires one or more explicit paths and cannot be combined with --all-files".into(),
         ));
     }
+    if isolated && !context_paths.is_empty() {
+        return Err(FormatError::InvalidOption(
+            "--isolated cannot be combined with --context-path".into(),
+        ));
+    }
     if diff && paths.is_empty() && !all && !all_files {
         return Err(FormatError::InvalidOption(
             "--diff requires paths, --all, or --all-files".into(),
@@ -730,6 +750,7 @@ where
                 config: c,
                 paths,
                 project_context,
+                context_paths,
                 all,
                 all_files,
                 no_submodules,
@@ -844,6 +865,7 @@ fn single_dash_long_option_suggestion(arg: &str) -> Option<String> {
             | "normalize-only"
             | "no-config"
             | "no-submodules"
+            | "context-path"
             | "openmp"
             | "project-context"
             | "program-unit-spacing"
@@ -952,6 +974,7 @@ Free-form Fortran formatter.\n\
     --all-files [directory]             format this checkout's tracked sources; submodules are context only\n\
     <paths>, --all [directory]          format explicit files or all tracked sources recursively\n\
     --no-submodules                     omit submodule sources from targets and project context\n\
+    --context-path=<directory>           limit tracked sources used for project context (repeatable)\n\
   --stdin                             read source from stdin (default without paths)\n\
     --project-context=<path>            treat stdin as belonging to the Git project containing PATH; a source-file PATH identifies stdin as that file and shadows its on-disk contents\n\
   --stdout                            write one file's result to stdout\n\
@@ -1156,6 +1179,18 @@ mod tests {
                 .map(str::to_owned),
         )
         .is_ok());
+        assert!(parse(
+            [
+                "forformat",
+                "--isolated",
+                "source.f90",
+                "--context-path",
+                "src"
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .is_err());
     }
 
     #[test]

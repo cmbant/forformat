@@ -268,6 +268,41 @@ fn display_path(path: &Path, root: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| path.to_path_buf())
 }
 
+fn resolve_context_paths(
+    context_paths: &[PathBuf],
+    root: &Path,
+) -> Result<Vec<PathBuf>, WorkflowError> {
+    context_paths
+        .iter()
+        .map(|path| {
+            let candidate = if path.is_absolute() {
+                path.clone()
+            } else {
+                root.join(path)
+            };
+            let resolved = fs::canonicalize(&candidate).map_err(|error| {
+                WorkflowError::Usage(format!(
+                    "--context-path does not exist: {} ({error})",
+                    candidate.display()
+                ))
+            })?;
+            if !fs::metadata(&resolved)?.is_dir() {
+                return Err(WorkflowError::Usage(format!(
+                    "--context-path requires a directory: {}",
+                    candidate.display()
+                )));
+            }
+            if !resolved.starts_with(root) {
+                return Err(WorkflowError::Usage(format!(
+                    "--context-path must be inside the Git checkout: {}",
+                    candidate.display()
+                )));
+            }
+            Ok(resolved)
+        })
+        .collect()
+}
+
 fn project_context(
     sources: &[Source],
     indices: &[usize],
@@ -777,6 +812,14 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
             "--project-context requires a valid Git checkout".into(),
         ));
     }
+    let context_paths = if invocation.context_paths.is_empty() {
+        Vec::new()
+    } else {
+        let root = root.as_deref().ok_or_else(|| {
+            WorkflowError::Usage("--context-path requires a valid Git checkout".into())
+        })?;
+        resolve_context_paths(&invocation.context_paths, root)?
+    };
     if stdin_mode {
         let source = stdin_source
             .as_deref()
@@ -809,19 +852,29 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         || invocation.project_context.is_some()
         || (!invocation.isolated && root.is_some())
     {
-        root.as_deref()
-            .map(|root| {
-                tracked_source_reader(root).map(|paths| {
-                    paths
-                        .into_iter()
-                        .filter(|path| !exclude_matcher.is_excluded(root, path))
-                        .collect::<Vec<_>>()
-                })
-            })
-            .transpose()?
+        root.as_deref().map(tracked_source_reader).transpose()?
     } else {
         None
     };
+    let context_tracked = tracked.as_ref().map(|paths| {
+        paths
+            .iter()
+            .filter(|path| {
+                context_paths.is_empty()
+                    || context_paths
+                        .iter()
+                        .any(|context_path| path.starts_with(context_path))
+            })
+            .filter(|path| !exclude_matcher.is_excluded(root.as_deref().unwrap(), path))
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    let tracked = tracked.map(|paths| {
+        paths
+            .into_iter()
+            .filter(|path| !exclude_matcher.is_excluded(root.as_deref().unwrap(), path))
+            .collect::<Vec<_>>()
+    });
     let mut target_paths = if invocation.all {
         let tracked = tracked
             .as_ref()
@@ -872,21 +925,25 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         // exactly as they are for stdin.
         Vec::new()
     } else if let Some((_, stdin_path)) = project_scope.as_ref() {
-        tracked
+        context_tracked
             .as_ref()
             .expect("project-context requires tracked sources")
             .iter()
             .filter(|path| stdin_path.as_ref() != Some(*path))
             .cloned()
             .collect()
-    } else if let Some(tracked) = tracked.as_ref() {
-        deduplicate(
-            tracked
-                .iter()
-                .cloned()
-                .chain(target_paths.iter().cloned())
-                .collect::<Vec<_>>(),
-        )
+    } else if let Some(context_tracked) = context_tracked.as_ref() {
+        if context_paths.is_empty() {
+            deduplicate(
+                context_tracked
+                    .iter()
+                    .cloned()
+                    .chain(target_paths.iter().cloned())
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            context_tracked.clone()
+        }
     } else {
         target_paths.clone()
     };
@@ -958,6 +1015,12 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         let stdin_project_source = project_scope
             .as_ref()
             .and_then(|(_, path)| path.as_deref())
+            .filter(|path| {
+                context_paths.is_empty()
+                    || context_paths
+                        .iter()
+                        .any(|context_path| path.starts_with(context_path))
+            })
             .zip(stdin_source.as_deref());
         project_context(
             &loaded,

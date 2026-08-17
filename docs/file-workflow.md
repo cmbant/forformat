@@ -13,6 +13,19 @@ Both modes have repeatable `--exclude=<glob>` and `--extend-exclude=<glob>` opti
 remove matching tracked sources from targets and project context. An excluded source named
 explicitly remains a formatting target; exclusions are not force exclusions.
 
+`--project-context=<path>` identifies the Git checkout for project analysis and, when PATH is a
+tracked source file, identifies the source whose stdin bytes replace the stale on-disk copy. It does
+not restrict the analysis scope. Repeatable `--context-path=<directory>` options do that: relative
+directories are resolved from the discovered repository root, absolute directories must resolve
+inside that checkout, and each directory must exist. A tracked source contributes project context
+when it is beneath any selected directory. With no `context_paths`, all eligible tracked sources
+retain the existing behavior. Explicit formatting targets, bulk target selection, config discovery,
+and stdin identity are unaffected by `context_paths`.
+
+The policy order is repository discovery, tracked-source enumeration, `context_paths` filtering,
+then `exclude`/`extend-exclude` filtering, followed by project analysis. `--isolated` disables
+project context entirely and is rejected with `--context-path`.
+
 `--show-files` prints the selected target paths and exits without reading or modifying source
 files. It accepts explicit paths, `--all`, or `--all-files`; either bulk mode accepts one optional
 directory, for example `forformat --all-files ./src --show-files`.
@@ -20,16 +33,19 @@ directory, for example `forformat --all-files ./src --show-files`.
 `--no-submodules` disables recursive submodule discovery entirely. The superproject's tracked
 sources remain available for project context, but initialized submodule sources are neither
 targets nor context. With `--all`, this makes target selection equivalent to `--all-files` while
-retaining the recursive target-selection behavior.
+retaining the recursive target-selection behavior. It is also available as `no_submodules = true`
+in project configuration.
 
 Both `--all` and `--all-files` accept an optional directory: `forformat --all-files ./src`. In that
 form the directory's Git checkout is discovered, configuration is loaded relative to that
 directory, and only matching tracked free-form sources beneath it are selected. Without the
 directory, the current checkout is used.
 
-Project configuration accepts `exclude = ["..."]` and `extend-exclude = ["..."]` arrays in
-`.forformat.toml` or `[tool.forformat]` in `pyproject.toml`. The default exclusion set is empty;
-`exclude` replaces it and `extend-exclude` adds to it.
+Project configuration accepts `context_paths = ["..."]`, `no_submodules = true`,
+`exclude = ["..."]`, and `extend-exclude = ["..."]` in `.forformat.toml` or `[tool.forformat]`
+in `pyproject.toml`. `project-context` remains command-line-only. The default exclusion set is
+empty; `exclude` replaces it and `extend-exclude` adds to it. Command-line `--context-path` values
+replace configured `context_paths` rather than accumulating with them.
 
 Because `exclude` selects a set rather than adding to one, it does not accumulate across sources
 the way the other repeatable options do: a command-line `--exclude` discards the configuration

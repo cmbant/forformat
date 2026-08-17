@@ -192,7 +192,6 @@ fn read_config(
                 | "last-indent"
                 | "last-usable"
                 | "no-config"
-                | "no-submodules"
                 | "project-context"
                 | "stdin"
                 | "stdout"
@@ -270,6 +269,42 @@ fn read_config(
                 // `extend-exclude` adds to it, so they must survive as distinct
                 // options for the command line to layer over them correctly.
                 args.push(format!("--{key}={spec}"));
+            }
+            continue;
+        }
+        if key == "context-paths" {
+            let paths = value.as_array().ok_or_else(|| {
+                crate::error::FormatError::InvalidOption(format!(
+                    "configuration key `{key}` in {} must be an array of strings",
+                    path.display()
+                ))
+            })?;
+            for context_path in paths {
+                let context_path = context_path.as_str().ok_or_else(|| {
+                    crate::error::FormatError::InvalidOption(format!(
+                        "configuration key `{key}` in {} must contain strings",
+                        path.display()
+                    ))
+                })?;
+                if context_path.is_empty() {
+                    return Err(crate::error::FormatError::InvalidOption(format!(
+                        "configuration key `{key}` in {} must not contain empty paths",
+                        path.display()
+                    )));
+                }
+                args.push(format!("--context-path={context_path}"));
+            }
+            continue;
+        }
+        if key == "no-submodules" {
+            let enabled = value.as_bool().ok_or_else(|| {
+                crate::error::FormatError::InvalidOption(format!(
+                    "configuration key `{key}` in {} must be a boolean",
+                    path.display()
+                ))
+            })?;
+            if enabled {
+                args.push("--no-submodules".to_string());
             }
             continue;
         }

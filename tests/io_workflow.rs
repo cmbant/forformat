@@ -109,14 +109,15 @@ fn all_discovers_uppercase_extensions_and_ignores_hook_git_environment() {
 fn all_files_excludes_submodules_from_targets_but_keeps_them_as_context() {
     let submodule = temp_repo();
     let submodule_source = submodule.join("submodule.f90");
-    let source = b"program p\nx=1\nend program p\n";
-    fs::write(&submodule_source, source).unwrap();
+    let submodule_bytes = b"module SharedName\nend module SharedName\n";
+    fs::write(&submodule_source, submodule_bytes).unwrap();
     git_add(&submodule);
     git_commit(&submodule);
 
     let repo = temp_repo();
     let root_source = repo.join("root.f90");
-    fs::write(&root_source, source).unwrap();
+    let root_bytes = b"program p\nuse sharedname\nend program p\n";
+    fs::write(&root_source, root_bytes).unwrap();
     git_add(&repo);
     git_commit(&repo);
     Command::new("git")
@@ -128,13 +129,33 @@ fn all_files_excludes_submodules_from_targets_but_keeps_them_as_context() {
         .unwrap();
     git_commit(&repo);
 
-    let output = run(&repo, &["--indent-only", "--all-files"]);
+    let output = run(
+        &repo,
+        &["--full", "--all-files", "--context-path", "."],
+    );
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         fs::read(&root_source).unwrap(),
-        b"program p\n   x=1\nend program p\n"
+        b"program p\n   use SharedName\n\nend program p\n"
     );
-    assert_eq!(fs::read(repo.join("vendor/submodule.f90")).unwrap(), source);
+    assert_eq!(fs::read(repo.join("vendor/submodule.f90")).unwrap(), submodule_bytes);
+
+    fs::write(&root_source, root_bytes).unwrap();
+    fs::write(repo.join(".forformat.toml"), b"no_submodules = true\n").unwrap();
+    let output = run(
+        &repo,
+        &[
+            "--full",
+            "--all-files",
+            "--context-path",
+            ".",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        fs::read(&root_source).unwrap(),
+        b"program p\n   use sharedname\n\nend program p\n"
+    );
 
     let listed = run(&repo, &["--indent-only", "--all-files", "--show-files"]);
     assert_eq!(listed.status.code(), Some(0));
@@ -658,6 +679,170 @@ fn project_context_supplies_declarations_without_discovering_config() {
     assert_eq!(
         output.stdout,
         b"program p\n   use SharedName\n   print *, 1\n\nend program p\n"
+    );
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn context_paths_limit_project_context_and_form_a_union() {
+    let repo = temp_repo();
+    fs::create_dir(repo.join("src")).unwrap();
+    fs::create_dir(repo.join("modules")).unwrap();
+    fs::write(
+        repo.join("src/first.f90"),
+        b"module FirstName\nend module FirstName\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("modules/second.f90"),
+        b"module SecondName\nend module SecondName\n",
+    )
+    .unwrap();
+    let target = repo.join("target.f90");
+    fs::write(
+        &target,
+        b"program p\nuse firstname\nuse secondname\nend program p\n",
+    )
+    .unwrap();
+    git_add(&repo);
+
+    let output = run(
+        &repo,
+        &[
+            "--full",
+            "--stdout",
+            "target.f90",
+            "--context-path",
+            "src",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let output = String::from_utf8_lossy(&output.stdout);
+    assert!(output.contains("use FirstName"));
+    assert!(output.contains("use secondname"));
+
+    let output = run(
+        &repo,
+        &[
+            "--full",
+            "--stdout",
+            "target.f90",
+            "--context-path",
+            "src",
+            "--context-path",
+            "modules",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let output = String::from_utf8_lossy(&output.stdout);
+    assert!(output.contains("use FirstName"));
+    assert!(output.contains("use SecondName"));
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn cli_context_paths_replace_configured_paths_and_exclusions_apply() {
+    let repo = temp_repo();
+    fs::create_dir(repo.join("src")).unwrap();
+    fs::create_dir(repo.join("modules")).unwrap();
+    fs::write(
+        repo.join("src/first.f90"),
+        b"module FirstName\nend module FirstName\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("modules/second.f90"),
+        b"module SecondName\nend module SecondName\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("src/generated.f90"),
+        b"module GeneratedName\nend module GeneratedName\n",
+    )
+    .unwrap();
+    let target = repo.join("target.f90");
+    fs::write(
+        &target,
+        b"program p\nuse firstname\nuse secondname\nuse generatedname\nend program p\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join(".forformat.toml"),
+        b"context_paths = [\"modules\"]\n",
+    )
+    .unwrap();
+    git_add(&repo);
+
+    let output = run(
+        &repo,
+        &[
+            "--full",
+            "--stdout",
+            "target.f90",
+            "--context-path",
+            "src",
+            "--exclude=src/generated.f90",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let output = String::from_utf8_lossy(&output.stdout);
+    assert!(output.contains("use FirstName"));
+    assert!(output.contains("use secondname"));
+    assert!(output.contains("use generatedname"));
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn context_paths_validate_directories_inside_the_checkout() {
+    let repo = temp_repo();
+    let target = repo.join("target.f90");
+    fs::write(&target, b"program p\nend program p\n").unwrap();
+    git_add(&repo);
+    let outside = std::env::temp_dir().join(format!(
+        "forformat-context-outside-{}",
+        NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir_all(&outside).unwrap();
+
+    for path in [
+        "missing",
+        "target.f90",
+        outside.to_str().unwrap(),
+    ] {
+        let output = run(
+            &repo,
+            &["--full", "--stdout", "target.f90", "--context-path", path],
+        );
+        assert_eq!(output.status.code(), Some(2), "{path}");
+    }
+    let _ = fs::remove_dir_all(&outside);
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn file_project_context_replacement_respects_context_scope() {
+    let repo = temp_repo();
+    fs::create_dir(repo.join("src")).unwrap();
+    let target = repo.join("src/target.f90");
+    fs::write(&target, b"module StaleName\nend module StaleName\n").unwrap();
+    git_add(&repo);
+
+    let output = run_stdin(
+        &repo,
+        &[
+            "--full",
+            "--no-config",
+            "--project-context",
+            "src/target.f90",
+            "--context-path",
+            "src",
+        ],
+        b"module CurrentName\nend module CurrentName\n",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.stdout,
+        b"module CurrentName\n\nend module CurrentName\n"
     );
     let _ = fs::remove_dir_all(repo);
 }
