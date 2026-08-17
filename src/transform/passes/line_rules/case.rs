@@ -1,0 +1,274 @@
+use super::*;
+
+/// Rule 1: keyword case, and the case decisions the project agreed on.
+///
+/// A word is cased only when it is a Fortran keyword and nothing in the file or
+/// project declares an identifier by that name, and it is not a macro name or
+/// a component after `%`. Every replacement is made against a token span.
+pub fn lowercase_line(
+    line: &[u8],
+    cx: &PassContext,
+    declared_names: &DeclaredNameIndex,
+    line_index: usize,
+    state: &mut LexState,
+) -> Vec<u8> {
+    lowercase_line_with_context(
+        line,
+        cx,
+        declared_names,
+        line_index,
+        state,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        &[],
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn lowercase_line_with_context(
+    line: &[u8],
+    cx: &PassContext,
+    declared_names: &DeclaredNameIndex,
+    line_index: usize,
+    state: &mut LexState,
+    continued_statement: bool,
+    continued_infix: bool,
+    continued_declaration: bool,
+    continued_named_parameter: bool,
+    continued_bind_parameter: bool,
+    continued_format: bool,
+    continued_initializer: bool,
+    open_groups: &[bool],
+    preserve_identifier_case: bool,
+) -> Vec<u8> {
+    let tokens = tokenize(line, state);
+    let inside_paren = inside_paren_at(open_groups, &tokens);
+    let continued_entity_list =
+        continued_declaration && open_groups.is_empty() && !continued_initializer;
+    let mut edits = EditBuffer::new(line);
+    let mut spacing = OperatorSpacing::default();
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TokenKind::Number => {
+                if let Some(marker) = real_exponent_marker(token.text) {
+                    let at = token.span.start + marker;
+                    let marker = match cx.config.style.keyword_case {
+                        KeywordCase::Lower => line[at].to_ascii_lowercase(),
+                        KeywordCase::Upper => line[at].to_ascii_uppercase(),
+                        KeywordCase::Preserve => line[at],
+                    };
+                    edits.replace(at..at + 1, &[marker]);
+                }
+            }
+            TokenKind::DotOp => {
+                if cx.config.style.relational_symbols {
+                    if let Some(operator) = modern_operator(token.text) {
+                        add_operator_edit(line, &mut edits, token, operator, true, &mut spacing);
+                    } else if is_spaced_dotted_operator(token.text) {
+                        let operator = dotted_case(token.text, cx.config.style.keyword_case);
+                        add_operator_edit(line, &mut edits, token, &operator, true, &mut spacing);
+                    } else if let Some(cased) =
+                        dotted_word_case(token.text, cx.config.style.keyword_case)
+                    {
+                        edits.replace(token.span.clone(), &cased);
+                    }
+                } else if modern_operator(token.text).is_some()
+                    || is_spaced_dotted_operator(token.text)
+                {
+                    let operator = dotted_case(token.text, cx.config.style.keyword_case);
+                    add_operator_edit(line, &mut edits, token, &operator, true, &mut spacing);
+                } else if let Some(cased) =
+                    dotted_word_case(token.text, cx.config.style.keyword_case)
+                {
+                    edits.replace(token.span.clone(), &cased);
+                }
+            }
+            TokenKind::Operator => {
+                if !is_labelled_format_statement(&tokens)
+                    && !continued_format
+                    && is_spaced_operator_token(line, &tokens, index, token)
+                {
+                    let named = token.text == b"="
+                        && (is_named_parameter_token(&tokens, index)
+                            || continued_statement
+                                && (!continued_declaration && continued_named_parameter
+                                    || continued_bind_parameter)
+                                && is_continued_named_parameter(
+                                    &tokens,
+                                    index,
+                                    inside_paren[index],
+                                ));
+                    add_operator_edit(line, &mut edits, token, token.text, !named, &mut spacing);
+                    spacing.previous_compact_named = named;
+                } else if !is_labelled_format_statement(&tokens)
+                    && !continued_format
+                    && is_arithmetic_operator(token.text)
+                {
+                    if !is_io_specifier_star(&tokens, index, token)
+                        && (is_binary_arithmetic_operator(line, token.span.start, token.text)
+                            || (continued_infix
+                                && is_leading_continuation_arithmetic(&tokens, index, token)))
+                    {
+                        let declaration_star = is_declaration_type_star(&tokens, index, token.text);
+                        add_operator_edit(
+                            line,
+                            &mut edits,
+                            token,
+                            token.text,
+                            !declaration_star
+                                && binary_operator_spaced(
+                                    token.text,
+                                    cx.config.style.compact_multiplicative,
+                                ),
+                            &mut spacing,
+                        );
+                    } else {
+                        remove_operator_trailing_whitespace(line, &mut edits, token, &mut spacing);
+                    }
+                }
+            }
+            TokenKind::Name => {
+                if preserve_identifier_case && index > 0 && tokens[index - 1].text == b"%" {
+                    continue;
+                }
+                if index > 0 && tokens[index - 1].text == b"%" {
+                    continue;
+                }
+                if cx.project.macros.contains(token.text) {
+                    continue;
+                }
+
+                let cased = apply_case(token.text, cx.config.style.keyword_case);
+                let specifier_argument = is_specifier_keyword_argument(&tokens, index);
+                if (is_contextual_declaration_name(line, &tokens, index, continued_entity_list)
+                    || is_old_style_declaration_entity(&tokens, index))
+                    && !specifier_argument
+                {
+                    continue;
+                }
+                let end_construct_keyword = is_end_construct_keyword(&tokens, index);
+                if vocab::contains(vocab::FORTRAN_KEYWORDS, token.text)
+                    && (end_construct_keyword
+                        || !declared_names.suppresses_keyword(
+                            line_index,
+                            token.text,
+                            specifier_argument,
+                        ))
+                    && keyword_in_context(&tokens, index)
+                {
+                    if token.text != cased {
+                        edits.replace(token.span.clone(), &cased);
+                    }
+                    continue;
+                }
+
+                if !end_construct_keyword
+                    && declared_names.suppresses_keyword(line_index, token.text, specifier_argument)
+                {
+                    continue;
+                }
+                if vocab::contains(vocab::INTRINSIC_NAMES, token.text)
+                    || vocab::contains(vocab::FORTRAN_SPECIFIERS, token.text)
+                {
+                    if token.is(b"precision")
+                        && !is_followed_by_lparen(&tokens, index)
+                        && !previous_name_is(&tokens, index, b"double")
+                    {
+                        continue;
+                    }
+                    if token.text != cased {
+                        edits.replace(token.span.clone(), &cased);
+                    }
+                    continue;
+                }
+                if cx.config.uppercase_single_l && token.is(b"l") {
+                    edits.replace(token.span.clone(), b"L");
+                }
+            }
+            _ => {}
+        }
+    }
+    edits.finish()
+}
+
+pub(crate) fn is_end_construct_keyword(tokens: &[crate::source::Token], index: usize) -> bool {
+    if !tokens[index].is_name(b"end") {
+        return false;
+    }
+    let Some(first) = tokens.iter().position(|t| t.kind != TokenKind::Number) else {
+        return false;
+    };
+    if index != first {
+        return false;
+    }
+    match tokens.get(first + 1) {
+        None => true,
+        Some(next) => matches!(
+            next.text.to_ascii_lowercase().as_slice(),
+            b"do"
+                | b"if"
+                | b"where"
+                | b"forall"
+                | b"select"
+                | b"associate"
+                | b"block"
+                | b"critical"
+                | b"type"
+                | b"interface"
+                | b"enum"
+                | b"function"
+                | b"subroutine"
+                | b"program"
+                | b"module"
+                | b"submodule"
+                | b"procedure"
+                | b"blockdata"
+                | b"team"
+                | b"structure"
+                | b"union"
+                | b"map"
+        ),
+    }
+}
+
+fn keyword_in_context(tokens: &[crate::source::Token], index: usize) -> bool {
+    let token = &tokens[index];
+    let next = tokens.get(index + 1);
+    if vocab::contains(vocab::DECLARATION_ATTRIBUTES, token.text) {
+        return tokens[index + 1..].iter().any(|t| t.text == b"::");
+    }
+    if token.is(b"only") {
+        return next.is_some_and(|t| t.text == b":");
+    }
+    if token.is(b"bind") {
+        return next.is_some_and(|t| t.kind == TokenKind::LParen)
+            && tokens.get(index + 2).is_some_and(|t| t.is_name(b"c"))
+            && tokens
+                .get(index + 3)
+                .is_some_and(|t| t.kind == TokenKind::RParen);
+    }
+    if token.is(b"kind") {
+        return next.is_some_and(|t| t.kind == TokenKind::LParen || t.text == b"=");
+    }
+    if token.is(b"precision") {
+        return index > 0 && tokens[index - 1].is_name(b"double");
+    }
+    true
+}
+
+fn is_leading_continuation_arithmetic(
+    tokens: &[crate::source::Token<'_>],
+    index: usize,
+    token: &crate::source::Token<'_>,
+) -> bool {
+    matches!(token.text, b"+" | b"-" | b"*" | b"/" | b"**")
+        && tokens[..index]
+            .iter()
+            .all(|previous| previous.kind == TokenKind::Ampersand)
+}
