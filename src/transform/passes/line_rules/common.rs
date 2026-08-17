@@ -11,14 +11,14 @@ use crate::{
 
 #[path = "case.rs"]
 pub(super) mod case;
+#[path = "comment_spacing.rs"]
+pub(super) mod comment_spacing;
+#[path = "delimiter_spacing.rs"]
+pub(super) mod delimiter_spacing;
 #[path = "keyword_spacing.rs"]
 pub(super) mod keyword_spacing;
 #[path = "write_spacing.rs"]
 pub(super) mod write_spacing;
-#[path = "delimiter_spacing.rs"]
-pub(super) mod delimiter_spacing;
-#[path = "comment_spacing.rs"]
-pub(super) mod comment_spacing;
 
 fn horizontal_gap(line: &[u8], start: usize, end: usize) -> bool {
     start <= end
