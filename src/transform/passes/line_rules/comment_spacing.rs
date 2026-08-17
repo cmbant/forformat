@@ -139,7 +139,10 @@ pub(crate) fn is_directive_comment(comment: &[u8]) -> bool {
 
 fn is_commented_assignment(comment: &[u8]) -> bool {
     let mut index = 1;
-    while comment.get(index).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+    while comment
+        .get(index)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
         index += 1;
     }
     let Some(end) = identifier_end(comment, index) else {
@@ -150,7 +153,10 @@ fn is_commented_assignment(comment: &[u8]) -> bool {
     }
     index = end;
     loop {
-        while comment.get(index).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+        while comment
+            .get(index)
+            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+        {
             index += 1;
         }
         if comment.get(index) == Some(&b'%') {
@@ -174,7 +180,10 @@ fn is_commented_assignment(comment: &[u8]) -> bool {
             break;
         }
     }
-    while comment.get(index).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
+    while comment
+        .get(index)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
+    {
         index += 1;
     }
     comment.get(index) == Some(&b'=')
@@ -333,7 +342,13 @@ fn legacy_operator_at(line: &[u8], index: usize) -> Option<(usize, &'static [u8]
 }
 
 fn spaced_operator_len(line: &[u8], index: usize, previous: Option<u8>) -> Option<usize> {
-    for operator in [b".and.".as_slice(), b".or.", b".not.", b".eqv.", b".neqv."] {
+    for operator in [
+        b".and.".as_slice(),
+        b".or.",
+        b".not.",
+        b".eqv.",
+        b".neqv.",
+    ] {
         if line[index..].len() >= operator.len()
             && line[index..index + operator.len()].eq_ignore_ascii_case(operator)
         {
@@ -348,7 +363,9 @@ fn spaced_operator_len(line: &[u8], index: usize, previous: Option<u8>) -> Optio
     let byte = *line.get(index)?;
     let next = line.get(index + 1).copied();
     let valid = match byte {
-        b'<' => !matches!(previous, Some(b'=' | b'<' | b'>')) && !matches!(next, Some(b'<' | b'>')),
+        b'<' => {
+            !matches!(previous, Some(b'=' | b'<' | b'>')) && !matches!(next, Some(b'<' | b'>'))
+        }
         b'>' => {
             !matches!(previous, Some(b'=' | b'<' | b'>' | b'-'))
                 && !matches!(next, Some(b'<' | b'>'))
