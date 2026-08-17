@@ -29,15 +29,23 @@ The package requires Python 3.9 or newer. Check the installation with:
 forformat --version
 ```
 
-Wheels contain a platform-specific native executable. If `forformat` is not yet available for your
-platform on PyPI, build a wheel from a source checkout as described below.
+Wheels contain a platform-specific native executable compiled from Rust.
 
-PyPI publishes platform-specific wheels only; no source distribution (sdist) is published. A
-platform not covered by those wheels must build from a checkout:
+### Pre-commit
 
-```sh
-python -m build --wheel --outdir dist
+Add the repository hook:
+
+```yaml
+repos:
+  - repo: https://github.com/cmbant/forformat-pre-commit
+    rev: v0.1.3
+    hooks:
+      - id: forformat
+      - id: forformat-check
 ```
+
+The hook package installs the published `forformat` wheel from PyPI, so pre-commit does not build
+the formatter from source or require Rust.
 
 ### From source
 
@@ -117,13 +125,12 @@ forformat --diff src/*.f90
 For pre-commit, use the rewriting hook to format files in place, or use `forformat-check` when the
 hook should only check formatting. Replace `vX.Y.Z` with the release you want to pin:
 
-These hooks install this repository from source. If no prebuilt release binary is available, the
-installation invokes Cargo, so Rust 1.85 or newer is required for pre-commit. A published wheel
-does not require Rust, but it does not make this source-based hook toolchain-free.
+The separate hook repository installs the published `forformat` wheel from PyPI, so pre-commit
+does not build the formatter from source or require Rust.
 
 ```yaml
 repos:
-  - repo: https://github.com/cmbant/forformat
+  - repo: https://github.com/cmbant/forformat-pre-commit
     rev: vX.Y.Z
     hooks:
       - id: forformat          # rewrite files in place

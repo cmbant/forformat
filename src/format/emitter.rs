@@ -343,6 +343,29 @@ fn clamp_indent(indent: usize, max: usize) -> usize {
     }
 }
 
+/// The column at which this emitter will start a labelled statement's body,
+/// given the statement's structural indent.
+///
+/// The arithmetic is the one in [`emit_line`]'s labelled branch and has to
+/// stay that way: under `--label-left=1` the label occupies the left margin
+/// and the padding after it is chosen so the *body* still lands on `indent`,
+/// so a label costs the line nothing until it is wider than the indent it sits
+/// in. Under `--label-left=0` the label sits inside the indent and does push
+/// the body along. Callers that only want to know how wide a labelled line
+/// will be must ask this rather than adding the label's own length to
+/// `indent`, which pays for the same columns twice.
+pub(crate) fn labelled_body_column(
+    indent: usize,
+    label_len: usize,
+    config: &FormatConfig,
+) -> usize {
+    if config.label_left {
+        label_len + clamp_indent(indent.saturating_sub(label_len), config.max_indent).max(1)
+    } else {
+        clamp_indent(indent, config.max_indent) + label_len + 1
+    }
+}
+
 fn near_openmp_comment(s: &[u8]) -> Option<&[u8]> {
     if !s.starts_with(b"!$") {
         return None;
@@ -354,7 +377,15 @@ fn near_openmp_comment(s: &[u8]) -> Option<&[u8]> {
     }
 }
 
-fn split_label(s: &[u8]) -> Option<(&[u8], &[u8])> {
+/// Split a leading statement label off the first line of a statement,
+/// returning the digits and the statement text that follows them.
+///
+/// The author's gap between the two is discarded, because this emitter does
+/// not preserve it: it writes the label and then pads out to the column the
+/// statement is owed. Anything that needs to measure a labelled statement
+/// before it is emitted has to split it the same way, or it charges the
+/// statement for bytes that are about to disappear — hence `pub(crate)`.
+pub(crate) fn split_label(s: &[u8]) -> Option<(&[u8], &[u8])> {
     let mut i = 0;
     while i < s.len() && s[i].is_ascii_digit() {
         i += 1;
@@ -379,7 +410,7 @@ fn is_label_fragment(s: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{emit_line, EmitStyle, LinePlacement};
+    use super::{emit_line, labelled_body_column, EmitStyle, LinePlacement};
     use crate::{config::FormatConfig, source::SourceBuffer};
 
     fn first(indent: usize) -> LinePlacement {
@@ -412,6 +443,42 @@ mod tests {
             emit_line(&source, 1, continued(3, None), &style, None),
             b"   & y\n"
         );
+    }
+
+    #[test]
+    fn the_labelled_body_column_is_the_one_the_emitter_writes() {
+        // `labelled_body_column` exists so the wrapper can size a labelled line
+        // without re-deriving this branch's arithmetic.  It is only worth
+        // having while the two agree, so the check is against the bytes.
+        let statement = b"call f(x)";
+        for label in ["1", "21", "1005", "99999"] {
+            for indent in [0usize, 1, 2, 3, 8, 32, 40] {
+                for label_left in [true, false] {
+                    for max_indent in [0usize, 32] {
+                        let config = FormatConfig {
+                            label_left,
+                            max_indent,
+                            ..FormatConfig::default()
+                        };
+                        let mut source = label.as_bytes().to_vec();
+                        source.extend_from_slice(b" ");
+                        source.extend_from_slice(statement);
+                        source.push(b'\n');
+                        let buffer = SourceBuffer::new(&source).unwrap();
+                        let emitted =
+                            emit_line(&buffer, 0, first(indent), &EmitStyle::new(&config), None);
+                        let column = emitted.len() - 1 - statement.len();
+                        assert_eq!(
+                            labelled_body_column(indent, label.len(), &config),
+                            column,
+                            "label {label}, indent {indent}, label_left {label_left}, \
+                             max_indent {max_indent}: {}",
+                            String::from_utf8_lossy(&emitted)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

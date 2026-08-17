@@ -129,28 +129,20 @@ fn all_files_excludes_submodules_from_targets_but_keeps_them_as_context() {
         .unwrap();
     git_commit(&repo);
 
-    let output = run(
-        &repo,
-        &["--full", "--all-files", "--context-path", "."],
-    );
+    let output = run(&repo, &["--full", "--all-files", "--context-path", "."]);
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         fs::read(&root_source).unwrap(),
         b"program p\n   use SharedName\n\nend program p\n"
     );
-    assert_eq!(fs::read(repo.join("vendor/submodule.f90")).unwrap(), submodule_bytes);
+    assert_eq!(
+        fs::read(repo.join("vendor/submodule.f90")).unwrap(),
+        submodule_bytes
+    );
 
     fs::write(&root_source, root_bytes).unwrap();
     fs::write(repo.join(".forformat.toml"), b"no_submodules = true\n").unwrap();
-    let output = run(
-        &repo,
-        &[
-            "--full",
-            "--all-files",
-            "--context-path",
-            ".",
-        ],
-    );
+    let output = run(&repo, &["--full", "--all-files", "--context-path", "."]);
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         fs::read(&root_source).unwrap(),
@@ -659,6 +651,42 @@ fn stdin_applies_command_line_defines_in_full_mode() {
 }
 
 #[test]
+fn a_macro_name_broken_across_a_continuation_is_cased_on_the_first_pass() {
+    // Reduced from Q-E `Modules/lmdif.f90`.  The author split `zero` as
+    // `zer&` / `&o`, which the macro pass reads one physical line at a time and
+    // so never recognizes.  Wrapping then rejoined the halves, and the *next*
+    // run cased the name it could finally see -- an I1 failure that only shows
+    // up once a macro of that name is in scope.
+    let repo = temp_repo();
+    let source = b"subroutine s(n, aaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbb, cccccccccccccccc)\n\
+integer n\n\
+real aaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbb, cccccccccccccccc\n\
+if (n.le.0.or.aaaaaaaaaaaaaaaa.lt.ZERO.or.bbbbbbbbbbbbbbbb.lt.zer&\n\
+ &o.or.cccccccccccccccc.lt.ZERO) goto 300\n\
+300 continue\n\
+end subroutine s\n";
+    let once = run_stdin(&repo, &["--full", "-D", "ZERO"], source);
+    assert_eq!(once.status.code(), Some(0));
+    let twice = run_stdin(&repo, &["--full", "-D", "ZERO"], &once.stdout);
+    assert_eq!(
+        String::from_utf8_lossy(&once.stdout)
+            .matches("ZERO")
+            .count(),
+        3,
+        "the split macro name was not cased on the first pass:\n{}",
+        String::from_utf8_lossy(&once.stdout)
+    );
+    assert_eq!(
+        once.stdout,
+        twice.stdout,
+        "first pass:\n{}\nsecond pass:\n{}",
+        String::from_utf8_lossy(&once.stdout),
+        String::from_utf8_lossy(&twice.stdout)
+    );
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
 fn project_context_supplies_declarations_without_discovering_config() {
     let repo = temp_repo();
     fs::write(repo.join(".forformat.toml"), b"indent = 8\n").unwrap();
@@ -708,13 +736,7 @@ fn context_paths_limit_project_context_and_form_a_union() {
 
     let output = run(
         &repo,
-        &[
-            "--full",
-            "--stdout",
-            "target.f90",
-            "--context-path",
-            "src",
-        ],
+        &["--full", "--stdout", "target.f90", "--context-path", "src"],
     );
     assert_eq!(output.status.code(), Some(0));
     let output = String::from_utf8_lossy(&output.stdout);
@@ -804,11 +826,7 @@ fn context_paths_validate_directories_inside_the_checkout() {
     ));
     fs::create_dir_all(&outside).unwrap();
 
-    for path in [
-        "missing",
-        "target.f90",
-        outside.to_str().unwrap(),
-    ] {
+    for path in ["missing", "target.f90", outside.to_str().unwrap()] {
         let output = run(
             &repo,
             &["--full", "--stdout", "target.f90", "--context-path", path],

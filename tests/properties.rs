@@ -1822,6 +1822,146 @@ end module NoahmpIOVarInitMod
     assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
 }
 
+/// The Q-E `atomic/src/el_config.f90` statement, with `gap` spaces between the
+/// label and the statement it labels.
+fn labelled_call(gap: usize) -> String {
+    format!(
+        "\
+subroutine read_config(rel, lsd, nwf)
+  integer :: rel, lsd, nwf, n
+  do n=1,nwf
+     if (rel < 2) then
+        if (lsd == 0) then
+           continue
+        else
+21{}call errore('read_config','reading orbital (lsd)',abs(n))
+        endif
+     endif
+  enddo
+end subroutine read_config
+",
+        " ".repeat(gap)
+    )
+}
+
+#[test]
+fn the_gap_an_author_left_after_a_statement_label_does_not_reach_the_wrapper() {
+    // Reduced from Q-E `atomic/src/el_config.f90`.  The engine writes the label
+    // in the left margin and pads after it so that `call` still starts on the
+    // statement's own indent — so neither the label nor the author's gap costs
+    // the emitted line anything.  Charging the wrapper for both read an
+    // 89-column statement as 100 and sent it looking for a break among columns
+    // that were never going to exist; it found none (`NoSafeBreak`) and left
+    // the line long, and the next run, reading the gap the engine had actually
+    // written, broke it cleanly.
+    let outputs: Vec<(usize, String, String)> = [1usize, 9, 30, 44]
+        .into_iter()
+        .map(|gap| {
+            let (once, twice) = full_twice(&labelled_call(gap), &deep_wrapping_config());
+            (gap, once, twice)
+        })
+        .collect();
+    for (gap, once, twice) in &outputs {
+        assert_eq!(
+            once, twice,
+            "gap {gap}, first pass:\n{once}\nsecond:\n{twice}"
+        );
+        assert!(
+            once.lines().any(|line| line.starts_with("21 ")),
+            "gap {gap} lost the statement label:\n{once}"
+        );
+    }
+    let (first_gap, expected, _) = &outputs[0];
+    for (gap, once, _) in &outputs[1..] {
+        assert_eq!(
+            once, expected,
+            "a gap of {gap} spaces after the label formatted differently from {first_gap}:\
+             \n{once}\n{expected}"
+        );
+    }
+}
+
+#[test]
+fn a_labelled_statement_inside_the_budget_is_left_whole() {
+    // The counterpart trap: paying for the label *twice* — once as its own
+    // bytes and once as the indent it is padded out to — breaks statements
+    // that were never over budget.  OpenFAST
+    // `modules/servodyn/src/PitchCntrl_ACH.f90` is the shape it showed up on,
+    // a labelled `call` that ends at 77 columns.
+    let source = "\
+subroutine s(x)
+  integer :: x
+  do x=1,10
+     if (x > 1) then
+        if (x > 2) then
+9999       call terminate_this_run(x, 'the message', 12)
+        endif
+     endif
+  enddo
+end subroutine s
+";
+    let (once, twice) = full_twice(source, &deep_wrapping_config());
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+    let labelled = once
+        .lines()
+        .find(|line| line.starts_with("9999 "))
+        .unwrap_or_else(|| panic!("the label was lost:\n{once}"));
+    assert_eq!(
+        labelled.len(),
+        77,
+        "the labelled statement was not measured at its emitted width: {labelled}"
+    );
+    assert!(
+        !labelled.ends_with('&'),
+        "a statement inside the budget was broken: {labelled}"
+    );
+}
+
+#[test]
+fn a_declaration_widened_by_a_neighbour_s_break_is_wrapped_in_the_same_run() {
+    // Reduced from CP2K `src/motion/pint_piglet.F`.  Every physical line here
+    // is inside the budget, so the authored layout offers the wrapper nothing.
+    // But breaking the `INTEGER` entity list takes it out of the `::`
+    // alignment block, the block re-forms around the wider `DIMENSION(...)`
+    // continuation, and the `TYPE(...)` declaration that measured 79 columns
+    // is emitted at 90.  Measuring only the authored layout never discovered
+    // that, and the next run — which reads the widened line as authored — did.
+    let source = "\
+MODULE pint_reduction
+   IMPLICIT NONE
+CONTAINS
+   SUBROUTINE pint_piglet_init
+      CHARACTER(len=default_path_length)                 :: matrices_file_name
+      CHARACTER(len=default_string_length)               :: msg, temp_input
+      CHARACTER(LEN=rng_record_length)                   :: rng_record
+      INTEGER                                            :: cbrac, i, ibead, idim, imode, &
+                                                            input_unit, isp, j, matrix_init, ns, &
+                                                            obrac, p, read_err
+      REAL(KIND=dp), DIMENSION(3, 2)                     :: initial_seed
+      REAL(KIND=dp), DIMENSION(:), POINTER               :: smallstmp
+      REAL(KIND=dp), &
+         DIMENSION(piglet_therm%nsp1, piglet_therm%nsp1) :: Mtmp, tmpmatrix
+      TYPE(section_vals_type), POINTER                   :: rng_section, smalls_section
+   END SUBROUTINE pint_piglet_init
+END MODULE pint_reduction
+";
+    let (once, twice) = full_twice(source, &deep_wrapping_config());
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+    assert!(
+        once.lines()
+            .any(|line| line.contains("pointer") && line.ends_with("rng_section, &")),
+        "the declaration the neighbouring break widened was never offered to \
+         the wrapper:\n{once}"
+    );
+    for line in once.lines() {
+        assert!(
+            line.len() <= 80,
+            "emitted {} columns, over the budget it was measured against: {line}",
+            line.len()
+        );
+    }
+}
+
 #[test]
 fn a_redundant_pair_is_still_redundant_when_the_author_broke_the_line_between_them() {
     // Reduced from Q-E `PP/src/write_hamiltonians.f90`.  The author closed this
@@ -2102,6 +2242,32 @@ end module c2
     assert!(
         once.contains("name= &"),
         "the reduced break was not exercised:\n{once}"
+    );
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+}
+
+#[test]
+fn a_declared_name_broken_across_a_continuation_is_cased_on_the_first_pass() {
+    // Same shape as the Q-E `Modules/lmdif.f90` macro case, in the declared-case
+    // engine: the author split `MyZero` as `myzer&` / `&o`, so the token spans
+    // two physical lines and the pass skipped it. Nothing rejoined the halves
+    // before step 16 wrapped the statement, so the spelling settled only on the
+    // pass that read the wrap's output.
+    let config = FormatConfig::default();
+    let source = "\
+subroutine s(n)
+  integer :: n
+  real :: MyZero, aaaaaaaaaaaaaaaa, bbbbbbbbbbbbbbbb, cccccccccccccccc
+  if (n.le.0.or.aaaaaaaaaaaaaaaa.lt.MyZero.or.bbbbbbbbbbbbbbbb.lt.myzer&
+ &o.or.cccccccccccccccc.lt.MyZero) goto 300
+300 continue
+end subroutine s
+";
+    let (once, twice) = full_twice(source, &config);
+    assert_eq!(
+        once.matches("MyZero").count(),
+        4,
+        "the split declared name was not cased on the first pass:\n{once}"
     );
     assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
 }

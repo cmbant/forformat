@@ -104,7 +104,61 @@ pub fn macros(document: &mut Document, cx: &PassContext) -> Result<Changed, Form
             changed = changed.or(Changed::Text);
         }
     }
+
+    // The loop above reads one physical line at a time, which is all a macro
+    // use needs unless the author broke the name itself across a continuation.
+    // `zer&` / `&o` is two names to that loop and one to the statement, so the
+    // spelling settled only after step 16 had rejoined the halves — on the run
+    // *after* the one that wrapped them (I1).  Re-case those tokens from the
+    // assembled statement, where the name is whole.
+    changed = changed.or(crossing_macro_names(document, cx));
     Ok(changed)
+}
+
+/// Apply macro spellings to the names a continuation splits in two.
+///
+/// Only tokens that span more than one physical line are considered; every
+/// other occurrence was already handled line by line, identically.
+fn crossing_macro_names(document: &mut Document, cx: &PassContext) -> Changed {
+    let mut changed = Changed::No;
+    for group in &cx.analysis.groups {
+        if group.lines.len() < 2 {
+            continue;
+        }
+        for statement in &group.statements {
+            let tokens = tokenize(&statement.text, &mut LexState::default());
+            for token in &tokens {
+                if token.kind != TokenKind::Name {
+                    continue;
+                }
+                let Some(spelling) = cx.project.macros.get(token.text) else {
+                    continue;
+                };
+                if spelling == token.text {
+                    continue;
+                }
+                let spans = source_spans(group, statement, token);
+                if spans.len() < 2 {
+                    continue;
+                }
+                let Some(pieces) = spread_replacement(&spans, token, spelling) else {
+                    continue;
+                };
+                for (line, span, piece) in pieces {
+                    let line_start = cx.analysis.buffer.lines[line].span.start as usize;
+                    let source = &document.lines[line];
+                    let mut buffer = EditBuffer::new(source);
+                    buffer.replace(span.start - line_start..span.end - line_start, piece);
+                    let updated = buffer.finish();
+                    if updated != *source {
+                        document.lines[line] = updated;
+                        changed = changed.or(Changed::Text);
+                    }
+                }
+            }
+        }
+    }
+    changed
 }
 
 /// Step 5: `replace_declared_cases`, the whole case-normalization engine.
@@ -162,14 +216,10 @@ pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, Fo
                 if token.kind != TokenKind::Name {
                     continue;
                 }
-                let Some((line, span)) = source_span(group, statement, token) else {
-                    // A token crossing a physical continuation boundary is
-                    // intentionally left alone.  The lexical-join pass owns
-                    // that case and will make it safe on its next analysis.
+                let spans = source_spans(group, statement, token);
+                let Some(&(line, _)) = spans.first() else {
                     continue;
                 };
-                let line_start = cx.analysis.buffer.lines[line].span.start as usize;
-                let span = span.start - line_start..span.end - line_start;
                 let Some(replacement) = classify_spelling(
                     &tokens,
                     index,
@@ -181,8 +231,23 @@ pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, Fo
                 ) else {
                     continue;
                 };
-                if replacement.as_slice() != token.text {
-                    line_edits[line].push((span, replacement));
+                if replacement.as_slice() == token.text {
+                    continue;
+                }
+                // A token the author broke across a continuation is re-cased in
+                // place, one span per line, rather than skipped.  Skipping it
+                // was not a deferral: nothing rejoins the halves before step 16
+                // wraps the statement, so the spelling only settled once the
+                // wrap had put the token back together for the *next* run (I1).
+                let Some(pieces) = spread_replacement(&spans, token, &replacement) else {
+                    continue;
+                };
+                for (line, span, piece) in pieces {
+                    let line_start = cx.analysis.buffer.lines[line].span.start as usize;
+                    line_edits[line].push((
+                        span.start - line_start..span.end - line_start,
+                        piece.to_vec(),
+                    ));
                 }
             }
             if let Some(frame) = opening_frame {
@@ -217,18 +282,52 @@ pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, Fo
     Ok(changed)
 }
 
-/// Return the original physical line and byte span for a token in a logical
-/// statement.  `LogicalGroup` pieces preserve one-to-one byte provenance for
-/// all tokens that do not cross a continuation boundary.
-fn source_span(
+/// Return the original physical lines and byte spans a token occupies, in
+/// order.  A token the author broke across a continuation — `zer&` / `&o` —
+/// occupies one span per physical line; every other token occupies exactly one.
+///
+/// The group's joined text is concatenated from its pieces with nothing
+/// inserted between them, so intersecting a token's range with each piece
+/// recovers its provenance exactly.
+fn source_spans(
     group: &crate::source::LogicalGroup,
     statement: &crate::source::LogicalStatement,
     token: &Token<'_>,
-) -> Option<(usize, Range<usize>)> {
-    let (line, start) = group.source_of_statement(statement, token.span.start)?;
-    let (end_line, end) = group.source_of_statement(statement, token.span.end.checked_sub(1)?)?;
-    (line == end_line && end + 1 == start + token.text.len() as u32)
-        .then_some((line, start as usize..end as usize + 1))
+) -> Vec<(usize, Range<usize>)> {
+    let start = statement.offset + token.span.start;
+    let end = statement.offset + token.span.end;
+    let mut spans = Vec::new();
+    for piece in &group.pieces {
+        let lo = start.max(piece.text.start);
+        let hi = end.min(piece.text.end);
+        if lo >= hi {
+            continue;
+        }
+        let origin = piece.bytes.start as usize + (lo - piece.text.start);
+        spans.push((piece.line, origin..origin + (hi - lo)));
+    }
+    spans
+}
+
+/// Distribute a canonical spelling across the spans its token occupies.
+///
+/// Every spelling this module produces names the same identifier, so the
+/// replacement is the same length as the token and can be cut at the same
+/// offsets the continuation cut the token at.  A replacement of a different
+/// length has no such correspondence and is left alone; none is produced today.
+fn spread_replacement<'a>(
+    spans: &'a [(usize, Range<usize>)],
+    token: &Token<'_>,
+    replacement: &'a [u8],
+) -> Option<impl Iterator<Item = (usize, Range<usize>, &'a [u8])> + 'a> {
+    (replacement.len() == token.text.len()).then(|| {
+        let mut taken = 0;
+        spans.iter().map(move |(line, span)| {
+            let piece = &replacement[taken..taken + span.len()];
+            taken += span.len();
+            (*line, span.clone(), piece)
+        })
+    })
 }
 
 /// Classify one identifier occurrence and return its canonical spelling.

@@ -198,11 +198,10 @@ fn reflow_with_context_inner(
     // `--align-paren` in agreement with the pass that will actually place the
     // text; the engine emits one line per physical line.
     //
-    // *Whether* a statement overruns is asked of this layout only, and never
-    // of a later round's: a round measures the lines the round before it
-    // emitted, and those are already broken and so already short.  Asking them
-    // would answer "nothing overruns", unwrap the file, and ask again — the
-    // decisions oscillate with a period of two and never settle.
+    // The authored document laid out, kept for the OpenMP directive path, which
+    // asks about the group's *authored* lines and so needs a measurement that
+    // does not advance with the rounds.  Statements are asked about the round's
+    // own layout instead; see `needs_reflow`.
     let mut unwrapped =
         Document::from_bytes(&engine::format(&document.to_lf_bytes(), config)?.bytes);
     crate::transform::passes::layout_post::declaration_separator_alignment(&mut unwrapped, config)?;
@@ -214,6 +213,38 @@ fn reflow_with_context_inner(
         .iter()
         .map(|group| group.lines.clone())
         .collect();
+    // Which groups the discovery below is even allowed to flag: the rest reach
+    // `emit_group` only to be copied, so flagging them would claim progress
+    // that no round can act on.  None of these conditions depends on the
+    // round, so they are settled once.
+    let wrappable: Vec<bool> = analysis
+        .groups
+        .iter()
+        .zip(&plans)
+        .map(|(group, plan)| {
+            matches!(plan.body, PlanBody::Code { .. })
+                && join_openmp_directive(document, group).is_none()
+                && eligible(&analysis.buffer, group)
+                && group.statements.len() == 1
+        })
+        .collect();
+    // *Whether* a statement overruns is asked afresh of every round's layout,
+    // but the answer only ever accumulates.  Both halves are load-bearing.
+    //
+    // Asking every round is what finds the statement that fits until some
+    // *other* group is wrapped: breaking one member of a `::` alignment block
+    // re-partitions it and widens the survivors, and the first layout has no
+    // way to know that.  Left undiscovered, the next whole run reads the
+    // widened line, wraps it, and I1 fails.
+    //
+    // Never retracting is what stops that from oscillating.  A round measures
+    // the lines the round before it emitted, and a group that was wrapped is
+    // now a set of short lines: recomputed from scratch its answer would be
+    // "fits", the wrapper would take its own break away, the round after would
+    // find the long line again, and the decisions would flip with a period of
+    // two forever.  Sticky, the sequence is monotone in a finite set and
+    // therefore settles.
+    let mut needs_reflow = vec![false; analysis.groups.len()];
     let mut measured = document.to_lf_bytes();
     let mut emitted: Option<(Vec<Vec<u8>>, ReflowResult)> = None;
 
@@ -235,10 +266,24 @@ fn reflow_with_context_inner(
         // decision — but it must still be measured, or the wrapper sizes lines
         // against an authored gap that is about to be compressed away.
         crate::transform::passes::layout_post::trailing_comment_alignment(&mut laid_out, config)?;
+        // Discovery.  On the first round `laid_out` is the authored document
+        // laid out, so this reproduces the plain "an authored physical line
+        // overruns" gate exactly; from the second round on it is the previous
+        // round's output, which is where a statement widened by someone else's
+        // wrap turns up.
+        for (ordinal, span) in spans.iter().enumerate() {
+            if !wrappable[ordinal] || needs_reflow[ordinal] {
+                continue;
+            }
+            needs_reflow[ordinal] = span
+                .clone()
+                .any(|line| laid_out.lines.get(line).map_or(0, Vec::len) > config.wrap.line_length);
+        }
         // One group's emitted lines, plus the decline to report for it. Built
         // as its own list so a group's output can be located in the result,
         // which is what lets the next round measure it.
-        let emit_group = |group: &LogicalGroup,
+        let emit_group = |ordinal: usize,
+                          group: &LogicalGroup,
                           plan: &GroupPlan,
                           span: &std::ops::Range<usize>|
          -> (Vec<Vec<u8>>, Option<(usize, Decline)>) {
@@ -301,14 +346,11 @@ fn reflow_with_context_inner(
                 return (out, None);
             }
             let index = group.lines.start;
-            let layout = ContinuationLayout {
-                first_indent,
-                continuation: first_indent.saturating_add(if config.indent_continuation {
-                    config.continuation_indent
-                } else {
-                    0
-                }),
-            };
+            let continuation = first_indent.saturating_add(if config.indent_continuation {
+                config.continuation_indent
+            } else {
+                0
+            });
             // Only the laid-out width decides.  The normalized line still carries
             // the authored indent and the authored `::` run, and both are about to
             // change: a declaration whose author lined its `::` up in a wide block
@@ -336,31 +378,59 @@ fn reflow_with_context_inner(
                 );
                 body = trim(&body).to_vec();
             }
-            // The gate is asked of the *physical* lines, which is what leaves an
-            // author's own breaks alone unless one of them overruns.  It is
-            // evaluated here rather than before the body is built only so that
-            // `body_as_emitted` below can share its answer; the predicate is
-            // unchanged.
-            //
-            // Widening it to also catch a declaration whose authored `::` run is
-            // wider than the emitted one — the remaining A1 case, where step 17
-            // re-forms the block and the emitted line is longer than the
-            // measured one — was tried and rejected: it treats every authored
-            // declaration alignment as a wrap candidate and changed 79 to 212
-            // OpenFAST files depending on profile.  A1 needs a predictor derived
-            // from the block partition step 16 will actually create, not from
-            // the gap shrinking.
-            let has_long_physical_line = group
-                .lines
-                .clone()
-                .any(|line| unwrapped_width(line) > config.wrap.line_length);
-            body = body_as_emitted(
-                body,
-                first_indent,
-                plan.remred,
-                has_long_physical_line,
-                config,
-            );
+            // A statement label is the layout engine's to place: it writes the
+            // digits in the left margin and then pads so the statement itself
+            // still starts on `first_indent`.  Both the label and the author's
+            // gap after it therefore cost the emitted line nothing, and a
+            // wrapper that measures them charges the statement for an indent it
+            // will not pay — `21` plus a nine-space gap made a 89-column line
+            // read as 100, and the break chosen against those phantom columns
+            // was not the one the next run, reading the emitted gap, chose.
+            // Split the label off, wrap the statement alone at the column the
+            // emitter will really start it on, and give the label back to the
+            // first physical line at the end.
+            let (label, first_body_column) = match crate::format::emitter::split_label(&body) {
+                Some((label, rest)) => {
+                    let label = label.to_vec();
+                    let column = crate::format::emitter::labelled_body_column(
+                        first_indent,
+                        label.len(),
+                        config,
+                    );
+                    body = rest.to_vec();
+                    (Some(label), column)
+                }
+                None => (None, first_indent),
+            };
+            // Only the *body* moves to the label's column.  The continuation
+            // indent and a detached comment are structural and stay where the
+            // planner put them, so a label can never drag the rest of the
+            // statement sideways.
+            let layout = ContinuationLayout {
+                first_indent: first_body_column,
+                continuation,
+            };
+            let with_label = |line: Vec<u8>| match &label {
+                Some(label) => {
+                    let mut out = Vec::with_capacity(label.len() + 1 + line.len());
+                    out.extend_from_slice(label);
+                    out.push(b' ');
+                    out.extend_from_slice(&line);
+                    out
+                }
+                None => line,
+            };
+            // The gate is asked of the lines the formatter is *going to emit*.
+            // On the first round those are the authored ones laid out, which is
+            // what leaves an author's own breaks alone unless one of them
+            // overruns; on every round after, they are the previous round's
+            // output, which is how a statement that only overruns once step 17
+            // has re-formed its alignment block gets discovered at all.  The
+            // flag is sticky (see `needs_reflow`), so a group that has been
+            // wrapped keeps its wrap instead of measuring its own short lines
+            // and unwrapping itself.
+            let has_long_physical_line = needs_reflow[ordinal];
+            body = body_as_emitted(body, plan.remred, has_long_physical_line, config);
             if !has_long_physical_line {
                 copy_group(document, group, &mut out);
                 return (out, None);
@@ -380,7 +450,7 @@ fn reflow_with_context_inner(
             // any other comment line — which is what makes it stable: forcing it
             // back to the statement indent afterwards disagreed with the engine
             // above a dedented `else if`, and the next run moved it.
-            let comment_indent = layout.first_indent;
+            let comment_indent = first_indent;
             let detached = detach_final_inline_comment(document, group, comment_indent);
             // Whatever step 17 is going to add around `::` has to be paid for
             // here, from the same budget: a break chosen against the unpadded text
@@ -390,18 +460,18 @@ fn reflow_with_context_inner(
                 .wrap
                 .line_length
                 .saturating_sub(declaration_separator_growth(&body));
-            if first_indent + body.len() <= budget {
+            if first_body_column + body.len() <= budget {
                 match detached {
                     Some(Some(comment)) => {
                         out.extend(comment);
                         if group.lines.len() > 1 {
-                            emit_joined_body(&mut out, &body, first_indent);
+                            emit_joined_body(&mut out, &with_label(body), first_indent);
                         } else {
                             copy_group_without_final_comment(document, group, &mut out);
                         }
                     }
                     Some(None) if group.lines.len() > 1 => {
-                        emit_joined_body(&mut out, &body, first_indent);
+                        emit_joined_body(&mut out, &with_label(body), first_indent);
                     }
                     _ => copy_group(document, group, &mut out),
                 }
@@ -413,9 +483,15 @@ fn reflow_with_context_inner(
             }
             let mut decline = None;
             match wrapping::wrap_body_with_alignment(&body, layout, budget, align) {
-                Ok(wrapped) => {
+                Ok(mut wrapped) => {
                     if let Some(comment) = detached.flatten() {
                         out.extend(comment);
+                    }
+                    // The label goes back on the first physical line with the
+                    // single space that keeps it a label; the engine still owns
+                    // the gap it is finally written with.
+                    if let Some(first) = wrapped.first_mut() {
+                        *first = with_label(std::mem::take(first));
                     }
                     out.extend(wrapped)
                 }
@@ -435,9 +511,11 @@ fn reflow_with_context_inner(
         let mut lines: Vec<Vec<u8>> = Vec::with_capacity(document.lines.len());
         let mut declined = Vec::new();
         let mut next_spans = Vec::with_capacity(analysis.groups.len());
-        for ((group, plan), span) in analysis.groups.iter().zip(&plans).zip(&spans) {
+        for (ordinal, ((group, plan), span)) in
+            analysis.groups.iter().zip(&plans).zip(&spans).enumerate()
+        {
             let start = lines.len();
-            let (out, decline) = emit_group(group, plan, span);
+            let (out, decline) = emit_group(ordinal, group, plan, span);
             lines.extend(out);
             if let Some(decline) = decline {
                 declined.push(decline);
@@ -719,13 +797,15 @@ fn reindent(line: &[u8], indent: usize) -> Vec<u8> {
 }
 
 /// Project the statement text onto the whitespace the layout emitter will
-/// write before the wrapper measures it.  The emitter owns both reductions:
-/// `--ws-remred` is applied per physical line and labels are given their
-/// target-column gap there, so the logical statement cannot be measured from
-/// its authored bytes when either policy changes its width.
+/// write before the wrapper measures it: `--ws-remred` is applied per physical
+/// line at emit time, so a statement whose author padded it internally cannot
+/// be measured from its authored bytes.
+///
+/// The caller has already taken any statement label off the front, which is
+/// the order the emitter uses too — it splits the label and then reduces only
+/// the body after it.
 fn body_as_emitted(
     mut body: Vec<u8>,
-    first_indent: usize,
     remred: bool,
     project: bool,
     config: &FormatConfig,
@@ -742,7 +822,6 @@ fn body_as_emitted(
         );
         body = reduced;
     }
-    let _ = first_indent;
     body
 }
 
