@@ -9,13 +9,13 @@
 //! 4. `normalize_delimiter_spacing`;
 //! 5. `normalize_comment_spacing`.
 //!
-//! The chain is exposed twice on purpose. [`run`] applies it to the document,
-//! and [`respace_joined`] applies rules 1, 2 and 4 to a statement the wrapper
-//! has just rejoined.
+//! [`run`] applies the physical-line chain to the document, while
+//! [`respace_joined`] deliberately enables only rules 1, 2 and 4 for a
+//! statement the wrapper has rejoined. Both paths go through the same internal
+//! sequencer so the order has one definition.
 
 mod common;
 
-pub(crate) use common::{case::is_end_construct_keyword, comment_spacing::is_directive_comment};
 pub use common::{
     case::lowercase_line, comment_spacing::normalize_comment_spacing,
     delimiter_spacing::normalize_delimiter_spacing, is_protected,
@@ -37,31 +37,102 @@ use crate::{
     },
 };
 
-#[derive(Clone, Copy, Default)]
-struct LineOptions<'a> {
+/// Immutable facts about the line currently passing through the rule chain.
+///
+/// These are deliberately separated from [`LineState`]: a stage may inspect
+/// context, but only `run` advances continuation state between physical lines.
+#[derive(Clone, Default)]
+struct LineContext {
     preserve_comment_after: bool,
     continued_statement: bool,
     continued_infix: bool,
     continued_declaration: bool,
     continued_named_parameter: bool,
     continued_bind_parameter: bool,
-    open_groups: &'a [bool],
+    open_groups: Vec<bool>,
     continued_format: bool,
     continued_initializer: bool,
+    preserve_identifier_case: bool,
+}
+
+/// State carried from one physical line to the next while step 11 runs.
+#[derive(Default)]
+struct LineState {
+    lex: LexState,
+    continued_statement: bool,
+    continued_infix: bool,
+    continued_openmp_infix: bool,
+    continued_named_parameter: bool,
+    continued_bind_parameter: bool,
+    open_groups: Vec<bool>,
+    entity_list: EntityListCursor,
+}
+
+impl LineState {
+    fn context(&self, document: &Document, index: usize, cx: &PassContext) -> LineContext {
+        let preserve_comment_after =
+            common::comment_spacing::preserve_full_comment_spacing(document, index, cx);
+        let first_statement_tokens = || {
+            cx.analysis
+                .group_of_line(index)
+                .and_then(|group| group.statements.first())
+                .map(|statement| crate::source::tokens::tokens(&statement.text))
+        };
+        let continued_declaration = self.continued_statement
+            && first_statement_tokens()
+                .is_some_and(|tokens| common::is_declaration_statement(&tokens));
+        let continued_format = self.continued_statement
+            && first_statement_tokens().is_some_and(|tokens| common::is_format_statement(&tokens));
+
+        LineContext {
+            preserve_comment_after,
+            continued_statement: self.continued_statement,
+            continued_infix: self.continued_infix,
+            continued_declaration,
+            continued_named_parameter: self.continued_named_parameter,
+            continued_bind_parameter: self.continued_bind_parameter,
+            open_groups: self.open_groups.clone(),
+            continued_format,
+            continued_initializer: self.entity_list.initializer,
+            preserve_identifier_case: false,
+        }
+    }
+
+    fn reset_statement(&mut self) {
+        self.lex = LexState::default();
+        self.continued_statement = false;
+        self.continued_infix = false;
+        self.continued_named_parameter = false;
+        self.continued_bind_parameter = false;
+        self.open_groups.clear();
+        self.entity_list = EntityListCursor::default();
+    }
+
+    fn advance(&mut self, code: &[u8], cx: &PassContext, line_index: usize) {
+        self.continued_statement = trailing_ampersand(code);
+        self.continued_infix = trailing_continuation_operand(code);
+        self.continued_named_parameter = self.continued_statement && is_call_group(cx, line_index);
+        self.continued_bind_parameter = self.continued_statement && is_bind_group(cx, line_index);
+        self.entity_list.advance(code, self.open_groups.len());
+        fold_open_groups(code, &mut self.open_groups);
+        if !self.continued_statement {
+            self.open_groups.clear();
+            self.entity_list = EntityListCursor::default();
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RuleMode<'a> {
+    Physical(&'a LineContext),
+    Rejoined,
 }
 
 /// Apply the whole chain to every line of the document.
 pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
     let mut changed = Changed::No;
     let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
-    let mut state = LexState::default();
-    let mut continued_statement = false;
-    let mut continued_infix = false;
-    let mut continued_openmp_infix = false;
-    let mut continued_named_parameter = false;
-    let mut continued_bind_parameter = false;
-    let mut open_groups: Vec<bool> = Vec::new();
-    let mut entity_list = EntityListCursor::default();
+    let mut state = LineState::default();
 
     for index in 0..document.lines.len() {
         let kind = cx
@@ -73,16 +144,17 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             .unwrap_or(PhysicalLineKind::Code);
 
         if let Some(body_start) = openmp_clause_body_start(&document.lines[index]) {
-            let body = apply_with_options(
+            let context = LineContext {
+                continued_infix: state.continued_openmp_infix,
+                ..LineContext::default()
+            };
+            let body = apply_rules(
                 &document.lines[index][body_start..],
                 cx,
                 &declared_names,
                 index,
                 &mut LexState::default(),
-                LineOptions {
-                    continued_infix: continued_openmp_infix,
-                    ..LineOptions::default()
-                },
+                RuleMode::Physical(&context),
             );
             let mut rebuilt = document.lines[index][..body_start].to_vec();
             rebuilt.extend_from_slice(&body);
@@ -90,60 +162,28 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 document.lines[index] = rebuilt;
                 changed = changed.or(Changed::Text);
             }
-            continued_openmp_infix = trailing_continuation_operand(&body);
-            state = LexState::default();
-            continued_statement = false;
-            continued_infix = false;
-            continued_named_parameter = false;
-            continued_bind_parameter = false;
-            open_groups.clear();
-            entity_list = EntityListCursor::default();
+            state.continued_openmp_infix = trailing_continuation_operand(&body);
+            state.reset_statement();
             continue;
         }
 
-        continued_openmp_infix = false;
+        // A normal physical line cannot continue an expression through a
+        // conditional-compilation sentinel; only adjacent `!$` body lines
+        // share this state.
+        state.continued_openmp_infix = false;
         if kind == PhysicalLineKind::Preprocessor {
-            state = LexState::default();
-            continued_statement = false;
-            continued_infix = false;
-            continued_named_parameter = false;
-            continued_bind_parameter = false;
-            open_groups.clear();
-            entity_list = EntityListCursor::default();
+            state.reset_statement();
             continue;
         }
 
-        let preserve_comment_after =
-            common::comment_spacing::preserve_full_comment_spacing(document, index, cx);
-        let first_statement_tokens = || {
-            cx.analysis
-                .group_of_line(index)
-                .and_then(|group| group.statements.first())
-                .map(|statement| crate::source::tokens::tokens(&statement.text))
-        };
-        let continued_declaration = continued_statement
-            && first_statement_tokens()
-                .is_some_and(|tokens| common::is_declaration_statement(&tokens));
-        let continued_format = continued_statement
-            && first_statement_tokens().is_some_and(|tokens| common::is_format_statement(&tokens));
-
-        let line = apply_with_options(
+        let context = state.context(document, index, cx);
+        let line = apply_rules(
             &document.lines[index],
             cx,
             &declared_names,
             index,
-            &mut state,
-            LineOptions {
-                preserve_comment_after,
-                continued_statement,
-                continued_infix,
-                continued_declaration,
-                continued_named_parameter,
-                continued_bind_parameter,
-                continued_format,
-                continued_initializer: entity_list.initializer,
-                open_groups: &open_groups,
-            },
+            &mut state.lex,
+            RuleMode::Physical(&context),
         );
 
         if let Some(physical) = cx.analysis.buffer.lines.get(index) {
@@ -151,17 +191,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 physical.kind,
                 PhysicalLineKind::Code | PhysicalLineKind::FindentFix
             ) {
-                let code = cx.analysis.buffer.code_bytes(physical);
-                continued_statement = trailing_ampersand(code);
-                continued_infix = trailing_continuation_operand(code);
-                continued_named_parameter = continued_statement && is_call_group(cx, index);
-                continued_bind_parameter = continued_statement && is_bind_group(cx, index);
-                entity_list.advance(code, open_groups.len());
-                fold_open_groups(code, &mut open_groups);
-                if !continued_statement {
-                    open_groups.clear();
-                    entity_list = EntityListCursor::default();
-                }
+                state.advance(cx.analysis.buffer.code_bytes(physical), cx, index);
             }
         }
 
@@ -218,25 +248,40 @@ pub fn apply(
     line_index: usize,
     state: &mut LexState,
 ) -> Vec<u8> {
-    apply_with_options(
+    let context = LineContext::default();
+    apply_rules(
         line,
         cx,
         declared_names,
         line_index,
         state,
-        LineOptions::default(),
+        RuleMode::Physical(&context),
     )
 }
 
-fn apply_with_options(
+/// The one definition of the line-rule sequence.
+///
+/// `RuleMode` controls which stages are enabled, but never their relative
+/// order. A physical line gets all five stages; a rejoined statement gets the
+/// deliberate 1/2/4 subset and then the joined named-argument cleanup.
+fn apply_rules(
     line: &[u8],
     cx: &PassContext,
     declared_names: &DeclaredNameIndex,
     line_index: usize,
     state: &mut LexState,
-    options: LineOptions<'_>,
+    mode: RuleMode<'_>,
 ) -> Vec<u8> {
     let incoming = *state;
+    let joined_context = LineContext {
+        preserve_identifier_case: cx.project.target_local_component_resolution,
+        ..LineContext::default()
+    };
+    let context = match mode {
+        RuleMode::Physical(context) => context,
+        RuleMode::Rejoined => &joined_context,
+    };
+    let physical = matches!(mode, RuleMode::Physical(_));
 
     // The stage order is an architectural invariant. Do not permute it.
     // 1. Case/operator normalization.
@@ -246,15 +291,7 @@ fn apply_with_options(
         declared_names,
         line_index,
         state,
-        options.continued_statement,
-        options.continued_infix,
-        options.continued_declaration,
-        options.continued_named_parameter,
-        options.continued_bind_parameter,
-        options.continued_format,
-        options.continued_initializer,
-        options.open_groups,
-        false,
+        context,
     );
     // 2. Keyword/layout spacing.
     text = common::keyword_spacing::normalize_keyword_spacing_with_state(
@@ -262,11 +299,11 @@ fn apply_with_options(
         declared_names,
         line_index,
         incoming,
-        options.continued_format,
+        context.continued_format,
         &cx.config.style,
     );
-    // 3. WRITE output spacing.
-    if cx.config.style.delimiter_spacing {
+    // 3. WRITE output spacing (physical lines only).
+    if physical && cx.config.style.delimiter_spacing {
         text =
             common::write_spacing::normalize_write_output_spacing_with_state(&text, cx, incoming);
     }
@@ -275,22 +312,30 @@ fn apply_with_options(
         &text,
         cx,
         incoming,
-        options.continued_statement,
+        context.continued_statement,
     );
-    // 5. Comment spacing.
-    let mut text = common::comment_spacing::normalize_comment_spacing_with_state(
-        &text,
-        cx,
-        incoming,
-        options.preserve_comment_after,
-        common::comment_spacing::code_span_len(&text) as isize
-            - common::comment_spacing::code_span_len(line) as isize,
-    );
-
-    if options.continued_statement && options.continued_named_parameter {
-        text = compact_continued_named_argument(&text, options.open_groups);
+    // 5. Comment spacing (physical lines only).
+    if physical {
+        text = common::comment_spacing::normalize_comment_spacing_with_state(
+            &text,
+            cx,
+            incoming,
+            context.preserve_comment_after,
+            common::comment_spacing::code_span_len(&text) as isize
+                - common::comment_spacing::code_span_len(line) as isize,
+        );
     }
-    text
+
+    match mode {
+        RuleMode::Physical(context) => {
+            if context.continued_statement && context.continued_named_parameter {
+                compact_continued_named_argument(&text, &context.open_groups)
+            } else {
+                text
+            }
+        }
+        RuleMode::Rejoined => compact_joined_named_arguments(&text),
+    }
 }
 
 /// Rules 1, 2 and 4 for a statement the wrapper has just joined.
@@ -300,39 +345,14 @@ pub fn respace_joined(
     declared_names: &DeclaredNameIndex,
     line_index: usize,
 ) -> Vec<u8> {
-    let mut state = LexState::default();
-    // Keep this sequence explicit for the same reason as `apply_with_options`.
-    let mut text = common::case::lowercase_line_with_context(
+    apply_rules(
         line,
         cx,
         declared_names,
         line_index,
-        &mut state,
-        false,
-        false,
-        false,
-        false,
-        false,
-        false,
-        false,
-        &[],
-        cx.project.target_local_component_resolution,
-    );
-    text = common::keyword_spacing::normalize_keyword_spacing_with_state(
-        &text,
-        declared_names,
-        line_index,
-        LexState::default(),
-        false,
-        &cx.config.style,
-    );
-    text = common::delimiter_spacing::normalize_delimiter_spacing_with_state(
-        &text,
-        cx,
-        LexState::default(),
-        false,
-    );
-    compact_joined_named_arguments(&text)
+        &mut LexState::default(),
+        RuleMode::Rejoined,
+    )
 }
 
 fn compact_joined_named_arguments(line: &[u8]) -> Vec<u8> {

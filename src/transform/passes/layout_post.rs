@@ -175,7 +175,7 @@ fn trailing_comment_info(line: &[u8]) -> Option<(usize, usize, usize)> {
     let start = comment_start(line)?;
     let comment = &line[start..];
     if comment.starts_with(b"!!")
-        || crate::transform::passes::line_rules::is_directive_comment(comment)
+        || crate::source::syntax::is_directive_comment(comment)
         || comment[1..].iter().all(u8::is_ascii_whitespace)
     {
         return None;

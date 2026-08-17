@@ -1,4 +1,5 @@
 use super::*;
+use crate::source::syntax::is_directive_comment;
 
 /// Rule 5: comment marker spacing and commented-out assignments.
 ///
@@ -122,19 +123,6 @@ pub(crate) fn preserve_full_comment_spacing(
         .get(index + 1)
         .is_some_and(|line| is_full_comment(line));
     previous || next
-}
-
-pub(crate) fn is_directive_comment(comment: &[u8]) -> bool {
-    if comment.len() < 2 || comment[0] != b'!' {
-        return false;
-    }
-    if comment[1] == b'$' {
-        return true;
-    }
-    [b"dir$".as_slice(), b"dec$", b"gcc$"].iter().any(|prefix| {
-        comment[1..].len() >= prefix.len()
-            && comment[1..1 + prefix.len()].eq_ignore_ascii_case(prefix)
-    })
 }
 
 fn is_commented_assignment(comment: &[u8]) -> bool {

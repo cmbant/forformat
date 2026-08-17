@@ -1,4 +1,5 @@
 use super::*;
+use crate::source::syntax::is_end_construct_keyword;
 
 /// Rule 1: keyword case, and the case decisions the project agreed on.
 ///
@@ -18,39 +19,23 @@ pub fn lowercase_line(
         declared_names,
         line_index,
         state,
-        false,
-        false,
-        false,
-        false,
-        false,
-        false,
-        false,
-        &[],
-        false,
+        &super::super::LineContext::default(),
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn lowercase_line_with_context(
+pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
     line: &[u8],
     cx: &PassContext,
     declared_names: &DeclaredNameIndex,
     line_index: usize,
     state: &mut LexState,
-    continued_statement: bool,
-    continued_infix: bool,
-    continued_declaration: bool,
-    continued_named_parameter: bool,
-    continued_bind_parameter: bool,
-    continued_format: bool,
-    continued_initializer: bool,
-    open_groups: &[bool],
-    preserve_identifier_case: bool,
+    context: &super::super::LineContext,
 ) -> Vec<u8> {
     let tokens = tokenize(line, state);
-    let inside_paren = inside_paren_at(open_groups, &tokens);
-    let continued_entity_list =
-        continued_declaration && open_groups.is_empty() && !continued_initializer;
+    let inside_paren = inside_paren_at(&context.open_groups, &tokens);
+    let continued_entity_list = context.continued_declaration
+        && context.open_groups.is_empty()
+        && !context.continued_initializer;
     let mut edits = EditBuffer::new(line);
     let mut spacing = OperatorSpacing::default();
     for (index, token) in tokens.iter().enumerate() {
@@ -91,14 +76,15 @@ pub(crate) fn lowercase_line_with_context(
             }
             TokenKind::Operator => {
                 if !is_labelled_format_statement(&tokens)
-                    && !continued_format
+                    && !context.continued_format
                     && is_spaced_operator_token(line, &tokens, index, token)
                 {
                     let named = token.text == b"="
                         && (is_named_parameter_token(&tokens, index)
-                            || continued_statement
-                                && (!continued_declaration && continued_named_parameter
-                                    || continued_bind_parameter)
+                            || context.continued_statement
+                                && (!context.continued_declaration
+                                    && context.continued_named_parameter
+                                    || context.continued_bind_parameter)
                                 && is_continued_named_parameter(
                                     &tokens,
                                     index,
@@ -107,12 +93,12 @@ pub(crate) fn lowercase_line_with_context(
                     add_operator_edit(line, &mut edits, token, token.text, !named, &mut spacing);
                     spacing.previous_compact_named = named;
                 } else if !is_labelled_format_statement(&tokens)
-                    && !continued_format
+                    && !context.continued_format
                     && is_arithmetic_operator(token.text)
                 {
                     if !is_io_specifier_star(&tokens, index, token)
                         && (is_binary_arithmetic_operator(line, token.span.start, token.text)
-                            || continued_infix
+                            || context.continued_infix
                                 && is_leading_continuation_arithmetic(&tokens, index, token))
                     {
                         let declaration_star = is_declaration_type_star(&tokens, index, token.text);
@@ -134,7 +120,7 @@ pub(crate) fn lowercase_line_with_context(
                 }
             }
             TokenKind::Name => {
-                if preserve_identifier_case && index > 0 && tokens[index - 1].text == b"%" {
+                if context.preserve_identifier_case && index > 0 && tokens[index - 1].text == b"%" {
                     continue;
                 }
                 if index > 0 && tokens[index - 1].text == b"%" {
@@ -193,46 +179,6 @@ pub(crate) fn lowercase_line_with_context(
         }
     }
     edits.finish()
-}
-
-pub(crate) fn is_end_construct_keyword(tokens: &[crate::source::Token], index: usize) -> bool {
-    if !tokens[index].is_name(b"end") {
-        return false;
-    }
-    let Some(first) = tokens.iter().position(|t| t.kind != TokenKind::Number) else {
-        return false;
-    };
-    if index != first {
-        return false;
-    }
-    match tokens.get(first + 1) {
-        None => true,
-        Some(next) => matches!(
-            next.text.to_ascii_lowercase().as_slice(),
-            b"do"
-                | b"if"
-                | b"where"
-                | b"forall"
-                | b"select"
-                | b"associate"
-                | b"block"
-                | b"critical"
-                | b"type"
-                | b"interface"
-                | b"enum"
-                | b"function"
-                | b"subroutine"
-                | b"program"
-                | b"module"
-                | b"submodule"
-                | b"procedure"
-                | b"blockdata"
-                | b"team"
-                | b"structure"
-                | b"union"
-                | b"map"
-        ),
-    }
 }
 
 fn keyword_in_context(tokens: &[crate::source::Token], index: usize) -> bool {

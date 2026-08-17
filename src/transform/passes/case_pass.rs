@@ -354,8 +354,8 @@ fn classify_spelling(
     // named `end`. Letting the declared-case engine govern it here would
     // fight with keyword-case on every later pass, since re-tokenizing its
     // own output feeds this same token straight back in (I1).
-    if super::line_rules::is_end_construct_keyword(tokens, index)
-        || (index > 0 && super::line_rules::is_end_construct_keyword(tokens, index - 1))
+    if crate::source::syntax::is_end_construct_keyword(tokens, index)
+        || (index > 0 && crate::source::syntax::is_end_construct_keyword(tokens, index - 1))
     {
         return None;
     }
