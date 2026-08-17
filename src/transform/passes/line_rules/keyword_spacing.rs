@@ -19,7 +19,7 @@ pub fn normalize_keyword_spacing(
     )
 }
 
-pub(super) fn normalize_keyword_spacing_with_state(
+pub(crate) fn normalize_keyword_spacing_with_state(
     line: &[u8],
     declared_names: &DeclaredNameIndex,
     line_index: usize,
