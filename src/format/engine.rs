@@ -7,7 +7,7 @@ use super::{
     planner::{GroupPlan, PlanBody, Planner},
 };
 use crate::{
-    config::FormatConfig,
+    config::{FormatConfig, FormatMode},
     error::FormatError,
     source::{LogicalGroup, PhysicalLineKind, SourceBuffer},
     FormatMeta, FormatResult,
@@ -175,6 +175,13 @@ pub fn emit_group<W: Write>(
                 } else {
                     paren_state.as_ref().and_then(ParenAlignmentState::current)
                 };
+                // The alignment scan below has to see the same bytes the
+                // emitter is about to write, including whatever `--ws-remred`
+                // does to this line's internal whitespace. Snapshot the
+                // string-quote state the write path is about to consume so
+                // the scan's own reduction pass agrees with it, without
+                // letting that scan advance the real one.
+                let remred_quote = quote;
                 if is_pre {
                     emit_line_to_with_quote(
                         buf,
@@ -223,7 +230,8 @@ pub fn emit_group<W: Write>(
                             first,
                             this_align,
                             *group_first_cont,
-                            config,
+                            &style,
+                            remred_quote,
                         );
                     }
                 }
@@ -248,8 +256,10 @@ fn advance_alignment(
     first: bool,
     this_align: Option<usize>,
     group_first_cont: bool,
-    config: &FormatConfig,
+    style: &EmitStyle,
+    remred_quote: u8,
 ) {
+    let config = style.config;
     let line = &buf.lines[index];
     let mut scan_target = if first {
         first_indent
@@ -295,6 +305,29 @@ fn advance_alignment(
             };
         }
     }
+    // `paren_state` tracks columns of the bytes the emitter actually writes.
+    // `write_body` collapses redundant internal whitespace under
+    // `--ws-remred` before those bytes reach `out`, so a padded source line
+    // (`pars(      1:    100)=(/&`) would otherwise be scanned at its
+    // *authored* column and disagree with the shorter column `write_body`
+    // lands on, moving the alignment out from under the continuation it
+    // targets. Mirror that same reduction here so the scan and the write
+    // agree on where every byte ends up.
+    let mut reduced = Vec::new();
+    let scan_line: &[u8] = if style.remred {
+        let alignment_runs_after = config.mode == FormatMode::Full;
+        let mut quote = remred_quote;
+        crate::transform::whitespace::reduce_line_into_protected(
+            scan_line,
+            &mut quote,
+            alignment_runs_after && config.align_declarations,
+            alignment_runs_after && config.align_comments,
+            &mut |byte| reduced.push(byte),
+        );
+        &reduced
+    } else {
+        scan_line
+    };
     paren_state.scan(scan_line, scan_target);
 }
 

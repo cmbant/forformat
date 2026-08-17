@@ -117,30 +117,32 @@ impl LogicalGroup {
             let mut j = i + 1;
             let mut joined = Vec::new();
             let mut pieces = Vec::new();
-            let mut push =
-                |line_index: usize, origin: u32, fragment: &[u8], range: Range<usize>| {
-                    if range.is_empty() {
-                        return;
-                    }
-                    let text = joined.len()..joined.len() + range.len();
-                    joined.extend_from_slice(&fragment[range.clone()]);
-                    pieces.push(SourcePiece {
-                        text,
-                        line: line_index,
-                        bytes: origin + range.start as u32..origin + range.end as u32,
-                    });
-                };
+            let mut push = |line_index: usize,
+                            origin: u32,
+                            fragment: &[u8],
+                            range: Range<usize>,
+                            leading_space: bool| {
+                if range.is_empty() {
+                    return;
+                }
+                if leading_space {
+                    joined.push(b' ');
+                }
+                let text = joined.len()..joined.len() + range.len();
+                joined.extend_from_slice(&fragment[range.clone()]);
+                pieces.push(SourcePiece {
+                    text,
+                    line: line_index,
+                    bytes: origin + range.start as u32..origin + range.end as u32,
+                });
+            };
             if first.kind == PhysicalLineKind::FindentFix {
                 let line = buf.line_bytes(first);
-                push(i, first.span.start, line, 0..line.len());
+                push(i, first.span.start, line, 0..line.len(), false);
             } else {
                 let code = buf.code_bytes(first);
-                push(
-                    i,
-                    first.code_span.start,
-                    code,
-                    normalized_fragment(code, false),
-                );
+                let (range, _) = normalized_fragment(code, false);
+                push(i, first.code_span.start, code, range, false);
             }
             let mut more = trailing_amp(buf.code_bytes(first));
             while more && j < buf.lines.len() {
@@ -158,7 +160,13 @@ impl LogicalGroup {
                     continue;
                 }
                 let s = buf.code_bytes(l);
-                push(j, l.code_span.start, s, normalized_fragment(s, true));
+                // Per the continuation rule, a continuation line without a
+                // leading `&` joins as if a blank separated it from the prior
+                // line; only a leading `&` licenses splicing a token in two.
+                // Losing that blank glues the last word of one line to the
+                // first word of the next into a single bogus token.
+                let (range, had_marker) = normalized_fragment(s, true);
+                push(j, l.code_span.start, s, range, !had_marker);
                 more = trailing_amp(s);
                 j += 1;
             }
@@ -215,13 +223,15 @@ fn trailing_directive(s: &[u8], continuation: u8) -> bool {
 /// bytes remain in `SourceBuffer` for emission; this only removes syntax that
 /// joins physical lines so recognizers see the same statement a Fortran reader
 /// sees.
-fn normalized_fragment(s: &[u8], continuation_line: bool) -> Range<usize> {
+fn normalized_fragment(s: &[u8], continuation_line: bool) -> (Range<usize>, bool) {
     let mut start = 0;
     while start < s.len() && (s[start] == b' ' || s[start] == b'\t') {
         start += 1;
     }
+    let mut had_marker = false;
     if continuation_line && s.get(start) == Some(&b'&') {
         start += 1;
+        had_marker = true;
     }
     let mut end = s.len();
     while end > start && s[end - 1].is_ascii_whitespace() {
@@ -230,7 +240,7 @@ fn normalized_fragment(s: &[u8], continuation_line: bool) -> Range<usize> {
     if end > start && s[end - 1] == b'&' {
         end -= 1;
     }
-    start..end
+    (start..end, had_marker)
 }
 
 fn fix_payload(s: &[u8]) -> Range<usize> {
@@ -283,6 +293,19 @@ x = 1
         assert_eq!(groups[0].lines, 0..6);
         assert_eq!(groups[0].statements.len(), 1);
         assert_eq!(groups[0].statements[0].text, b"x = a  b  c");
+    }
+
+    #[test]
+    fn a_continuation_line_without_a_leading_marker_joins_with_a_blank() {
+        // Per the continuation rule, omitting the leading `&` on a
+        // continuation line means the two lines join as if a blank
+        // separated them. Losing that blank glues the last word of one line
+        // to the first word of the next into a single bogus token — the
+        // root cause behind `END DO&` / unmarked construct name being
+        // misread as one token and losing the `END`-construct guard.
+        let buffer = SourceBuffer::new(b"end do&\nloop\n").unwrap();
+        let groups = LogicalGroup::assemble(&buffer);
+        assert_eq!(groups[0].statements[0].text, b"end do loop");
     }
 
     #[test]

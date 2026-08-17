@@ -910,6 +910,56 @@ end module m
 }
 
 #[test]
+fn paren_alignment_tracks_the_column_ws_remred_actually_writes() {
+    // Reduced from Q-E `dft-d3/pars.f90` under `findent-layout-deep`. The
+    // opener's subscript is padded (`pars(      1:    100)=(/&`), so
+    // `--ws-remred` shortens it by three columns when the line is written.
+    // `ParenAlignmentState::scan` used to measure the opener's column from
+    // the source bytes before that collapse, so the continuation aligned to
+    // a column the opener no longer occupied and the next pass, reading its
+    // own already-collapsed output, landed the continuation three columns to
+    // the left — an I1 failure.
+    let source = "\
+program p
+  real :: pars(100)
+contains
+  subroutine init_pars()
+
+    pars(      1:    100)=(/&
+        & 0.30267000d+01,0.100d+01,0.100d+01,0.91180000d+00,0.91180000d+00&
+        &,0.20835000d+01,0.200d+01,0.100d+01,0.00000000d+00,0.91180000d+00&
+        &/)
+  end subroutine init_pars
+end program p
+";
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        indent: 8,
+        start_indent: 2,
+        indent_continuation: true,
+        continuation_indent: 6,
+        indent_ampersand: true,
+        align_paren: true,
+        align_paren_value: 4,
+        ws_remred: true,
+        ws_remred_value: 1,
+        align_declarations: true,
+        align_comments: true,
+        contains_restart: true,
+        openmp: true,
+        max_indent: 32,
+        ..FormatConfig::default()
+    };
+    let once = format_source(source.as_bytes(), &config).unwrap().bytes;
+    let twice = format_source(&once, &config).unwrap().bytes;
+    assert_eq!(
+        String::from_utf8_lossy(&once),
+        String::from_utf8_lossy(&twice),
+        "paren alignment disagreed with the ws-remred-collapsed column it targets"
+    );
+}
+
+#[test]
 fn a_declaration_entity_after_an_array_constructor_is_not_a_named_argument() {
     // Reduced from CP2K. The continuation line carries no statement context, so
     // `, b =` after a closing `]` looked like a keyword argument and was
