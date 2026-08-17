@@ -3,7 +3,7 @@
 [![CI](https://github.com/cmbant/forformat/actions/workflows/ci.yml/badge.svg)](https://github.com/cmbant/forformat/actions/workflows/ci.yml)
 
 `forformat` is a standalone formatter for free-form Fortran. Its native implementation is written
-in Rust and provides findent-compatible indentation together with an optional full-format mode for
+in Rust and provides findent-compatible indentation together with a full-format mode for
 lexical normalization and wrapping long statements. Source suffix matching is case-insensitive,
 so legacy `.F` and `.F90` spellings are accepted for free-form code that is preprocessed at build
 time. Genuine fixed-form sources are detected and skipped unchanged; use `-ifree` when a source
@@ -143,9 +143,10 @@ The default is `--full`. The main modes are:
 - `--indent-only`: indentation and trailing-horizontal-whitespace handling compatible with findent.
 - `--normalize-only`: lexical normalization without structural layout.
 
-Run `forformat --help` for indentation controls, wrapping options, preprocessor definitions, and
-the complete compatibility option set. Fixed-form Fortran and automatic format detection are not
-supported.
+Run `forformat --help` for the common indentation controls, wrapping options, preprocessor
+definitions, and compatibility options. Fixed-form sources are detected and skipped unchanged by
+default; use `-ifree` or `--input-format=free` to force free-form handling, or
+`--query-format` to report the detected form. Fixed-form output is unsupported.
 
 ### Formatting options
 

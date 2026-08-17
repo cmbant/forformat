@@ -1062,22 +1062,31 @@ fn set_construct(c: &mut FormatConfig, n: &str, v: usize) -> Result<(), FormatEr
 }
 
 pub fn usage() -> &'static str {
-    "Usage: forformat [OPTIONS] < input > output\n\n\
+    "Usage: forformat [OPTIONS] [PATH ...]\n\n\
 Free-form Fortran formatter.\n\
+With no paths, read from stdin and write to stdout. Use --stdin and --stdout\n\
+to make the stream direction explicit.\n\
 \x20\x20-i<n>, --indent=<n>                 global indentation (default 3)\n\
 \x20\x20-i-, --indent=none                  leave indentation unchanged\n\
 \x20\x20-I<n>, --start-indent=<n>           starting indentation\n\
 \x20\x20-Ia, --start-indent=a               infer starting indentation\n\
 \x20\x20-M<n>, --max-indent=<n>             maximum indentation (0 = unlimited)\n\
+\x20\x20-a/-b/-c/-d/-e/-E/-f/-F/-j/-m/-r/-s/-t/-w/-x\n\
+\x20\x20per-construct indentation (or use --indent-<construct>)\n\
+\x20\x20--indent-contains=<n|restart>       CONTAINS indentation policy\n\
 \x20\x20-k<n>, --indent-continuation=<n>    continuation indentation\n\
 \x20\x20-K, --indent-ampersand[=<BOOL>]     indent leading continuation ampersands\n\
 \x20\x20--align-paren[=<n>]                align continuation lines at parentheses\n\
 \x20\x20--include-left=<BOOL>              put INCLUDE at the starting indent\n\
+\x20\x20--label-left=<BOOL>                put statement labels at the left margin\n\
+\x20\x20--openmp=<BOOL>                    recognize OpenMP free-form sentinels\n\
 \x20\x20-Rr, -RR, --refactor-end[=<BOOL>|upcase]  complete END definition statements\n\
+\x20\x20                                     (--refactor-procedures is an alias)\n\
 \x20\x20--ws-remred[=<n>]                  reduce redundant whitespace\n\
 \x20\x20--align-declarations=<BOOL>        shrink space to align `::` blocks (default 1)\n\
 \x20\x20--align-comments=<BOOL>            shrink space to align trailing comment blocks (default 0)\n\
-\x20\x20-lastindent, -lastusable           print query result instead of source\n\
+\x20\x20-lastindent, --last-indent          print the final indentation and exit\n\
+\x20\x20-lastusable, --last-usable          print the final usable indentation and exit\n\
 \x20\x20--query-format                     print free/fixed for each input and exit\n\
 \x20\x20--all-files [directory]             format this checkout's tracked sources; submodules are context only\n\
 \x20\x20<paths>, --all [directory]          format explicit files or all tracked sources recursively\n\
@@ -1090,7 +1099,7 @@ Free-form Fortran formatter.\n\
 \x20\x20--check                             exit 1 if selected files would change\n\
 \x20\x20--diff                              print unified diffs and exit 1 if changed\n\
 \x20\x20--show-files                        print selected files without formatting\n\
-\x20\x20--exclude=<glob>                    exclude tracked sources from --all-files, --all, and project scanning (repeatable)\n\
+\x20\x20--exclude=<glob>                    exclude matching sources from bulk targets and project scanning (repeatable)\n\
 \x20\x20--extend-exclude=<glob>             add to the exclusions instead of replacing them (repeatable)\n\
   Query modes cannot be combined with path-update, --check, or --diff.\n\
 \x20\x20--indent-only                      findent-compatible indentation only\n\
@@ -1099,7 +1108,7 @@ Free-form Fortran formatter.\n\
 \x20\x20--wrap[=<BOOL>], --no-wrap[=<BOOL>] reflow over-long statements (full mode)\n\
 \x20\x20--line-length=<n>                  wrapping budget (default 120)\n\
 \x20\x20--keyword-case=<lower|upper|preserve>\n\
-                                      recognized keyword case (default lower)\n\
+\x20\x20recognized keyword case (default lower)\n\
 \x20\x20--relational-symbols=<BOOL>        rewrite `.eq.` and friends as `==` (default true)\n\
 \x20\x20--array-brackets=<BOOL>            rewrite `(/ ... /)` as `[ ... ]` (default true)\n\
 \x20\x20--compact-multiplicative=<BOOL>    no spaces around binary `*`, `/`, `**` (default true)\n\
@@ -1116,6 +1125,7 @@ Free-form Fortran formatter.\n\
 \x20\x20-D NAME[=VALUE], --define=...      define a macro name (repeatable)\n\
 \x20\x20--uppercase-single-l[=<BOOL>]      uppercase a lone `l` used as a name\n\
 \x20\x20--config=<path>                    use a project TOML configuration explicitly\n\
+\x20\x20--input-format=<auto|free>          select automatic or forced free-form input  (default auto)\n\
 \x20\x20--no-config                        ignore project TOML configuration\n\
 \x20\x20-h, --help                         show this help\n\
 \x20\x20-v, --version                      show version\n\
@@ -1366,7 +1376,8 @@ mod tests {
 
     #[test]
     fn help_uses_compatibility_lastindent_spellings() {
-        assert!(usage().contains("  -lastindent, -lastusable"));
+        assert!(usage().contains("  -lastindent, --last-indent"));
+        assert!(usage().contains("  -lastusable, --last-usable"));
         assert!(!usage().contains("--lastindent, -lastusable"));
     }
 

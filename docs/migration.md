@@ -1,7 +1,7 @@
 # Migrating from findent 4.3.7
 
 The Rust binary keeps the stdin/stdout workflow and free-form structural indentation. The default
-is now `FormatMode::Full`: it retains findent-compatible indentation and adds lexical normalization
+is now `--full`: it retains findent-compatible indentation and adds lexical normalization
 and wrapping. Use `--indent-only` for the findent-compatible indentation contract, or spell
 `--full` explicitly when adopting the additions. `-ifree`, `-ofree`, and `-osame` remain accepted as
 free-form compatibility no-ops.

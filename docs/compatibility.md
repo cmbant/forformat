@@ -1,10 +1,10 @@
 # Rust formatter compatibility
 
-This crate formats free-form Fortran from stdin to stdout. The library core is byte-oriented and
-preserves source spelling and non-trailing body bytes while replacing leading indentation and
-trimming trailing spaces/tabs. A missing final line terminator is added using the terminator on the preceding
-physical line (LF for a one-line unterminated file); existing LF, CRLF, and mixed terminators are
-preserved.
+The formatter supports both stdin/stdout and path-based workflows for free-form Fortran. The
+library core is byte-oriented and preserves source spelling and non-trailing body bytes while
+replacing leading indentation and trimming trailing spaces/tabs. A missing final line terminator is
+added using the terminator on the preceding physical line (LF for a one-line unterminated file);
+existing LF, CRLF, and mixed terminators are preserved.
 
 Supported compatibility options include the global and per-construct indentation controls, start
 indent, continuation policies, labels, includes, OpenMP free-form sentinels, CPP branch snapshots,
