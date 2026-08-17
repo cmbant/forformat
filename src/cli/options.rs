@@ -134,11 +134,26 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "-i<n>, -i-, --indent=<n|none>",
         "global indentation (default 3)"
     ),
-    spec!(StartIndent, "start-indent", "-I<n|a>, --start-indent=<n|a>", "starting indentation"),
+    spec!(
+        StartIndent,
+        "start-indent",
+        "-I<n|a>, --start-indent=<n|a>",
+        "starting indentation"
+    ),
     spec!(IndentContains, "indent-contains"),
-    spec!(IncludeLeft, "include-left", "--include-left=<BOOL>", "put INCLUDE at the starting indent"),
+    spec!(
+        IncludeLeft,
+        "include-left",
+        "--include-left=<BOOL>",
+        "put INCLUDE at the starting indent"
+    ),
     spec!(LabelLeft, "label-left"),
-    spec!(MaxIndent, "max-indent", "-M<n>, --max-indent=<n>", "maximum indentation (0 = unlimited)"),
+    spec!(
+        MaxIndent,
+        "max-indent",
+        "-M<n>, --max-indent=<n>",
+        "maximum indentation (0 = unlimited)"
+    ),
     spec!(Openmp, "openmp"),
     spec!(
         IndentAmpersand,
@@ -152,54 +167,270 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "-k<n>, --indent-continuation=<n>",
         "continuation indentation"
     ),
-    spec!(AlignParen, "align-paren", "--align-paren[=<n>]", "align continuation lines at parentheses"),
-    spec!(WsRemred, "ws-remred", "--ws-remred[=<n>]", "reduce redundant whitespace"),
-    spec!(AlignDeclarations, "align-declarations", "--align-declarations=<BOOL>", "shrink space to align `::` blocks (default 1)"),
-    spec!(AlignComments, "align-comments", "--align-comments=<BOOL>", "shrink space to align trailing comment blocks (default 0)"),
-    spec!(LastIndent, "last-indent", "-lastindent, -lastusable", "print query result instead of source"),
+    spec!(
+        AlignParen,
+        "align-paren",
+        "--align-paren[=<n>]",
+        "align continuation lines at parentheses"
+    ),
+    spec!(
+        WsRemred,
+        "ws-remred",
+        "--ws-remred[=<n>]",
+        "reduce redundant whitespace"
+    ),
+    spec!(
+        AlignDeclarations,
+        "align-declarations",
+        "--align-declarations=<BOOL>",
+        "shrink space to align `::` blocks (default 1)"
+    ),
+    spec!(
+        AlignComments,
+        "align-comments",
+        "--align-comments=<BOOL>",
+        "shrink space to align trailing comment blocks (default 0)"
+    ),
+    spec!(
+        LastIndent,
+        "last-indent",
+        "-lastindent, -lastusable",
+        "print query result instead of source"
+    ),
     spec!(LastUsable, "last-usable"),
-    spec!(All, "all", "<paths>, --all [directory]", "format explicit files or all tracked sources recursively"),
-    spec!(AllFiles, "all-files", "--all-files [directory]", "format this checkout's tracked sources; submodules are context only"),
-    spec!(NoSubmodules, "no-submodules", "--no-submodules[=<BOOL>]", "omit submodule sources from targets and project context"),
-    spec!(ContextPath, "context-path", "--context-path=<directory>", "limit project context to sources beneath DIRECTORY; repeatable"),
-    spec!(ProjectContext, "project-context", "--project-context=<path>", "treat stdin as belonging to the Git project containing PATH"),
-    spec!(Stdin, "stdin", "--stdin", "read source from stdin (default without paths)"),
-    spec!(Stdout, "stdout", "--stdout", "write one file's result to stdout"),
-    spec!(Isolated, "isolated", "--isolated", "do not scan repository sources for case resolution"),
-    spec!(Check, "check", "--check", "exit 1 if selected files would change"),
-    spec!(Diff, "diff", "--diff", "print unified diffs and exit 1 if changed"),
-    spec!(ShowFiles, "show-files", "--show-files", "print selected files without formatting"),
-    spec!(QueryFormat, "query-format", "--query-format", "print free/fixed for each input and exit"),
-    spec!(Exclude, "exclude", "--exclude=<glob>", "exclude tracked sources from selection and project scanning (repeatable)"),
-    spec!(ExtendExclude, "extend-exclude", "--extend-exclude=<glob>", "add to the exclusions instead of replacing them (repeatable)"),
-    spec!(IndentOnly, "indent-only", "--indent-only", "findent-compatible indentation only"),
-    spec!(Full, "full", "--full", "full formatting: normalization and wrapping (default)"),
-    spec!(NormalizeOnly, "normalize-only", "--normalize-only", "normalization without structural layout"),
-    spec!(Wrap, "wrap", "--wrap[=<BOOL>], --no-wrap[=<BOOL>]", "reflow over-long statements (full mode)"),
+    spec!(
+        All,
+        "all",
+        "<paths>, --all [directory]",
+        "format explicit files or all tracked sources recursively"
+    ),
+    spec!(
+        AllFiles,
+        "all-files",
+        "--all-files [directory]",
+        "format this checkout's tracked sources; submodules are context only"
+    ),
+    spec!(
+        NoSubmodules,
+        "no-submodules",
+        "--no-submodules[=<BOOL>]",
+        "omit submodule sources from targets and project context"
+    ),
+    spec!(
+        ContextPath,
+        "context-path",
+        "--context-path=<directory>",
+        "limit project context to sources beneath DIRECTORY; repeatable"
+    ),
+    spec!(
+        ProjectContext,
+        "project-context",
+        "--project-context=<path>",
+        "treat stdin as belonging to the Git project containing PATH"
+    ),
+    spec!(
+        Stdin,
+        "stdin",
+        "--stdin",
+        "read source from stdin (default without paths)"
+    ),
+    spec!(
+        Stdout,
+        "stdout",
+        "--stdout",
+        "write one file's result to stdout"
+    ),
+    spec!(
+        Isolated,
+        "isolated",
+        "--isolated",
+        "do not scan repository sources for case resolution"
+    ),
+    spec!(
+        Check,
+        "check",
+        "--check",
+        "exit 1 if selected files would change"
+    ),
+    spec!(
+        Diff,
+        "diff",
+        "--diff",
+        "print unified diffs and exit 1 if changed"
+    ),
+    spec!(
+        ShowFiles,
+        "show-files",
+        "--show-files",
+        "print selected files without formatting"
+    ),
+    spec!(
+        QueryFormat,
+        "query-format",
+        "--query-format",
+        "print free/fixed for each input and exit"
+    ),
+    spec!(
+        Exclude,
+        "exclude",
+        "--exclude=<glob>",
+        "exclude tracked sources from selection and project scanning (repeatable)"
+    ),
+    spec!(
+        ExtendExclude,
+        "extend-exclude",
+        "--extend-exclude=<glob>",
+        "add to the exclusions instead of replacing them (repeatable)"
+    ),
+    spec!(
+        IndentOnly,
+        "indent-only",
+        "--indent-only",
+        "findent-compatible indentation only"
+    ),
+    spec!(
+        Full,
+        "full",
+        "--full",
+        "full formatting: normalization and wrapping (default)"
+    ),
+    spec!(
+        NormalizeOnly,
+        "normalize-only",
+        "--normalize-only",
+        "normalization without structural layout"
+    ),
+    spec!(
+        Wrap,
+        "wrap",
+        "--wrap[=<BOOL>], --no-wrap[=<BOOL>]",
+        "reflow over-long statements (full mode)"
+    ),
     spec!(NoWrap, "no-wrap"),
-    spec!(LineLength, "line-length", "--line-length=<n>", "wrapping budget (default 120)"),
-    spec!(UppercaseSingleL, "uppercase-single-l", "--uppercase-single-l[=<BOOL>]", "uppercase a lone `l` used as a name"),
-    spec!(Define, "define", "-D NAME[=VALUE], --define=...", "define a macro name (repeatable)"),
-    spec!(KeywordCase, "keyword-case", "--keyword-case=<lower|upper|preserve>", "recognized keyword case (default lower)"),
-    spec!(RelationalSymbols, "relational-symbols", "--relational-symbols=<BOOL>", "rewrite `.eq.` and friends as `==` (default true)"),
-    spec!(ArrayBrackets, "array-brackets", "--array-brackets=<BOOL>", "rewrite `(/ ... /)` as `[ ... ]` (default true)"),
-    spec!(CompactMultiplicative, "compact-multiplicative", "--compact-multiplicative=<BOOL>", "no spaces around binary `*`, `/`, `**` (default true)"),
-    spec!(JoinGoto, "join-goto", "--join-goto=<BOOL>", "write `go to` as `goto` (default true)"),
-    spec!(SplitCompoundKeywords, "split-compound-keywords", "--split-compound-keywords=<BOOL>", "write `endif` as `end if` (default true)"),
-    spec!(StripEmptyArgs, "strip-empty-args", "--strip-empty-args=<BOOL>", "strip empty SUBROUTINE definition arg lists (default true)"),
-    spec!(RemoveRedundantParens, "remove-redundant-parens", "--remove-redundant-parens=<BOOL>", "remove redundant parentheses (default true)"),
-    spec!(RemoveTerminalReturn, "remove-terminal-return", "--remove-terminal-return=<BOOL>", "remove terminal procedure RETURN (default true)"),
-    spec!(ProgramUnitSpacing, "program-unit-spacing", "--program-unit-spacing=<BOOL>", "canonical blank lines around program units (default true)"),
-    spec!(MaxBlankLines, "max-blank-lines", "--max-blank-lines=<n|preserve>", "blank-line cap (default 2)"),
-    spec!(DelimiterSpacing, "delimiter-spacing", "--delimiter-spacing=<BOOL>", "normalize spaces after delimiters (default true)"),
-    spec!(CommentSpacing, "comment-spacing", "--comment-spacing=<BOOL>", "normalize the gap before a trailing `!` (default true)"),
-    spec!(ContinuationMarkers, "continuation-markers", "--continuation-markers=<BOOL>", "normalize continuation markers and OpenMP sentinels (default true)"),
+    spec!(
+        LineLength,
+        "line-length",
+        "--line-length=<n>",
+        "wrapping budget (default 120)"
+    ),
+    spec!(
+        UppercaseSingleL,
+        "uppercase-single-l",
+        "--uppercase-single-l[=<BOOL>]",
+        "uppercase a lone `l` used as a name"
+    ),
+    spec!(
+        Define,
+        "define",
+        "-D NAME[=VALUE], --define=...",
+        "define a macro name (repeatable)"
+    ),
+    spec!(
+        KeywordCase,
+        "keyword-case",
+        "--keyword-case=<lower|upper|preserve>",
+        "recognized keyword case (default lower)"
+    ),
+    spec!(
+        RelationalSymbols,
+        "relational-symbols",
+        "--relational-symbols=<BOOL>",
+        "rewrite `.eq.` and friends as `==` (default true)"
+    ),
+    spec!(
+        ArrayBrackets,
+        "array-brackets",
+        "--array-brackets=<BOOL>",
+        "rewrite `(/ ... /)` as `[ ... ]` (default true)"
+    ),
+    spec!(
+        CompactMultiplicative,
+        "compact-multiplicative",
+        "--compact-multiplicative=<BOOL>",
+        "no spaces around binary `*`, `/`, `**` (default true)"
+    ),
+    spec!(
+        JoinGoto,
+        "join-goto",
+        "--join-goto=<BOOL>",
+        "write `go to` as `goto` (default true)"
+    ),
+    spec!(
+        SplitCompoundKeywords,
+        "split-compound-keywords",
+        "--split-compound-keywords=<BOOL>",
+        "write `endif` as `end if` (default true)"
+    ),
+    spec!(
+        StripEmptyArgs,
+        "strip-empty-args",
+        "--strip-empty-args=<BOOL>",
+        "strip empty SUBROUTINE definition arg lists (default true)"
+    ),
+    spec!(
+        RemoveRedundantParens,
+        "remove-redundant-parens",
+        "--remove-redundant-parens=<BOOL>",
+        "remove redundant parentheses (default true)"
+    ),
+    spec!(
+        RemoveTerminalReturn,
+        "remove-terminal-return",
+        "--remove-terminal-return=<BOOL>",
+        "remove terminal procedure RETURN (default true)"
+    ),
+    spec!(
+        ProgramUnitSpacing,
+        "program-unit-spacing",
+        "--program-unit-spacing=<BOOL>",
+        "canonical blank lines around program units (default true)"
+    ),
+    spec!(
+        MaxBlankLines,
+        "max-blank-lines",
+        "--max-blank-lines=<n|preserve>",
+        "blank-line cap (default 2)"
+    ),
+    spec!(
+        DelimiterSpacing,
+        "delimiter-spacing",
+        "--delimiter-spacing=<BOOL>",
+        "normalize spaces after delimiters (default true)"
+    ),
+    spec!(
+        CommentSpacing,
+        "comment-spacing",
+        "--comment-spacing=<BOOL>",
+        "normalize the gap before a trailing `!` (default true)"
+    ),
+    spec!(
+        ContinuationMarkers,
+        "continuation-markers",
+        "--continuation-markers=<BOOL>",
+        "normalize continuation markers and OpenMP sentinels (default true)"
+    ),
     spec!(IndentChangeteam, "indent-changeteam"),
-    spec!(RefactorEnd, "refactor-end", aliases = &["refactor-procedures"], "-Rr, -RR, --refactor-end[=<BOOL>|upcase]", "complete END definition statements"),
+    spec!(
+        RefactorEnd,
+        "refactor-end",
+        aliases = &["refactor-procedures"],
+        "-Rr, -RR, --refactor-end[=<BOOL>|upcase]",
+        "complete END definition statements"
+    ),
     spec!(InputFormat, "input-format"),
     spec!(OutputFormat, "output-format"),
-    spec!(Config, "config", "--config=<path>", "use a project TOML configuration explicitly"),
-    spec!(NoConfig, "no-config", "--no-config", "ignore project TOML configuration"),
+    spec!(
+        Config,
+        "config",
+        "--config=<path>",
+        "use a project TOML configuration explicitly"
+    ),
+    spec!(
+        NoConfig,
+        "no-config",
+        "--no-config",
+        "ignore project TOML configuration"
+    ),
     OptionSpec {
         id: OptionId::Help,
         long: "help",
@@ -249,9 +480,7 @@ pub(super) fn single_dash_long_option_suggestion(arg: &str) -> Option<String> {
     if spelling.is_empty() || spelling.starts_with('-') {
         return None;
     }
-    let name = spelling
-        .split_once('=')
-        .map_or(spelling, |(name, _)| name);
+    let name = spelling.split_once('=').map_or(spelling, |(name, _)| name);
     let normalized = normalize_long(name);
     let known = spec_for_name(&normalized).is_some_and(|spec| spec.suggest_single_dash)
         || normalized.starts_with("indent-");

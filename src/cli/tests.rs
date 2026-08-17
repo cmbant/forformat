@@ -112,8 +112,7 @@ fn optional_values_are_not_taken_from_the_next_argument() {
             .into_iter()
             .map(str::to_owned),
     )
-    .unwrap()
-    else {
+    .unwrap() else {
         panic!("expected run")
     };
     assert_eq!(invocation.paths, [PathBuf::from("source.f90")]);
@@ -251,17 +250,14 @@ fn valueless_workflow_and_mode_switches_reject_attached_values() {
 #[test]
 fn format_aliases_and_option_termination_are_explicit() {
     assert!(matches!(
-        parse(["forformat".to_string(), "--input_format=free".to_string()].into_iter())
-            .unwrap(),
+        parse(["forformat".to_string(), "--input_format=free".to_string()].into_iter()).unwrap(),
         Command::Run(_)
     ));
     assert!(matches!(
-        parse(["forformat".to_string(), "--output-format=same".to_string()].into_iter())
-            .unwrap(),
+        parse(["forformat".to_string(), "--output-format=same".to_string()].into_iter()).unwrap(),
         Command::Run(_)
     ));
-    let terminated =
-        parse(["forformat".to_string(), "--".to_string(), "-i4".to_string()]).unwrap();
+    let terminated = parse(["forformat".to_string(), "--".to_string(), "-i4".to_string()]).unwrap();
     match terminated {
         Command::Run(invocation) => assert_eq!(invocation.paths, [PathBuf::from("-i4")]),
         _ => panic!("expected run"),
@@ -290,8 +286,7 @@ fn project_context_implies_stdin_and_rejects_file_workflows() {
             .into_iter()
             .map(str::to_owned),
     )
-    .unwrap()
-    else {
+    .unwrap() else {
         panic!("expected run")
     };
     assert!(invocation.stdin);
@@ -482,6 +477,7 @@ fn mode_and_full_format_options_parse_and_do_not_collide_with_construct_names() 
     assert_eq!(run(&[]).mode, FormatMode::Full);
     assert_eq!(run(&["--full"]).mode, FormatMode::Full);
     assert_eq!(run(&["--normalize-only"]).mode, FormatMode::NormalizeOnly);
+    // `--indent-only` must not be read as `--indent-<construct>`.
     assert_eq!(
         run(&["--full", "--indent-only"]).mode,
         FormatMode::IndentOnly
@@ -683,8 +679,7 @@ fn exclude_accepts_repeatable_separated_and_normalized_spellings() {
             .into_iter()
             .map(str::to_owned),
     )
-    .unwrap()
-    else {
+    .unwrap() else {
         panic!("expected a formatting command");
     };
     assert_eq!(invocation.exclude_patterns(), ["vendor/**"]);

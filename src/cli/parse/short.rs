@@ -13,8 +13,7 @@ where
     let option = bytes[1] as char;
     let attached = &arg[2..];
     match option {
-        'a' | 'b' | 'c' | 'd' | 'e' | 'E' | 'f' | 'F' | 'j' | 'm' | 'r' | 's' | 't'
-        | 'w' | 'x' => {
+        'a' | 'b' | 'c' | 'd' | 'e' | 'E' | 'f' | 'F' | 'j' | 'm' | 'r' | 's' | 't' | 'w' | 'x' => {
             let value = cursor.required_short(option, attached)?;
             set_short(&mut draft.config, option, parse_num(&value)?)?;
         }
@@ -44,10 +43,8 @@ where
                 draft.config.construct_indents.set_all(draft.config.indent);
                 draft.config.contains_indent = draft.config.indent;
                 draft.config.continuation_indent = draft.config.indent;
-                draft.config.case_indent = draft
-                    .config
-                    .indent
-                    .saturating_sub(draft.config.indent / 2);
+                draft.config.case_indent =
+                    draft.config.indent.saturating_sub(draft.config.indent / 2);
                 draft.config.entry_indent = draft.config.case_indent
             }
         }

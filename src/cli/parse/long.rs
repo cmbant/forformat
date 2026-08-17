@@ -45,10 +45,8 @@ where
                 draft.config.construct_indents.set_all(draft.config.indent);
                 draft.config.contains_indent = draft.config.indent;
                 draft.config.continuation_indent = draft.config.indent;
-                draft.config.case_indent = draft
-                    .config
-                    .indent
-                    .saturating_sub(draft.config.indent / 2);
+                draft.config.case_indent =
+                    draft.config.indent.saturating_sub(draft.config.indent / 2);
                 draft.config.entry_indent = draft.config.case_indent
             }
         }
@@ -73,9 +71,7 @@ where
         OptionId::MaxIndent => {
             draft.config.max_indent = parse_num(&cursor.required_long(&mut value)?)?
         }
-        OptionId::Openmp => {
-            draft.config.openmp = parse_bool(&cursor.required_long(&mut value)?)?
-        }
+        OptionId::Openmp => draft.config.openmp = parse_bool(&cursor.required_long(&mut value)?)?,
         OptionId::IndentAmpersand => {
             draft.config.indent_ampersand = value
                 .as_deref()
@@ -104,8 +100,7 @@ where
             draft.config.ws_remred = draft.config.ws_remred_value != 0;
         }
         OptionId::AlignDeclarations => {
-            draft.config.align_declarations =
-                parse_bool(&cursor.required_long(&mut value)?)?
+            draft.config.align_declarations = parse_bool(&cursor.required_long(&mut value)?)?
         }
         OptionId::AlignComments => {
             draft.config.align_comments = parse_bool(&cursor.required_long(&mut value)?)?
@@ -254,12 +249,10 @@ where
             )?;
         }
         OptionId::RelationalSymbols => {
-            draft.config.style.relational_symbols =
-                parse_bool(&cursor.required_long(&mut value)?)?
+            draft.config.style.relational_symbols = parse_bool(&cursor.required_long(&mut value)?)?
         }
         OptionId::ArrayBrackets => {
-            draft.config.style.array_brackets =
-                parse_bool(&cursor.required_long(&mut value)?)?
+            draft.config.style.array_brackets = parse_bool(&cursor.required_long(&mut value)?)?
         }
         OptionId::CompactMultiplicative => {
             draft.config.style.compact_multiplicative =
@@ -273,8 +266,7 @@ where
                 parse_bool(&cursor.required_long(&mut value)?)?
         }
         OptionId::StripEmptyArgs => {
-            draft.config.style.strip_empty_args =
-                parse_bool(&cursor.required_long(&mut value)?)?
+            draft.config.style.strip_empty_args = parse_bool(&cursor.required_long(&mut value)?)?
         }
         OptionId::RemoveRedundantParens => {
             draft.config.style.remove_redundant_parens =
@@ -297,12 +289,10 @@ where
             };
         }
         OptionId::DelimiterSpacing => {
-            draft.config.style.delimiter_spacing =
-                parse_bool(&cursor.required_long(&mut value)?)?
+            draft.config.style.delimiter_spacing = parse_bool(&cursor.required_long(&mut value)?)?
         }
         OptionId::CommentSpacing => {
-            draft.config.style.comment_spacing =
-                parse_bool(&cursor.required_long(&mut value)?)?
+            draft.config.style.comment_spacing = parse_bool(&cursor.required_long(&mut value)?)?
         }
         OptionId::ContinuationMarkers => {
             draft.config.style.continuation_markers =

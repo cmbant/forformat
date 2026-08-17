@@ -1,6 +1,4 @@
-use super::{
-    draft::DraftInvocation, options::single_dash_long_option_suggestion, Command,
-};
+use super::{draft::DraftInvocation, options::single_dash_long_option_suggestion, Command};
 use crate::{
     config::{ConfigArguments, FormatConfig, MacroDefine},
     error::FormatError,
@@ -83,9 +81,8 @@ where
         attached: &str,
     ) -> Result<String, FormatError> {
         if attached.is_empty() {
-            self.next().ok_or_else(|| {
-                FormatError::InvalidOption(format!("-{option} requires a value"))
-            })
+            self.next()
+                .ok_or_else(|| FormatError::InvalidOption(format!("-{option} requires a value")))
         } else {
             Ok(attached.to_string())
         }
@@ -260,13 +257,7 @@ where
             } else {
                 (super::options::normalize_long(long), None)
             };
-            long::parse_long(
-                &name,
-                value,
-                &mut cursor,
-                &mut draft,
-                &mut config_selection,
-            )?;
+            long::parse_long(&name, value, &mut cursor, &mut draft, &mut config_selection)?;
             continue;
         }
         if arg.starts_with('-') && arg.len() > 1 {
@@ -327,9 +318,7 @@ pub(super) fn parse_num(value: &str) -> Result<usize, FormatError> {
         .filter(|value| *value >= 0)
         .map(|value| value as usize)
         .ok_or_else(|| {
-            FormatError::InvalidOption(format!(
-                "expected non-negative integer, got {value}"
-            ))
+            FormatError::InvalidOption(format!("expected non-negative integer, got {value}"))
         })
 }
 
@@ -422,11 +411,7 @@ pub(super) fn set_construct(
         "type" => config.construct_indents.r#type = value,
         "where" => config.construct_indents.where_ = value,
         "critical" => config.construct_indents.critical = value,
-        _ => {
-            return Err(FormatError::InvalidOption(format!(
-                "--indent-{name}"
-            )))
-        }
+        _ => return Err(FormatError::InvalidOption(format!("--indent-{name}"))),
     }
     Ok(())
 }
