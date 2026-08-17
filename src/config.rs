@@ -204,6 +204,7 @@ fn read_config(
                 | "last-usable"
                 | "no-config"
                 | "project-context"
+                | "query-format"
                 | "stdin"
                 | "stdout"
                 | "show-files"
@@ -430,6 +431,20 @@ mod tests {
         assert!(error
             .to_string()
             .contains("configuration key `project-context` is a command-line workflow option"));
+    }
+
+    #[test]
+    fn query_format_is_not_a_configuration_key() {
+        let path = std::env::temp_dir().join(format!(
+            "forformat-query-format-config-{}.toml",
+            std::process::id()
+        ));
+        fs::write(&path, "query_format = true\n").unwrap();
+        let error = config_args(&path, Some(&path)).unwrap_err();
+        let _ = fs::remove_file(&path);
+        assert!(error
+            .to_string()
+            .contains("configuration key `query-format` is a command-line workflow option"));
     }
 
     #[test]

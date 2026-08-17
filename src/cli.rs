@@ -164,6 +164,7 @@ where
             if invocation.context_paths.is_empty()
                 && !invocation.isolated
                 && !invocation.query_format
+                && !invocation.show_files
             {
                 invocation.context_paths = config_context_paths;
             }
@@ -811,6 +812,11 @@ where
                 .into(),
         ));
     }
+    if show_files && !context_paths.is_empty() {
+        return Err(FormatError::InvalidOption(
+            "--show-files cannot be combined with --context-path".into(),
+        ));
+    }
     if query_format && (project_context.is_some() || !context_paths.is_empty() || isolated) {
         return Err(FormatError::InvalidOption(
             "--query-format cannot be combined with --project-context, --context-path, or --isolated".into(),
@@ -1071,7 +1077,7 @@ Free-form Fortran formatter.\n\
 \x20\x20--ws-remred[=<n>]                  reduce redundant whitespace\n\
 \x20\x20--align-declarations=<BOOL>        shrink space to align `::` blocks (default 1)\n\
 \x20\x20--align-comments=<BOOL>            shrink space to align trailing comment blocks (default 0)\n\
-\x20\x20--lastindent, -lastusable           print query result instead of source\n\
+\x20\x20-lastindent, -lastusable           print query result instead of source\n\
 \x20\x20--query-format                     print free/fixed for each input and exit\n\
 \x20\x20--all-files [directory]             format this checkout's tracked sources; submodules are context only\n\
 \x20\x20<paths>, --all [directory]          format explicit files or all tracked sources recursively\n\
@@ -1119,7 +1125,7 @@ Automatic fixed/free input detection is enabled by default; use -ifree or\n\
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, parse_inner, Command, DEFAULT_EXCLUDES};
+    use super::{parse, parse_inner, usage, Command, DEFAULT_EXCLUDES};
     use std::path::PathBuf;
 
     fn run(args: &[&str]) -> crate::config::FormatConfig {
@@ -1356,6 +1362,28 @@ mod tests {
             let argv = ["forformat".to_string(), argument.clone()];
             assert!(parse(argv.into_iter()).is_err(), "{argument} was accepted");
         }
+    }
+
+    #[test]
+    fn help_uses_compatibility_lastindent_spellings() {
+        assert!(usage().contains("  -lastindent, -lastusable"));
+        assert!(!usage().contains("--lastindent, -lastusable"));
+    }
+
+    #[test]
+    fn show_files_rejects_explicit_context_paths() {
+        assert!(parse(
+            [
+                "forformat",
+                "--show-files",
+                "--all-files",
+                "--context-path",
+                "."
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        )
+        .is_err());
     }
 
     #[test]

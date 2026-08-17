@@ -507,6 +507,9 @@ pub(crate) fn declaration_separator_info(line: &[u8]) -> Option<(usize, usize, u
             while after < line.len() && matches!(line[after], b' ' | b'\t') {
                 after += 1;
             }
+            if before == 0 || after == line.len() {
+                return None;
+            }
             return Some((index, index - before, after - index - 2));
         } else {
             index += 1;

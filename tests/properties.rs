@@ -711,6 +711,7 @@ fn full_mode_fixed_point_and_indent_only_fixed_point_hold_together() {
         include_bytes!("fixtures/cpp_continuation.f90").as_slice(),
         include_bytes!("fixtures/array_constructor_multiline.f90").as_slice(),
         b"\n!$ \n".as_slice(),
+        b"\n::\n".as_slice(),
         b"program p\nif (x) then\ncall f(a, b, c, d, e, f, g, h)\nend if\nend program p\n"
             .as_slice(),
     ] {

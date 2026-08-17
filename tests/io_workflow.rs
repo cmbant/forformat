@@ -653,6 +653,11 @@ fn isolated_and_query_format_ignore_configured_context_paths() {
     assert_eq!(query.stdout, b"free\n");
     assert!(query.stderr.is_empty());
 
+    let listed = run(&repo, &["--all-files", "--show-files"]);
+    assert_eq!(listed.status.code(), Some(0));
+    assert_eq!(listed.stdout, b"main.f90\n");
+    assert!(listed.stderr.is_empty());
+
     let _ = fs::remove_dir_all(repo);
 }
 
