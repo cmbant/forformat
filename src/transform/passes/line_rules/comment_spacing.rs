@@ -342,13 +342,7 @@ fn legacy_operator_at(line: &[u8], index: usize) -> Option<(usize, &'static [u8]
 }
 
 fn spaced_operator_len(line: &[u8], index: usize, previous: Option<u8>) -> Option<usize> {
-    for operator in [
-        b".and.".as_slice(),
-        b".or.",
-        b".not.",
-        b".eqv.",
-        b".neqv.",
-    ] {
+    for operator in [b".and.".as_slice(), b".or.", b".not.", b".eqv.", b".neqv."] {
         if line[index..].len() >= operator.len()
             && line[index..index + operator.len()].eq_ignore_ascii_case(operator)
         {
@@ -363,9 +357,7 @@ fn spaced_operator_len(line: &[u8], index: usize, previous: Option<u8>) -> Optio
     let byte = *line.get(index)?;
     let next = line.get(index + 1).copied();
     let valid = match byte {
-        b'<' => {
-            !matches!(previous, Some(b'=' | b'<' | b'>')) && !matches!(next, Some(b'<' | b'>'))
-        }
+        b'<' => !matches!(previous, Some(b'=' | b'<' | b'>')) && !matches!(next, Some(b'<' | b'>')),
         b'>' => {
             !matches!(previous, Some(b'=' | b'<' | b'>' | b'-'))
                 && !matches!(next, Some(b'<' | b'>'))
