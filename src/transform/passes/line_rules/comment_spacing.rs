@@ -9,12 +9,12 @@ pub fn normalize_comment_spacing(line: &[u8], cx: &PassContext) -> Vec<u8> {
 }
 
 /// The width of the code on a line, ignoring indentation and any comment.
-pub(super) fn code_span_len(line: &[u8]) -> usize {
+pub(crate) fn code_span_len(line: &[u8]) -> usize {
     let end = crate::source::regions::comment_start(line).unwrap_or(line.len());
     line[..end].trim_ascii().len()
 }
 
-pub(super) fn normalize_comment_spacing_with_state(
+pub(crate) fn normalize_comment_spacing_with_state(
     line: &[u8],
     cx: &PassContext,
     incoming: LexState,
@@ -82,7 +82,7 @@ pub(super) fn normalize_comment_spacing_with_state(
     out
 }
 
-pub(super) fn preserve_full_comment_spacing(
+pub(crate) fn preserve_full_comment_spacing(
     document: &Document,
     index: usize,
     cx: &PassContext,
@@ -139,10 +139,7 @@ pub(crate) fn is_directive_comment(comment: &[u8]) -> bool {
 
 fn is_commented_assignment(comment: &[u8]) -> bool {
     let mut index = 1;
-    while comment
-        .get(index)
-        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
-    {
+    while comment.get(index).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
         index += 1;
     }
     let Some(end) = identifier_end(comment, index) else {
@@ -153,10 +150,7 @@ fn is_commented_assignment(comment: &[u8]) -> bool {
     }
     index = end;
     loop {
-        while comment
-            .get(index)
-            .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
-        {
+        while comment.get(index).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
             index += 1;
         }
         if comment.get(index) == Some(&b'%') {
@@ -180,10 +174,7 @@ fn is_commented_assignment(comment: &[u8]) -> bool {
             break;
         }
     }
-    while comment
-        .get(index)
-        .is_some_and(|byte| matches!(byte, b' ' | b'\t'))
-    {
+    while comment.get(index).is_some_and(|byte| matches!(byte, b' ' | b'\t')) {
         index += 1;
     }
     comment.get(index) == Some(&b'=')
@@ -228,7 +219,6 @@ fn format_comment_operators(comment: &[u8]) -> Vec<u8> {
             index += 1;
             continue;
         }
-
         if let Some((length, replacement)) = legacy_operator_at(comment, index) {
             append_comment_operator(&mut output, replacement, true);
             index = skip_horizontal(comment, index + length);
@@ -242,8 +232,7 @@ fn format_comment_operators(comment: &[u8]) -> Vec<u8> {
         }
         if let Some(length) = arithmetic_operator_len(comment, index) {
             let operator = &comment[index..index + length];
-            if operator == b"+" && super::case::is_binary_arithmetic_operator(comment, index, operator)
-            {
+            if operator == b"+" && super::is_binary_arithmetic_operator(comment, index, operator) {
                 append_comment_operator(
                     &mut output,
                     operator,
