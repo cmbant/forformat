@@ -161,7 +161,10 @@ where
     let mut command = parse_inner(combined)?.command;
     if !config_context_paths.is_empty() {
         if let Command::Run(invocation) = &mut command {
-            if invocation.context_paths.is_empty() {
+            if invocation.context_paths.is_empty()
+                && !invocation.isolated
+                && !invocation.query_format
+            {
                 invocation.context_paths = config_context_paths;
             }
         }
@@ -995,7 +998,7 @@ fn parse_bool(s: &str) -> Result<bool, FormatError> {
         "0" | "false" | "no" => Ok(false),
         "1" | "true" | "yes" => Ok(true),
         _ => Err(FormatError::InvalidOption(format!(
-            "expected 0 or 1, got {s}"
+            "expected boolean (true/false, yes/no, or 1/0), got {s}"
         ))),
     }
 }
@@ -1055,63 +1058,63 @@ fn set_construct(c: &mut FormatConfig, n: &str, v: usize) -> Result<(), FormatEr
 pub fn usage() -> &'static str {
     "Usage: forformat [OPTIONS] < input > output\n\n\
 Free-form Fortran formatter.\n\
-  -i<n>, --indent=<n>                 global indentation (default 3)\n\
-  -i-, --indent=none                  leave indentation unchanged\n\
-  -I<n>, --start-indent=<n>           starting indentation\n\
-  -Ia, --start-indent=a               infer starting indentation\n\
-  -M<n>, --max-indent=<n>             maximum indentation (0 = unlimited)\n\
-  -k<n>, --indent-continuation=<n>    continuation indentation\n\
-    -K, --indent-ampersand[=<BOOL>]     indent leading continuation ampersands\n\
-  --align-paren[=<n>]                align continuation lines at parentheses\n\
-    --include-left=<BOOL>              put INCLUDE at the starting indent\n\
-    -Rr, -RR, --refactor-end[=<BOOL>|upcase]  complete END definition statements\n\
-  --ws-remred[=<n>]                  reduce redundant whitespace\n\
-        --align-declarations=<BOOL>        shrink space to align `::` blocks (default 1)\n\
-    --align-comments=<BOOL>            shrink space to align trailing comment blocks (default 0)\n\
-  -lastindent, -lastusable           print query result instead of source\n\
-  --query-format                     print free/fixed for each input and exit\n\
-    --all-files [directory]             format this checkout's tracked sources; submodules are context only\n\
-    <paths>, --all [directory]          format explicit files or all tracked sources recursively\n\
-    --no-submodules[=<BOOL>]            omit submodule sources from targets and project context\n\
-    --context-path=<directory>           limit project context to sources beneath DIRECTORY; repeatable\n\
-  --stdin                             read source from stdin (default without paths)\n\
-    --project-context=<path>            treat stdin as belonging to the Git project containing PATH; a source-file PATH identifies stdin as that file and shadows its on-disk contents\n\
-  --stdout                            write one file's result to stdout\n\
-  --isolated                          do not scan repository sources for case resolution\n\
-  --check                             exit 1 if selected files would change\n\
-  --diff                              print unified diffs and exit 1 if changed\n\
-    --show-files                        print selected files without formatting\n\
-    --exclude=<glob>                    exclude tracked sources from --all-files, --all, and project scanning (repeatable)\n\
-  --extend-exclude=<glob>             add to the exclusions instead of replacing them (repeatable)\n\
+\x20\x20-i<n>, --indent=<n>                 global indentation (default 3)\n\
+\x20\x20-i-, --indent=none                  leave indentation unchanged\n\
+\x20\x20-I<n>, --start-indent=<n>           starting indentation\n\
+\x20\x20-Ia, --start-indent=a               infer starting indentation\n\
+\x20\x20-M<n>, --max-indent=<n>             maximum indentation (0 = unlimited)\n\
+\x20\x20-k<n>, --indent-continuation=<n>    continuation indentation\n\
+\x20\x20-K, --indent-ampersand[=<BOOL>]     indent leading continuation ampersands\n\
+\x20\x20--align-paren[=<n>]                align continuation lines at parentheses\n\
+\x20\x20--include-left=<BOOL>              put INCLUDE at the starting indent\n\
+\x20\x20-Rr, -RR, --refactor-end[=<BOOL>|upcase]  complete END definition statements\n\
+\x20\x20--ws-remred[=<n>]                  reduce redundant whitespace\n\
+\x20\x20--align-declarations=<BOOL>        shrink space to align `::` blocks (default 1)\n\
+\x20\x20--align-comments=<BOOL>            shrink space to align trailing comment blocks (default 0)\n\
+\x20\x20--lastindent, -lastusable           print query result instead of source\n\
+\x20\x20--query-format                     print free/fixed for each input and exit\n\
+\x20\x20--all-files [directory]             format this checkout's tracked sources; submodules are context only\n\
+\x20\x20<paths>, --all [directory]          format explicit files or all tracked sources recursively\n\
+\x20\x20--no-submodules[=<BOOL>]            omit submodule sources from targets and project context\n\
+\x20\x20--context-path=<directory>           limit project context to sources beneath DIRECTORY; repeatable\n\
+\x20\x20--stdin                             read source from stdin (default without paths)\n\
+\x20\x20--project-context=<path>            treat stdin as belonging to the Git project containing PATH; a source-file PATH identifies stdin as that file and shadows its on-disk contents\n\
+\x20\x20--stdout                            write one file's result to stdout\n\
+\x20\x20--isolated                          do not scan repository sources for case resolution\n\
+\x20\x20--check                             exit 1 if selected files would change\n\
+\x20\x20--diff                              print unified diffs and exit 1 if changed\n\
+\x20\x20--show-files                        print selected files without formatting\n\
+\x20\x20--exclude=<glob>                    exclude tracked sources from --all-files, --all, and project scanning (repeatable)\n\
+\x20\x20--extend-exclude=<glob>             add to the exclusions instead of replacing them (repeatable)\n\
   Query modes cannot be combined with path-update, --check, or --diff.\n\
-  --indent-only                      findent-compatible indentation only\n\
-  --full                             full formatting: normalization and wrapping (default)\n\
-  --normalize-only                   normalization without structural layout\n\
-    --wrap[=<BOOL>], --no-wrap[=<BOOL>] reflow over-long statements (full mode)\n\
-  --line-length=<n>                  wrapping budget (default 120)\n\
-  --keyword-case=<lower|upper|preserve>\n\
+\x20\x20--indent-only                      findent-compatible indentation only\n\
+\x20\x20--full                             full formatting: normalization and wrapping (default)\n\
+\x20\x20--normalize-only                   normalization without structural layout\n\
+\x20\x20--wrap[=<BOOL>], --no-wrap[=<BOOL>] reflow over-long statements (full mode)\n\
+\x20\x20--line-length=<n>                  wrapping budget (default 120)\n\
+\x20\x20--keyword-case=<lower|upper|preserve>\n\
                                       recognized keyword case (default lower)\n\
-    --relational-symbols=<BOOL>        rewrite `.eq.` and friends as `==` (default true)\n\
-    --array-brackets=<BOOL>            rewrite `(/ ... /)` as `[ ... ]` (default true)\n\
-    --compact-multiplicative=<BOOL>    no spaces around binary `*`, `/`, `**` (default true)\n\
-    --split-compound-keywords=<BOOL>   write `endif` as `end if` (default true)\n\
-    --join-goto=<BOOL>                 write `go to` as `goto` (default true)\n\
-    --strip-empty-args=<BOOL>          strip empty SUBROUTINE definition arg lists (default true)\n\
-    --remove-redundant-parens=<BOOL>   remove redundant parentheses (default true)\n\
-    --remove-terminal-return=<BOOL>    remove terminal procedure RETURN (default true)\n\
-    --program-unit-spacing=<BOOL>      canonical blank lines around program units (default true)\n\
-  --max-blank-lines=<n|preserve>     blank-line cap (default 2)\n\
-    --delimiter-spacing=<BOOL>         normalize spaces after delimiters (default true)\n\
-    --comment-spacing=<BOOL>           normalize the gap before a trailing `!` (default true)\n\
-    --continuation-markers=<BOOL>      normalize continuation markers and OpenMP sentinels (default true)\n\
-  -D NAME[=VALUE], --define=...      define a macro name (repeatable)\n\
-    --uppercase-single-l[=<BOOL>]      uppercase a lone `l` used as a name\n\
-  --config=<path>                    use a project TOML configuration explicitly\n\
-  --no-config                        ignore project TOML configuration\n\
-  -h, --help                         show this help\n\
-  -v, --version                      show version\n\
+\x20\x20--relational-symbols=<BOOL>        rewrite `.eq.` and friends as `==` (default true)\n\
+\x20\x20--array-brackets=<BOOL>            rewrite `(/ ... /)` as `[ ... ]` (default true)\n\
+\x20\x20--compact-multiplicative=<BOOL>    no spaces around binary `*`, `/`, `**` (default true)\n\
+\x20\x20--split-compound-keywords=<BOOL>   write `endif` as `end if` (default true)\n\
+\x20\x20--join-goto=<BOOL>                 write `go to` as `goto` (default true)\n\
+\x20\x20--strip-empty-args=<BOOL>          strip empty SUBROUTINE definition arg lists (default true)\n\
+\x20\x20--remove-redundant-parens=<BOOL>   remove redundant parentheses (default true)\n\
+\x20\x20--remove-terminal-return=<BOOL>    remove terminal procedure RETURN (default true)\n\
+\x20\x20--program-unit-spacing=<BOOL>      canonical blank lines around program units (default true)\n\
+\x20\x20--max-blank-lines=<n|preserve>     blank-line cap (default 2)\n\
+\x20\x20--delimiter-spacing=<BOOL>         normalize spaces after delimiters (default true)\n\
+\x20\x20--comment-spacing=<BOOL>           normalize the gap before a trailing `!` (default true)\n\
+\x20\x20--continuation-markers=<BOOL>      normalize continuation markers and OpenMP sentinels (default true)\n\
+\x20\x20-D NAME[=VALUE], --define=...      define a macro name (repeatable)\n\
+\x20\x20--uppercase-single-l[=<BOOL>]      uppercase a lone `l` used as a name\n\
+\x20\x20--config=<path>                    use a project TOML configuration explicitly\n\
+\x20\x20--no-config                        ignore project TOML configuration\n\
+\x20\x20-h, --help                         show this help\n\
+\x20\x20-v, --version                      show version\n\
 Automatic fixed/free input detection is enabled by default; use -ifree or\n\
---input-format=free to force free-form input. Fixed-form output remains unsupported."
+\x20\x20--input-format=free to force free-form input. Fixed-form output remains unsupported."
 }
 
 #[cfg(test)]
@@ -1703,7 +1706,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(crate::error::FormatError::InvalidOption(message))
-                if message == "expected 0 or 1, got maybe"
+                if message == "expected boolean (true/false, yes/no, or 1/0), got maybe"
         ));
         let result = parse([
             "forformat".to_string(),

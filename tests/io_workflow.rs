@@ -633,6 +633,30 @@ fn query_format_rejects_project_context_only_options() {
 }
 
 #[test]
+fn isolated_and_query_format_ignore_configured_context_paths() {
+    let repo = temp_repo();
+    fs::write(
+        repo.join(".forformat.toml"),
+        b"context_paths = [\"does-not-exist\"]\n",
+    )
+    .unwrap();
+    fs::write(repo.join("main.f90"), b"program p\nend program p\n").unwrap();
+    git_add(&repo);
+
+    let isolated = run(&repo, &["--isolated", "--stdout", "main.f90"]);
+    assert_eq!(isolated.status.code(), Some(0));
+    assert_eq!(isolated.stdout, b"program p\n\nend program p\n");
+    assert!(isolated.stderr.is_empty());
+
+    let query = run(&repo, &["--query-format", "main.f90"]);
+    assert_eq!(query.status.code(), Some(0));
+    assert_eq!(query.stdout, b"free\n");
+    assert!(query.stderr.is_empty());
+
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
 fn stdin_and_file_routes_produce_identical_bytes_for_the_same_source() {
     let repo = temp_repo();
     let mut fixtures: Vec<_> =

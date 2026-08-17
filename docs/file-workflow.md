@@ -15,16 +15,19 @@ explicitly remains a formatting target; exclusions are not force exclusions.
 
 `--project-context=<path>` identifies the Git checkout for project analysis and, when PATH is a
 tracked source file, identifies the source whose stdin bytes replace the stale on-disk copy. It does
-not restrict the analysis scope. Repeatable `--context-path=<directory>` options do that. In a Git
-checkout, relative directories are resolved from the repository root and eligible tracked sources
-beneath their union are selected. Without Git, relative directories are resolved from the current
-working directory and eligible Fortran files are discovered recursively from the filesystem. In
-both cases each directory must exist, exclusions are applied afterward, and directory symlinks are
-not followed during filesystem discovery. With no `context_paths`, all eligible tracked sources
-retain the existing behavior. Explicit formatting targets, bulk target selection, config discovery,
-and anonymous stdin identity are unaffected by `context_paths`. Context paths change semantic
-context, not explicit formatting targets. `--project-context=<source-file>` remains the explicit
-form for stdin file identity and stale on-disk shadowing.
+not restrict the analysis scope. Repeatable `--context-path=<directory>` options do that. For
+command-line options, relative directories are resolved from the repository root in a Git checkout,
+or from the current working directory outside Git. Relative directories in configured
+`context_paths` are resolved from the directory containing the configuration file. Thus a config at
+`/project/.forformat.toml` with `context_paths = ["src"]` selects `/project/src` even when invoked
+from another directory. Eligible tracked sources beneath the union are selected in Git; without
+Git, eligible Fortran files are discovered recursively from the filesystem. In both cases each
+directory must exist, exclusions are applied afterward, and directory symlinks are not followed
+during filesystem discovery. With no `context_paths`, all eligible tracked sources retain the
+existing behavior. Explicit formatting targets, bulk target selection, config discovery, and
+anonymous stdin identity are unaffected by `context_paths`. Context paths change semantic context,
+not explicit formatting targets. `--project-context=<source-file>` remains the explicit form for
+stdin file identity and stale on-disk shadowing.
 
 The policy order is repository discovery, tracked-source enumeration, `context_paths` filtering,
 then `exclude`/`extend-exclude` filtering, followed by project analysis. In Git, exclusions are

@@ -241,12 +241,15 @@ context root, deduplicates the union, and analyzes the result. Anonymous stdin w
 forformat --full --stdout src/main.f90 --context-path=src/ --context-path=modules/
 ```
 
-Relative context paths are resolved from the Git repository root when Git is available, otherwise
-from the current working directory. Absolute paths are accepted outside Git and must be existing
-directories; absolute Git paths must be inside the checkout. Filesystem discovery does not follow
-directory symlinks and does not invent `.gitignore` semantics. Context paths affect semantic
-context, not explicit formatting targets. With no context paths, the whole eligible checkout is
-used as before. Anonymous stdin may use discovered context, while
+Relative paths supplied by `--context-path` are resolved from the Git repository root when Git is
+available, otherwise from the current working directory. Relative paths in configured
+`context_paths` are resolved from the directory containing that configuration file, so a config
+such as `/project/.forformat.toml` with `context_paths = ["src"]` selects `/project/src` even when
+the command runs from another directory. Absolute paths are accepted outside Git and must be
+existing directories; absolute Git paths must be inside the checkout. Filesystem discovery does
+not follow directory symlinks and does not invent `.gitignore` semantics. Context paths affect
+semantic context, not explicit formatting targets. With no context paths, the whole eligible checkout
+is used as before. Anonymous stdin may use discovered context, while
 `--project-context=src/foo.f90` still identifies and replaces that stale on-disk source for
 file-identity/shadowing semantics. `--isolated` disables project context and cannot be combined
 with `--context-path`.
