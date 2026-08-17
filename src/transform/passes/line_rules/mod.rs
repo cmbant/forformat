@@ -41,18 +41,17 @@ use crate::{
 ///
 /// These are deliberately separated from [`LineState`]: a stage may inspect
 /// context, but only `run` advances continuation state between physical lines.
-#[derive(Clone, Default)]
-struct LineContext {
+#[derive(Clone, Copy, Default)]
+struct LineContext<'a> {
     preserve_comment_after: bool,
     continued_statement: bool,
     continued_infix: bool,
     continued_declaration: bool,
     continued_named_parameter: bool,
     continued_bind_parameter: bool,
-    open_groups: Vec<bool>,
+    open_groups: &'a [bool],
     continued_format: bool,
     continued_initializer: bool,
-    preserve_identifier_case: bool,
 }
 
 /// State carried from one physical line to the next while step 11 runs.
@@ -69,7 +68,13 @@ struct LineState {
 }
 
 impl LineState {
-    fn context(&self, document: &Document, index: usize, cx: &PassContext) -> LineContext {
+    fn context<'a>(
+        &self,
+        open_groups: &'a [bool],
+        document: &Document,
+        index: usize,
+        cx: &PassContext,
+    ) -> LineContext<'a> {
         let preserve_comment_after =
             common::comment_spacing::preserve_full_comment_spacing(document, index, cx);
         let first_statement_tokens = || {
@@ -91,10 +96,9 @@ impl LineState {
             continued_declaration,
             continued_named_parameter: self.continued_named_parameter,
             continued_bind_parameter: self.continued_bind_parameter,
-            open_groups: self.open_groups.clone(),
+            open_groups,
             continued_format,
             continued_initializer: self.entity_list.initializer,
-            preserve_identifier_case: false,
         }
     }
 
@@ -124,7 +128,7 @@ impl LineState {
 
 #[derive(Clone, Copy)]
 enum RuleMode<'a> {
-    Physical(&'a LineContext),
+    Physical(LineContext<'a>),
     Rejoined,
 }
 
@@ -154,7 +158,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 &declared_names,
                 index,
                 &mut LexState::default(),
-                RuleMode::Physical(&context),
+                RuleMode::Physical(context),
             );
             let mut rebuilt = document.lines[index][..body_start].to_vec();
             rebuilt.extend_from_slice(&body);
@@ -176,14 +180,14 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             continue;
         }
 
-        let context = state.context(document, index, cx);
+        let context = state.context(&state.open_groups, document, index, cx);
         let line = apply_rules(
             &document.lines[index],
             cx,
             &declared_names,
             index,
             &mut state.lex,
-            RuleMode::Physical(&context),
+            RuleMode::Physical(context),
         );
 
         if let Some(physical) = cx.analysis.buffer.lines.get(index) {
@@ -255,7 +259,7 @@ pub fn apply(
         declared_names,
         line_index,
         state,
-        RuleMode::Physical(&context),
+        RuleMode::Physical(context),
     )
 }
 
@@ -273,13 +277,9 @@ fn apply_rules(
     mode: RuleMode<'_>,
 ) -> Vec<u8> {
     let incoming = *state;
-    let joined_context = LineContext {
-        preserve_identifier_case: cx.project.target_local_component_resolution,
-        ..LineContext::default()
-    };
     let context = match mode {
         RuleMode::Physical(context) => context,
-        RuleMode::Rejoined => &joined_context,
+        RuleMode::Rejoined => LineContext::default(),
     };
     let physical = matches!(mode, RuleMode::Physical(_));
 
@@ -291,7 +291,7 @@ fn apply_rules(
         declared_names,
         line_index,
         state,
-        context,
+        &context,
     );
     // 2. Keyword/layout spacing.
     text = common::keyword_spacing::normalize_keyword_spacing_with_state(
@@ -329,7 +329,7 @@ fn apply_rules(
     match mode {
         RuleMode::Physical(context) => {
             if context.continued_statement && context.continued_named_parameter {
-                compact_continued_named_argument(&text, &context.open_groups)
+                compact_continued_named_argument(&text, context.open_groups)
             } else {
                 text
             }
@@ -510,3 +510,37 @@ fn fold_open_groups(line: &[u8], open: &mut Vec<bool>) {
 }
 
 include!("tests.rs");
+
+#[cfg(test)]
+mod rejoined_tests {
+    use crate::{
+        analysis::{analyze_file, scoped_declared_names, ProjectContext, ScopeTree},
+        config::FormatConfig,
+        transform::{document::Document, pipeline::PassContext},
+    };
+
+    #[test]
+    fn rejoined_component_names_keep_authored_case() {
+        let source = b"X=State%Data\n";
+        let document = Document::from_bytes(source);
+        let mut project = ProjectContext::empty();
+        project.enable_target_local_component_resolution();
+        let local = analyze_file(source).unwrap();
+        let config = FormatConfig::default();
+        let analysis = document.analyze().unwrap();
+        let scopes = ScopeTree::build(&analysis);
+        let context = PassContext {
+            config: &config,
+            project: &project,
+            local: &local,
+            analysis: &analysis,
+            scopes: &scopes,
+        };
+        let declared_names = scoped_declared_names(&analysis, &scopes);
+
+        assert_eq!(
+            super::respace_joined(b"X=State%Data", &context, &declared_names, 0),
+            b"X = State%Data"
+        );
+    }
+}

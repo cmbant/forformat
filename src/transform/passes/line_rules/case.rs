@@ -29,10 +29,10 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
     declared_names: &DeclaredNameIndex,
     line_index: usize,
     state: &mut LexState,
-    context: &super::super::LineContext,
+    context: &super::super::LineContext<'_>,
 ) -> Vec<u8> {
     let tokens = tokenize(line, state);
-    let inside_paren = inside_paren_at(&context.open_groups, &tokens);
+    let inside_paren = inside_paren_at(context.open_groups, &tokens);
     let continued_entity_list = context.continued_declaration
         && context.open_groups.is_empty()
         && !context.continued_initializer;
@@ -120,9 +120,8 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                 }
             }
             TokenKind::Name => {
-                if context.preserve_identifier_case && index > 0 && tokens[index - 1].text == b"%" {
-                    continue;
-                }
+                // Component spelling is owned by the declared-case pass; line rules never
+                // reinterpret a name following `%`, including after continuation rejoining.
                 if index > 0 && tokens[index - 1].text == b"%" {
                     continue;
                 }
