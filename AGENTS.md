@@ -21,8 +21,8 @@ Two rules I1 keeps re-teaching:
   Normalization widens lines, the engine moves them, and declaration-separator alignment is the
   only post-layout pass that can make a line longer. Measure via `engine::format`.
 - Per-line normalization has no statement context. A continuation line carries no `format`, `::`,
-  or `call`; thread required context through `LineOptions::continued_*` in
-  `src/transform/passes/line_rules.rs`.
+  or `call`; carry required facts in `LineState` and expose them through `LineContext` in
+  `src/transform/passes/line_rules/mod.rs`.
 
 ## Verification
 
