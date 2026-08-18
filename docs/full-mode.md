@@ -9,10 +9,11 @@ findent layout engine. The compatibility boundary is in
 Run the focused Rust suite while changing a normalization or wrapping rule:
 
 ```sh
-cargo test --release
+cargo test --locked --all-targets
 cargo fmt --check
-cargo clippy --release --all-targets -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --release --no-deps
+cargo clippy --locked --all-targets -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
+cargo build --locked
 ./tools/check_fixture_syntax.sh target/debug/forformat
 ./tools/check_fuzz_regression.sh
 ./tools/check_cli_contract.sh target/debug/forformat
@@ -46,7 +47,7 @@ that is not valid UTF-8 remains supported.
 
 ## Per-line normalization
 
-`src/transform/passes/line_rules.rs` applies token-span edits without rebuilding lines from token
+`src/transform/passes/line_rules/` applies token-span edits without rebuilding lines from token
 spellings. Its ordered rules are:
 
 - lowercase genuine Fortran keywords, intrinsics, specifiers, and real-literal exponent markers;
@@ -58,9 +59,10 @@ spellings. Its ordered rules are:
 - modernize `(/ ... /)` to `[ ... ]` outside `FORMAT`, add output-item spacing, and apply the
   narrow comment rule.
 
-A continuation line has no statement context by itself. `LineOptions::continued_*` carries facts
-such as declaration, named-argument, FORMAT, and open-group state into the per-line chain. When
-wrapping rejoins a statement, the joined text runs through the appropriate rules again.
+A continuation line has no statement context by itself. `LineState` carries facts between physical
+lines and exposes them to each stage through `LineContext`, including declaration, named-argument,
+FORMAT, and open-group state. When wrapping rejoins a statement, the joined text runs through the
+appropriate rules again.
 
 ### Style controls
 
@@ -106,8 +108,8 @@ For example:
 The per-line gates live in `passes::line_rules`; the line-count gates for redundant parentheses,
 terminal returns, and continuations live in `transform::pipeline`; program-unit spacing and blank
 caps are post-layout passes. This ownership keeps `--indent-only` on its early engine return and
-keeps continuation-sensitive facts in `LineOptions` rather than inferring statement kind from a
-continuation line.
+keeps continuation-sensitive facts in `LineState` and `LineContext` rather than inferring statement
+kind from a continuation line.
 
 Examples of the intended shapes:
 

@@ -34,6 +34,9 @@ echo "package check: unpacked release binary passed the CLI contract"
 
 listing=$(tar -tzf "$archive")
 for entry in Cargo.toml \
+             LICENSE \
+             LICENSE-THIRD-PARTY \
+             NOTICE \
              src/main.rs \
              tests/fixtures/construct_options.f90 \
              tests/fixtures/align_legacy_full.f90 \

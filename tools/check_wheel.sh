@@ -25,6 +25,25 @@ trap 'rm -rf "$work"' EXIT
 # provides `python`.
 python_bin=${PYTHON:-python}
 command -v "$python_bin" >/dev/null 2>&1 || python_bin=python3
+
+# Licence files are part of the binary-distribution contract. Check the wheel
+# itself rather than relying on setuptools' default discovery rules.
+"$python_bin" - "$dist" <<'PY'
+import sys
+import zipfile
+from pathlib import Path, PurePosixPath
+
+wheels = sorted(Path(sys.argv[1]).glob("*.whl"))
+if len(wheels) != 1:
+    raise SystemExit(f"wheel check: expected exactly one wheel, found {len(wheels)}")
+with zipfile.ZipFile(wheels[0]) as archive:
+    basenames = {PurePosixPath(name).name for name in archive.namelist()}
+required = {"LICENSE", "LICENSE-THIRD-PARTY", "NOTICE"}
+missing = sorted(required - basenames)
+if missing:
+    raise SystemExit(f"wheel check: wheel is missing legal files: {', '.join(missing)}")
+PY
+
 "$python_bin" -m venv "$work/venv"
 # Windows interpreters put the scripts in `Scripts`, everything else in `bin`.
 if [ -d "$work/venv/Scripts" ]; then

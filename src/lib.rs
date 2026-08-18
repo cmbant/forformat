@@ -80,9 +80,8 @@ pub fn format_source(source: &[u8], config: &FormatConfig) -> Result<FormatResul
 /// Format one source with the declarations of the whole project available.
 ///
 /// A single `&[u8]` cannot express project context, so it is passed separately
-/// rather than smuggled into `FormatConfig`.  Build the context once per
-/// invocation with [`analysis::analyze_project`] — that is what Gate G of the
-/// port plan measures.
+/// rather than smuggled into `FormatConfig`. Build the context once per
+/// invocation with [`analysis::analyze_project`] and reuse it for every target.
 pub fn format_source_with_context(
     source: &[u8],
     context: &analysis::ProjectContext,
