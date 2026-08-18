@@ -75,10 +75,7 @@ fn enumeration_type_is_its_own_structural_frame() {
 
     // The wrapper must not steal ordinary assignments whose operands happen
     // to spell the same words.
-    assert_eq!(
-        classify(b"enumeration = type").kind,
-        StatementKind::Unknown
-    );
+    assert_eq!(classify(b"enumeration = type").kind, StatementKind::Unknown);
     assert_eq!(classify(b"end = file").class, StatementClass::Executable);
 
     let source = b"module m\n\

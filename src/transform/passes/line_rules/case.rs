@@ -166,8 +166,7 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                     {
                         let mut replacement = compound_spelling(token.text, canonical);
                         if cx.config.style.keyword_case != KeywordCase::Preserve {
-                            replacement =
-                                apply_case(&replacement, cx.config.style.keyword_case);
+                            replacement = apply_case(&replacement, cx.config.style.keyword_case);
                         }
                         edits.replace(token.span.clone(), &replacement);
                         continue;
@@ -235,8 +234,8 @@ fn is_fortran_2023_multiword_pair(first: &[u8], second: &[u8]) -> bool {
     vocab_2023::MULTIWORD_KEYWORD_PAIRS
         .iter()
         .any(|(left, right)| {
-            first.eq_ignore_ascii_case(left.as_bytes())
-                && second.eq_ignore_ascii_case(right.as_bytes())
+            first.eq_ignore_asci_case(left.as_bytes())
+                && second.eq_ignore_asci_case(right.as_bytes())
         })
 }
 
@@ -267,7 +266,7 @@ fn tracked_component_spelling_governs(cx: &PassContext<'_>, name: &[u8]) -> bool
             Some(spelling) if spelling == name => return true,
             None => return true,
             Some(_) => {}
-        }
+      }
     }
     false
 }

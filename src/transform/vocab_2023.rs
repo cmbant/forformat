@@ -37,10 +37,8 @@ pub static COMPOUND_KEYWORDS: &[(&str, &str)] = &[
 ];
 
 /// Required-blank keyword pairs newly relevant to Fortran 2023 normalization.
-pub static MULTIWORD_KEYWORD_PAIRS: &[(&str, &str)] = &[
-    ("enumeration", "type"),
-    ("notify", "wait"),
-];
+pub static MULTIWORD_KEYWORD_PAIRS: &[(&str, &str)] =
+    &[("enumeration", "type"), ("notify", "wait")];
 
 /// Standard intrinsic procedure names through Fortran 2023, including legacy specific names.
 pub static INTRINSIC_PROCEDURES: &[&str] = &[
