@@ -7,57 +7,64 @@ pub use statement::{StatementClass, StatementInfo, StatementKind};
 /// legacy recognizer predates.
 pub fn classify(input: &[u8]) -> StatementInfo {
     let mut info = recognizers::classify(input);
-    let words: Vec<Vec<u8>> = crate::source::scanner::tokens(input)
-        .into_iter()
-        .filter(|token| {
-            token
-                .text
-                .first()
-                .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
-        })
-        .map(|token| token.text.to_ascii_lowercase())
-        .collect();
+    if !needs_supplemental_classification(&info) {
+        return info;
+    }
 
-    match words.as_slice() {
-        [first, second, ..]
-            if info.kind == StatementKind::Unknown
-                && info.class == StatementClass::Neutral
-                && first == b"enumeration"
-                && second == b"type" =>
-        {
-            info.kind = StatementKind::Enum;
-            info.class = StatementClass::Definition;
-            info.end_kind = None;
-        }
-        [first, second, third, ..]
-            if info.class == StatementClass::EndDefinition
-                && first == b"end"
-                && second == b"enumeration"
-                && third == b"type" =>
-        {
-            info.kind = StatementKind::EndEnum;
-            info.class = StatementClass::Neutral;
-            info.end_kind = None;
-        }
+    let mut words = crate::source::scanner::iter_tokens(input)
+        .filter(|token| is_word(token.text))
+        .map(|token| token.text);
+    let first = words.next();
+    let second = words.next();
+    let third = words.next();
+
+    if info.kind == StatementKind::Unknown
+        && info.class == StatementClass::Neutral
+        && word_is(first, b"enumeration")
+        && word_is(second, b"type")
+    {
+        info.kind = StatementKind::Enum;
+        info.class = StatementClass::Definition;
+        info.end_kind = None;
+    } else if info.class == StatementClass::EndDefinition
+        && word_is(first, b"end")
+        && word_is(second, b"enumeration")
+        && word_is(third, b"type")
+    {
+        info.kind = StatementKind::EndEnum;
+        info.class = StatementClass::Neutral;
+        info.end_kind = None;
+    } else if info.kind == StatementKind::Else
+        && word_is(first, b"else")
+        && word_is(second, b"where")
+    {
         // ELSE WHERE is one of the standard optional-blank adjacent keyword forms.
-        [first, second, ..]
-            if info.kind == StatementKind::Else && first == b"else" && second == b"where" =>
-        {
-            info.kind = StatementKind::ElseWhere;
-            info.class = StatementClass::Executable;
-            info.end_kind = None;
-        }
+        info.kind = StatementKind::ElseWhere;
+        info.class = StatementClass::Executable;
+        info.end_kind = None;
+    } else if info.class == StatementClass::EndDefinition
+        && word_is(first, b"end")
+        && word_is(second, b"file")
+    {
         // END FILE is the separated spelling of ENDFILE, not a definition end.
-        [first, second, ..]
-            if info.class == StatementClass::EndDefinition
-                && first == b"end"
-                && second == b"file" =>
-        {
-            info.kind = StatementKind::Unknown;
-            info.class = StatementClass::Neutral;
-            info.end_kind = None;
-        }
-        _ => {}
+        info.kind = StatementKind::Unknown;
+        info.class = StatementClass::Neutral;
+        info.end_kind = None;
     }
     info
+}
+
+fn needs_supplemental_classification(info: &StatementInfo) -> bool {
+    (info.kind == StatementKind::Unknown && info.class == StatementClass::Neutral)
+        || info.class == StatementClass::EndDefinition
+        || info.kind == StatementKind::Else
+}
+
+fn is_word(text: &[u8]) -> bool {
+    text.first()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+}
+
+fn word_is(word: Option<&[u8]>, expected: &[u8]) -> bool {
+    word.is_some_and(|word| word.eq_ignore_ascii_case(expected))
 }
