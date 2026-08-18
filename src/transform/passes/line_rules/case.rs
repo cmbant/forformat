@@ -1,8 +1,5 @@
 use super::*;
-use crate::{
-    source::syntax::is_end_construct_keyword,
-    transform::vocab_2023,
-};
+use crate::{source::syntax::is_end_construct_keyword, transform::vocab_2023};
 
 /// Rule 1: keyword case, and the case decisions the project agreed on.
 ///

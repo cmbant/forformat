@@ -3,20 +3,11 @@
 //! Keep these tables lowercase and sorted: callers use the core vocabulary's
 //! case-insensitive binary-search helper.
 
-/// Fortran 2023 language keywords and run-together END forms.
-pub static KEYWORDS: &[&str] = &[
-    "classof",
-    "enumeration",
-    "simple",
-    "typeof",
-];
+/// Fortran 2023 language keywords.
+pub static KEYWORDS: &[&str] = &["classof", "enumeration", "simple", "typeof"];
 
 /// Fortran 2023/current standard specifier words missing from the legacy table.
-pub static SPECIFIERS: &[&str] = &[
-    "iolength",
-    "named",
-    "team_number",
-];
+pub static SPECIFIERS: &[&str] = &["iolength", "named", "team_number"];
 
 /// Standard intrinsic procedure names through Fortran 2023, including legacy specific names.
 pub static INTRINSIC_PROCEDURES: &[&str] = &[
@@ -295,7 +286,4 @@ pub static STANDARD_NAMES: &[&str] = &[
 ];
 
 /// Standard complex-part designators following `%`.
-pub static COMPLEX_PART_DESIGNATORS: &[&str] = &[
-    "im",
-    "re",
-];
+pub static COMPLEX_PART_DESIGNATORS: &[&str] = &["im", "re"];
