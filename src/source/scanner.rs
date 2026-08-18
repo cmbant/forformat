@@ -16,7 +16,7 @@ pub struct Token<'a> {
 }
 
 /// Lazily iterate classifier tokens without materializing a token vector.
-pub fn iter_tokens<'a>(s: &'a [u8]) -> impl Iterator<Item = Token<'a>> + 'a {
+pub fn iter_tokens(s: &[u8]) -> impl Iterator<Item = Token<'_>> + '_ {
     let mut i = 0;
     let end = comment_start(s).unwrap_or(s.len());
     std::iter::from_fn(move || {
