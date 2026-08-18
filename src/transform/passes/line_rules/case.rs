@@ -174,7 +174,8 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                 {
                     continue;
                 }
-                if vocab::contains(vocab_2023::INTRINSIC_PROCEDURES, token.text)
+                if (vocab::contains(vocab_2023::INTRINSIC_PROCEDURES, token.text)
+                    && is_followed_by_lparen(&tokens, index))
                     || vocab::contains(vocab::INTRINSIC_NAMES, token.text)
                     || vocab::contains(vocab_2023::STANDARD_NAMES, token.text)
                     || vocab::contains(vocab::FORTRAN_SPECIFIERS, token.text)
