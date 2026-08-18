@@ -1,11 +1,16 @@
 use super::*;
-use crate::source::syntax::is_end_construct_keyword;
+use crate::{
+    source::syntax::is_end_construct_keyword,
+    transform::vocab_2023,
+};
 
 /// Rule 1: keyword case, and the case decisions the project agreed on.
 ///
 /// A word is cased only when it is a Fortran keyword and nothing in the file or
-/// project declares an identifier by that name, and it is not a macro name or
-/// a component after `%`. Every replacement is made against a token span.
+/// project declares an identifier by that name, and it is not a macro name. Derived-type
+/// components remain owned by the declared-case pass; the one exception is the standard
+/// complex-part designators `%RE` and `%IM`, which follow keyword case when no tracked
+/// derived-type component spelling governs the occurrence.
 pub fn lowercase_line(
     line: &[u8],
     cx: &PassContext,
@@ -58,6 +63,9 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                     } else if is_spaced_dotted_operator(token.text) {
                         let operator = dotted_case(token.text, cx.config.style.keyword_case);
                         add_operator_edit(line, &mut edits, token, &operator, true, &mut spacing);
+                    } else if token.text.eq_ignore_ascii_case(b".nil.") {
+                        let cased = dotted_case(token.text, cx.config.style.keyword_case);
+                        edits.replace(token.span.clone(), &cased);
                     } else if let Some(cased) =
                         dotted_word_case(token.text, cx.config.style.keyword_case)
                     {
@@ -68,6 +76,9 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                 {
                     let operator = dotted_case(token.text, cx.config.style.keyword_case);
                     add_operator_edit(line, &mut edits, token, &operator, true, &mut spacing);
+                } else if token.text.eq_ignore_ascii_case(b".nil.") {
+                    let cased = dotted_case(token.text, cx.config.style.keyword_case);
+                    edits.replace(token.span.clone(), &cased);
                 } else if let Some(cased) =
                     dotted_word_case(token.text, cx.config.style.keyword_case)
                 {
@@ -120,9 +131,18 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                 }
             }
             TokenKind::Name => {
-                // Component spelling is owned by the declared-case pass; line rules never
-                // reinterpret a name following `%`, including after continuation rejoining.
-                if index > 0 && tokens[index - 1].text == b"%" {
+                let after_percent = index > 0 && tokens[index - 1].text == b"%";
+                if after_percent {
+                    if cx.project.macros.contains(token.text)
+                        || !vocab::contains(vocab_2023::COMPLEX_PART_DESIGNATORS, token.text)
+                        || tracked_component_spelling_governs(cx, token.text)
+                    {
+                        continue;
+                    }
+                    let cased = apply_case(token.text, cx.config.style.keyword_case);
+                    if token.text != cased {
+                        edits.replace(token.span.clone(), &cased);
+                    }
                     continue;
                 }
                 if cx.project.macros.contains(token.text) {
@@ -137,7 +157,8 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                     continue;
                 }
                 let end_construct_keyword = is_end_construct_keyword(&tokens, index);
-                if vocab::contains(vocab::FORTRAN_KEYWORDS, token.text)
+                if (vocab::contains(vocab::FORTRAN_KEYWORDS, token.text)
+                    || vocab::contains(vocab_2023::KEYWORDS, token.text))
                     && (end_construct_keyword
                         || !declared_names.suppresses_keyword(
                             line_index,
@@ -156,8 +177,11 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                 {
                     continue;
                 }
-                if vocab::contains(vocab::INTRINSIC_NAMES, token.text)
+                if vocab::contains(vocab_2023::INTRINSIC_PROCEDURES, token.text)
+                    || vocab::contains(vocab::INTRINSIC_NAMES, token.text)
+                    || vocab::contains(vocab_2023::STANDARD_NAMES, token.text)
                     || vocab::contains(vocab::FORTRAN_SPECIFIERS, token.text)
+                    || vocab::contains(vocab_2023::SPECIFIERS, token.text)
                 {
                     if token.is(b"precision")
                         && !is_followed_by_lparen(&tokens, index)
@@ -178,6 +202,27 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
         }
     }
     edits.finish()
+}
+
+/// The declared-case pass runs before this rule and has already put every resolvable
+/// derived-type component into its governing spelling. Preserve that spelling rather than
+/// interpreting a custom component named `RE` or `IM` as a complex-part designator.
+///
+/// If component declarations disagree project-wide, stay conservative and preserve the
+/// authored spelling: there is no unique global spelling with which to distinguish a
+/// tracked custom member from the standard designator at this token-local stage.
+fn tracked_component_spelling_governs(cx: &PassContext<'_>, name: &[u8]) -> bool {
+    for components in [&cx.local.cases.components, &cx.project.cases.components] {
+        if !components.contains_name(name) {
+            continue;
+        }
+        match components.unique_spelling(name) {
+            Some(spelling) if spelling == name => return true,
+            None => return true,
+            Some(_) => {}
+        }
+    }
+    false
 }
 
 fn keyword_in_context(tokens: &[crate::source::Token], index: usize) -> bool {
