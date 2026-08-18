@@ -64,6 +64,7 @@ Mode switches are valueless on the command line. In TOML use the single `mode` k
 | Option | Configuration | Meaning |
 | --- | --- | --- |
 | positional `PATH ...` | — | format explicit files in place |
+| positional `DIR` (single argument) | — | equivalent to `--all-files DIR`: format that directory's tracked sources |
 | `--stdin` | — | read source from stdin; this is also the default when no path is supplied |
 | `--stdout` | — | write one explicit file's formatted result to stdout instead of replacing it |
 | `--all-files [DIR]` | — | select tracked sources owned by the checkout; submodules provide context only |

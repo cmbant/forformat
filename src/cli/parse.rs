@@ -165,27 +165,23 @@ fn config_start(command: &Command, cwd: &Path) -> PathBuf {
                     .unwrap_or_else(|| cwd.to_path_buf())
             };
         }
-        if !invocation.all && !invocation.all_files && invocation.paths.len() == 1 {
+        if invocation.paths.len() == 1 {
             let candidate = if invocation.paths[0].is_absolute() {
                 invocation.paths[0].clone()
             } else {
                 cwd.join(&invocation.paths[0])
             };
-            if candidate.is_file() {
+            // A lone directory argument selects that directory's tracked
+            // sources (see `promote_directory_argument` in io/mod.rs), so its
+            // config discovery matches explicit `--all`/`--all-files DIR`.
+            if candidate.is_dir() {
+                return candidate;
+            }
+            if !invocation.all && !invocation.all_files && candidate.is_file() {
                 return candidate
                     .parent()
                     .map(Path::to_path_buf)
                     .unwrap_or_else(|| cwd.to_path_buf());
-            }
-        }
-        if (invocation.all || invocation.all_files) && invocation.paths.len() == 1 {
-            let candidate = if invocation.paths[0].is_absolute() {
-                invocation.paths[0].clone()
-            } else {
-                cwd.join(&invocation.paths[0])
-            };
-            if candidate.is_dir() {
-                return candidate;
             }
         }
     }

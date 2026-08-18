@@ -27,7 +27,8 @@ fn render_usage() -> String {
     output.push_str(
         "  Query modes cannot be combined with path-update, --check, or --diff.\n\
 Automatic fixed/free input detection is enabled by default; use -ifree or\n\
---input-format=free to force free-form input. Fixed-form output remains unsupported.",
+--input-format=free to force free-form input. Fixed-form output remains unsupported.\n\
+A single directory PATH behaves like --all-files DIR.",
     );
     output
 }

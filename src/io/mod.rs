@@ -774,9 +774,30 @@ fn source_form_name(form: SourceForm) -> &'static str {
     }
 }
 
+/// A lone positional argument that names a directory selects that directory's
+/// tracked sources, matching `--all-files DIR` and the directory-recursion
+/// convention of other formatters. `--stdout` and `--isolated` keep their
+/// stricter single-file semantics, so a directory there is left to fail with
+/// its existing "not a source file" diagnostic.
+fn promote_directory_argument(mut invocation: Invocation) -> Invocation {
+    if invocation.all
+        || invocation.all_files
+        || invocation.stdout
+        || invocation.isolated
+        || invocation.paths.len() != 1
+    {
+        return invocation;
+    }
+    if resolve_input(&invocation.paths[0], None).is_dir() {
+        invocation.all_files = true;
+    }
+    invocation
+}
+
 /// Execute one parsed invocation. Return value is the process status for a
 /// successful operation: 0 clean/success, 1 differences found.
 pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
+    let invocation = promote_directory_argument(invocation);
     if invocation.query_format {
         return execute_query_format(invocation);
     }

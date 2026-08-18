@@ -200,6 +200,36 @@ fn show_files_accepts_an_optional_directory_and_does_not_modify_sources() {
 }
 
 #[test]
+fn a_lone_directory_argument_behaves_like_all_files() {
+    let repo = temp_repo();
+    fs::create_dir(repo.join("src")).unwrap();
+    let source = b"program p\nx=1\nend program p\n";
+    fs::write(repo.join("src/main.f90"), source).unwrap();
+    fs::write(repo.join("other.f90"), source).unwrap();
+    git_add(&repo);
+
+    let listed = run(&repo, &["--indent-only", "src", "--show-files"]);
+    assert_eq!(listed.status.code(), Some(0));
+    assert_eq!(listed.stdout, b"src/main.f90\n");
+
+    let formatted = run(&repo, &["--indent-only", "src"]);
+    assert_eq!(formatted.status.code(), Some(0));
+    assert_eq!(formatted.stdout, b"src/main.f90\n");
+    assert_eq!(
+        fs::read(repo.join("src/main.f90")).unwrap(),
+        b"program p\n   x=1\nend program p\n"
+    );
+    assert_eq!(fs::read(repo.join("other.f90")).unwrap(), *source);
+
+    // Explicit `--all`/`--all-files` and multiple paths keep their existing
+    // single-directory-only semantics; a directory is not promoted there.
+    let two_paths = run(&repo, &["--indent-only", "src", "other.f90"]);
+    assert_eq!(two_paths.status.code(), Some(2));
+
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
 fn an_excluded_explicit_path_is_still_formatted() {
     let repo = temp_repo();
     fs::create_dir(repo.join("vendor")).unwrap();
