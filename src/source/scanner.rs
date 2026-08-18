@@ -15,16 +15,16 @@ pub struct Token<'a> {
     pub end: usize,
 }
 
-pub fn tokens(s: &[u8]) -> Vec<Token<'_>> {
-    let mut out = Vec::new();
+/// Lazily iterate classifier tokens without materializing a token vector.
+pub fn iter_tokens<'a>(s: &'a [u8]) -> impl Iterator<Item = Token<'a>> + 'a {
     let mut i = 0;
     let end = comment_start(s).unwrap_or(s.len());
-    while i < end {
+    std::iter::from_fn(move || {
         while i < end && s[i].is_ascii_whitespace() {
             i += 1;
         }
         if i >= end {
-            break;
+            return None;
         }
         let start = i;
         let c = s[i];
@@ -58,13 +58,16 @@ pub fn tokens(s: &[u8]) -> Vec<Token<'_>> {
         } else {
             i += 1;
         }
-        out.push(Token {
+        Some(Token {
             text: &s[start..i],
             start,
             end: i,
-        });
-    }
-    out
+        })
+    })
+}
+
+pub fn tokens(s: &[u8]) -> Vec<Token<'_>> {
+    iter_tokens(s).collect()
 }
 
 /// Split a joined logical line at semicolons that are real statement
