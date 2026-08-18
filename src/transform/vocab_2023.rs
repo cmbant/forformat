@@ -4,10 +4,43 @@
 //! case-insensitive binary-search helper.
 
 /// Fortran 2023 language keywords.
-pub static KEYWORDS: &[&str] = &["classof", "enumeration", "simple", "typeof"];
+pub static KEYWORDS: &[&str] = &[
+    "classof",
+    "doubleprecision",
+    "endcritical",
+    "endenum",
+    "endprocedure",
+    "endsubmodule",
+    "endteam",
+    "enumeration",
+    "selectcase",
+    "selectrank",
+    "selecttype",
+    "simple",
+    "typeof",
+];
 
 /// Fortran 2023/current standard specifier words missing from the legacy table.
 pub static SPECIFIERS: &[&str] = &["iolength", "named", "team_number"];
+
+/// Optional-blank adjacent-keyword spellings from Fortran 2023 Table 6.2 that
+/// are missing from the legacy compound table. `GO TO` has its own join policy,
+/// and `IN OUT` is an INTENT specifier rather than a statement-head compound.
+pub static COMPOUND_KEYWORDS: &[(&str, &str)] = &[
+    ("doubleprecision", "double precision"),
+    ("elsewhere", "else where"),
+    ("endcritical", "end critical"),
+    ("endenum", "end enum"),
+    ("endprocedure", "end procedure"),
+    ("endsubmodule", "end submodule"),
+    ("endteam", "end team"),
+];
+
+/// Required-blank keyword pairs newly relevant to Fortran 2023 normalization.
+pub static MULTIWORD_KEYWORD_PAIRS: &[(&str, &str)] = &[
+    ("enumeration", "type"),
+    ("notify", "wait"),
+];
 
 /// Standard intrinsic procedure names through Fortran 2023, including legacy specific names.
 pub static INTRINSIC_PROCEDURES: &[&str] = &[

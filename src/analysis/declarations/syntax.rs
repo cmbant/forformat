@@ -75,6 +75,7 @@ fn old_style_variable_names(tokens: &[Token<'_>], first_index: usize) -> Vec<Vec
             | b"class"
             | b"typeof"
             | b"classof"
+            | b"doubleprecision"
     ) || first.is(b"double")
         && tokens
             .get(first_index + 1)

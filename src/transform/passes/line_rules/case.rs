@@ -39,6 +39,17 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
         && context.open_groups.is_empty()
         && !context.continued_initializer;
     let mut edits = EditBuffer::new(line);
+    if !is_format_statement(&tokens) && !context.continued_format {
+        for pair in tokens.windows(2) {
+            if pair[0].kind == TokenKind::Name
+                && pair[1].kind == TokenKind::Name
+                && horizontal_gap(line, pair[0].span.end, pair[1].span.start)
+                && is_fortran_2023_multiword_pair(pair[0].text, pair[1].text)
+            {
+                edits.replace(pair[0].span.end..pair[1].span.start, b" ");
+            }
+        }
+    }
     let mut spacing = OperatorSpacing::default();
     for (index, token) in tokens.iter().enumerate() {
         match token.kind {
@@ -145,6 +156,23 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                 if cx.project.macros.contains(token.text) {
                     continue;
                 }
+                if index == first_statement_index(&tokens)
+                    && cx.config.style.split_compound_keywords
+                    && tokens.get(index + 1).is_none_or(|next| next.text != b"=")
+                    && !declared_names.suppresses_keyword(line_index, token.text, false)
+                {
+                    if let Some(canonical) =
+                        vocab::lookup_pair(vocab_2023::COMPOUND_KEYWORDS, token.text)
+                    {
+                        let mut replacement = compound_spelling(token.text, canonical);
+                        if cx.config.style.keyword_case != KeywordCase::Preserve {
+                            replacement =
+                                apply_case(&replacement, cx.config.style.keyword_case);
+                        }
+                        edits.replace(token.span.clone(), &replacement);
+                        continue;
+                    }
+                }
                 let cased = apply_case(token.text, cx.config.style.keyword_case);
                 let specifier_argument = is_specifier_keyword_argument(&tokens, index);
                 if (is_contextual_declaration_name(line, &tokens, index, continued_entity_list)
@@ -175,7 +203,8 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                     continue;
                 }
                 if (vocab::contains(vocab_2023::INTRINSIC_PROCEDURES, token.text)
-                    && is_followed_by_lparen(&tokens, index))
+                    && (is_followed_by_lparen(&tokens, index)
+                        || is_call_procedure_designator(&tokens, index)))
                     || vocab::contains(vocab::INTRINSIC_NAMES, token.text)
                     || vocab::contains(vocab_2023::STANDARD_NAMES, token.text)
                     || vocab::contains(vocab::FORTRAN_SPECIFIERS, token.text)
@@ -200,6 +229,26 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
         }
     }
     edits.finish()
+}
+
+fn is_fortran_2023_multiword_pair(first: &[u8], second: &[u8]) -> bool {
+    vocab_2023::MULTIWORD_KEYWORD_PAIRS
+        .iter()
+        .any(|(left, right)| {
+            first.eq_ignore_ascii_case(left.as_bytes())
+                && second.eq_ignore_ascii_case(right.as_bytes())
+        })
+}
+
+fn is_call_procedure_designator(tokens: &[crate::source::Token<'_>], index: usize) -> bool {
+    let Some(call) = index.checked_sub(1) else {
+        return false;
+    };
+    if !tokens[call].is_name(b"call") {
+        return false;
+    }
+    call == first_statement_index(tokens)
+        || if_condition_close(tokens).is_some_and(|close| call == close + 1)
 }
 
 /// The declared-case pass runs before this rule and has already put every resolvable
