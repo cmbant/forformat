@@ -26,6 +26,14 @@ Two rules I1 keeps re-teaching:
 
 ## Verification
 
+`.githooks/pre-commit` runs `cargo fmt --check` and `cargo clippy` whenever a commit stages a `.rs`
+file or a manifest. Those two are cheap enough to gate a commit (~7s warm); the rest of the bar
+below stays in CI. Enable the hook once per clone (the devcontainer does this on create):
+
+```sh
+git config core.hooksPath .githooks
+```
+
 Run the full local bar (mirrors `.github/workflows/rust-checks.yml` and the `release` job in
 `ci.yml`):
 
