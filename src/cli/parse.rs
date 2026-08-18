@@ -136,7 +136,11 @@ where
     let mut command = parse_inner(combined)?.command;
     if !config_context_paths.is_empty() {
         if let Command::Run(invocation) = &mut command {
-            if invocation.context_paths.is_empty() {
+            if invocation.context_paths.is_empty()
+                && !invocation.isolated
+                && !invocation.query_format
+                && !invocation.show_files
+            {
                 invocation.context_paths = config_context_paths;
             }
         }

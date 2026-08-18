@@ -37,6 +37,7 @@ RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
 ./tools/check_fixture_syntax.sh target/debug/forformat
 ./tools/check_fuzz_regression.sh
 ./tools/check_cli_contract.sh target/debug/forformat
+./tools/check_docs.sh target/debug/forformat
 
 cargo build --locked --release
 ./tools/check_cli_contract.sh target/release/forformat
@@ -60,6 +61,14 @@ manifest row, fix it, and rerun the checks. Keep expected findent outputs unchan
 compatibility contract itself changes.
 
 The devcontainer has original findent installed at /opt/findent.
+
+## Documentation
+
+Keep `docs/options.md` as the primary reference for normal user-facing options. Legacy findent
+spellings that are only compatibility aliases can stay in the migration/compatibility docs. When a
+long option advertised by `--help` or a configuration key changes, update the reference.
+`tools/check_docs.sh` checks advertised help/reference coverage, local Markdown links, stale
+fixed/free wording, and the quick-start formatter examples; it is not an exhaustive parser inventory.
 
 ## Traps
 

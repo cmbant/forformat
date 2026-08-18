@@ -7,9 +7,8 @@ pub fn usage() -> &'static str {
 }
 
 fn render_usage() -> String {
-    let mut output = String::from(
-        "Usage: forformat [OPTIONS] < input > output\n\nFree-form Fortran formatter.\n",
-    );
+    let mut output =
+        String::from("Usage: forformat [OPTIONS] [PATH ...]\n\nFree-form Fortran formatter.\n");
     for option in OPTIONS {
         let Some(help) = option.help else {
             continue;

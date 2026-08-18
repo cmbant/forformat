@@ -1,21 +1,21 @@
 # Rust formatter compatibility
 
-The formatter supports both stdin/stdout and path-based workflows for free-form Fortran. The
-library core is byte-oriented and preserves source spelling and non-trailing body bytes while
-replacing leading indentation and trimming trailing spaces/tabs. A missing final line terminator is
-added using the terminator on the preceding physical line (LF for a one-line unterminated file);
-existing LF, CRLF, and mixed terminators are preserved.
+The formatter supports both stdin/stdout and path-based workflows for free-form Fortran. In
+`--indent-only`, the byte-oriented library core preserves source spelling and non-trailing body
+bytes while replacing leading indentation and trimming trailing spaces/tabs. A missing final line
+terminator is added using the terminator on the preceding physical line (LF for a one-line
+unterminated file); existing LF, CRLF, and mixed terminators are preserved.
 
 Supported compatibility options include the global and per-construct indentation controls, start
 indent, continuation policies, labels, includes, OpenMP free-form sentinels, CPP branch snapshots,
 `findentfix:` directives, maximum indentation, `END` refactoring, whitespace reduction, and the
-`last-indent`/`last-usable` queries described in `history/findent-port-plan.md`.
+`last-indent`/`last-usable` queries.
 
 The Rust release intentionally diverges from legacy findent in three ways:
 
-- Fixed-form *output* requests (`-ifixed`, `-ofixed`, and the fixed format long options) fail with
-  status 2 instead of being silently accepted. Fixed-form *input* is detected and skipped rather
-  than rejected: see below.
+- Explicit fixed-form input (`-ifixed`, `--input-format=fixed`) and output (`-ofixed`,
+  `--output-format=fixed`) requests fail with status 2. Automatic input detection may still classify
+  a source as fixed-form and skip it unchanged: see below.
 - Unknown options fail with status 2, making misspelled options visible.
 - `FINDENT_FLAGS` is not read; configuration comes only from the command line or library API.
 

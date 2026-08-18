@@ -1,9 +1,8 @@
 # Full-mode guide
 
 Full mode combines lexical normalization, declaration-driven case handling, wrapping, and the
-findent layout engine. The historical design rationale is in
-[`history/full-mode-port-design.md`](history/full-mode-port-design.md); the compatibility boundary
-is in [`compatibility.md`](compatibility.md).
+findent layout engine. The compatibility boundary is in
+[`compatibility.md`](compatibility.md).
 
 ## Validation loop
 
