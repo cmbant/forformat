@@ -174,10 +174,9 @@ for the full repository verification bar.
 
 ## Relationship to findent
 
-`forformat` is a clean-room Rust reimplementation informed by findent 4.3.7. `--indent-only` is the
-findent-compatible indentation contract; full mode intentionally adds behavior beyond that
-contract. See [compatibility](docs/compatibility.md) for the reviewed differences and
-[migration](docs/migration.md) for legacy option mapping.
+`--indent-only` implements the findent-compatible indentation contract for findent 4.3.7; full mode
+intentionally adds behavior beyond that contract. See [compatibility](docs/compatibility.md) for the
+reviewed differences and [migration](docs/migration.md) for legacy option mapping.
 
-The project is BSD-3-Clause licensed. Attribution and third-party terms are in [`NOTICE`](NOTICE)
-and [`LICENSE-THIRD-PARTY`](LICENSE-THIRD-PARTY).
+The project is BSD-3-Clause licensed. Third-party attribution and license terms are in
+[`LICENSE-THIRD-PARTY`](LICENSE-THIRD-PARTY).
