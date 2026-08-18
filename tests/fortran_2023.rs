@@ -3,7 +3,7 @@ use forformat::{
     classify::{classify, StatementClass, StatementKind},
     format_source,
     transform::{document::Document, vocab, vocab_2023},
-    FormatConfig, FormatMode,
+    FormatConfig, FormatMode, KeywordCase,
 };
 
 fn normalize(source: &[u8]) -> Vec<u8> {
@@ -56,6 +56,33 @@ end program p\n";
     assert!(output.contains("enumeration type colour"));
     assert!(output.contains("end enumeration type colour"));
     assert!(output.contains("notify wait(flag)"));
+}
+
+#[test]
+fn enumeration_intrinsics_are_cased_as_call_heads() {
+    assert!(vocab::contains(vocab_2023::INTRINSIC_PROCEDURES, b"next"));
+    assert!(vocab::contains(
+        vocab_2023::INTRINSIC_PROCEDURES,
+        b"previous"
+    ));
+
+    let mut config = FormatConfig {
+        mode: FormatMode::NormalizeOnly,
+        apply_indent: false,
+        ..FormatConfig::default()
+    };
+    config.style.keyword_case = KeywordCase::Upper;
+    let output = String::from_utf8(
+        format_source(
+            b"program p\nx = next(value)\nx = previous(value)\nend program p\n",
+            &config,
+        )
+        .unwrap()
+        .bytes,
+    )
+    .unwrap();
+    assert!(output.contains("x = NEXT(value)"));
+    assert!(output.contains("x = PREVIOUS(value)"));
 }
 
 #[test]
