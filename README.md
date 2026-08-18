@@ -1,6 +1,7 @@
 # forformat
 
 [![CI](https://github.com/cmbant/forformat/actions/workflows/ci.yml/badge.svg)](https://github.com/cmbant/forformat/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/forformat.svg)](https://pypi.org/project/forformat/)
 
 `forformat` is a standalone formatter for free-form Fortran. Its native implementation is written
 in Rust and provides findent-compatible indentation together with a full-format mode for
@@ -377,15 +378,11 @@ bash tools/check_wheel.sh dist
 Documentation:
 
 - [`AGENTS.md`](AGENTS.md) — the short orientation, and the checks a change has to pass.
-- [`docs/history/full-mode-port-design.md`](docs/history/full-mode-port-design.md) — historical
-  port design and rationale.
 - [`docs/full-mode.md`](docs/full-mode.md) — the full-mode rules, standing checks, and known traps.
 - [`docs/compatibility.md`](docs/compatibility.md) — the findent-compatibility boundary and the
   reviewed divergences.
 - [`docs/migration.md`](docs/migration.md) and [`docs/file-workflow.md`](docs/file-workflow.md) —
   migration notes and the file/project workflow.
-- [`docs/history/`](docs/history/) — the original port plan and its closed work ledger, kept for
-  provenance.
 
 The formatter's pipeline and idempotence invariants are described at the top of
 [`src/format/full.rs`](src/format/full.rs).
