@@ -1969,14 +1969,15 @@ end subroutine s
 }
 
 #[test]
-fn a_declaration_widened_by_a_neighbour_s_break_is_wrapped_in_the_same_run() {
+fn a_declaration_block_is_not_padded_past_the_budget_by_a_neighbour_s_break() {
     // Reduced from CP2K `src/motion/pint_piglet.F`.  Every physical line here
     // is inside the budget, so the authored layout offers the wrapper nothing.
     // But breaking the `INTEGER` entity list takes it out of the `::`
-    // alignment block, the block re-forms around the wider `DIMENSION(...)`
-    // continuation, and the `TYPE(...)` declaration that measured 79 columns
-    // is emitted at 90.  Measuring only the authored layout never discovered
-    // that, and the next run — which reads the widened line as authored — did.
+    // alignment block, and the block re-forms around the wider `DIMENSION(...)`
+    // continuation — which used to pad the 79-column `TYPE(...)` declaration
+    // out to 90 and leave the next run to wrap it.  Step 17 now treats the
+    // budget as part of the column it may compress onto, so the wide member is
+    // exempted and its short neighbours stay both aligned and inside the line.
     let source = "\
 MODULE pint_reduction
    IMPLICIT NONE
@@ -2000,9 +2001,9 @@ END MODULE pint_reduction
     assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
     assert!(
         once.lines()
-            .any(|line| line.contains("pointer") && line.ends_with("rng_section, &")),
-        "the declaration the neighbouring break widened was never offered to \
-         the wrapper:\n{once}"
+            .any(|line| line.contains("pointer :: rng_section, smalls_section")),
+        "the declaration was wrapped for a width alignment should not have \
+         given it:\n{once}"
     );
     for line in once.lines() {
         assert!(
@@ -2319,6 +2320,335 @@ end subroutine s
         once.matches("MyZero").count(),
         4,
         "the split declared name was not cased on the first pass:\n{once}"
+    );
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+}
+
+#[test]
+fn a_keyword_argument_moved_to_a_continuation_is_still_a_keyword_argument() {
+    // Reduced from OpenFAST `Test_MeshMapping_Mod.f90`.  `errmsg` is an I/O
+    // specifier and a module variable, and the file-declared name does not
+    // suppress the keyword casing of a *keyword argument*.  The `(` and the
+    // `,` that make it one stay on the head line once the wrapper breaks the
+    // call, so the continuation read `ErrMsg=` as an ordinary name, kept the
+    // declared spelling, and the two readings alternated from run to run.
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        wrap: forformat::WrapConfig {
+            enabled: true,
+            line_length: 80,
+        },
+        ..FormatConfig::default()
+    };
+    let source = "\
+module m
+   integer :: ErrStat
+   character(1024) :: ErrMsg
+contains
+   subroutine s(theta, Orientation)
+      call SmllRotTrans('orientation', theta(1), theta(2), theta(3), Orientation, ErrStat=ErrStat, ErrMsg=ErrMsg)
+   end subroutine s
+end module m
+";
+    let (once, twice) = full_twice(source, &config);
+    assert!(
+        once.contains("errmsg=ErrMsg"),
+        "the keyword argument was not cased as one on the continuation:\n{once}"
+    );
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+}
+
+#[test]
+fn a_component_name_after_a_broken_percent_is_not_a_keyword() {
+    // Reduced from MPAS `mpas_pool_routines.F`, whose columns are deep enough
+    // that the wrapper breaks between `%` and the component it selects.  The
+    // continuation then opens with a bare `data`, which is a statement keyword
+    // to a line that cannot see the `%` on the line above.
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        style: StyleConfig {
+            keyword_case: KeywordCase::Upper,
+            ..StyleConfig::default()
+        },
+        ..FormatConfig::default()
+    };
+    let source = "\
+subroutine s(ptr, local_err)
+   deallocate(ptr % &
+      data % simple_int, stat=local_err)
+end subroutine s
+";
+    let (once, twice) = full_twice(source, &config);
+    assert!(
+        once.contains("data % simple_int"),
+        "the component name was cased as a keyword:\n{once}"
+    );
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+}
+
+#[test]
+fn an_entity_list_continues_past_a_type_the_formatter_cannot_read() {
+    // Reduced from CP2K `torch_api.F`, a fypp template whose type is
+    // `${type_f}$`.  The declared-entity rule asked whether the *statement*
+    // began with a type keyword, which a template expansion never does, so
+    // once the wrapper moved the entity onto its own line the name `source`
+    // read as the `SOURCE=` keyword.  The top-level `::` the statement
+    // already carried is what makes the continuation an entity list.
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        style: StyleConfig {
+            keyword_case: KeywordCase::Upper,
+            ..StyleConfig::default()
+        },
+        ..FormatConfig::default()
+    };
+    let source = "\
+MODULE m
+   SUBROUTINE torch_tensor_from_array(tensor, src)
+      TYPE(torch_tensor_type), INTENT(INOUT) :: tensor
+      ${type_f}$, DIMENSION(:), ALLOCATABLE, INTENT(IN) :: &
+         source
+   END SUBROUTINE torch_tensor_from_array
+END MODULE m
+";
+    let (once, twice) = full_twice(source, &config);
+    assert!(
+        once.contains("         source"),
+        "the declared entity was cased as a keyword:\n{once}"
+    );
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+}
+
+#[test]
+fn an_automatic_start_indent_survives_wrapping_its_own_first_statement() {
+    // Reduced from Q-E `CPV/src/forces.f90`.  `--start-indent=auto` reads the
+    // indentation of the first significant statement, and full mode hands the
+    // engine text the wrapper has already stripped of indentation: a wrapped
+    // first statement guessed zero, the whole file slid left, and the columns
+    // the wrapper had measured against were not the ones emitted.
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        auto_start_indent: true,
+        indent: 4,
+        construct_indents: forformat::ConstructIndents::with_indent(4),
+        contains_indent: 4,
+        wrap: forformat::WrapConfig {
+            enabled: true,
+            line_length: 80,
+        },
+        ..FormatConfig::default()
+    };
+    // Written without the `\`-continuation the other cases use: the escape
+    // eats the leading whitespace, and this case is *about* the leading
+    // whitespace of the first line.
+    let source = concat!(
+        "      subroutine s(aaaaaaaaaaaaaa, bbbbbbbbbbbbbbbb, cccccccccccccccc, dddddddddddddd, ee)\n",
+        "      integer :: a\n",
+        "      a = 1\n",
+        "      end subroutine s\n",
+    );
+    let (once, twice) = full_twice(source, &config);
+    assert!(
+        once.starts_with("      subroutine s("),
+        "the guessed start indent did not survive the wrap:\n{once}"
+    );
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+}
+
+#[test]
+fn a_refactored_end_statement_is_never_wrapped() {
+    // Reduced from MPAS `mpas_ocn_particle_list.F`.  `--refactor-end` replaces
+    // the *first physical line's* body with the whole rewritten statement, so a
+    // break the wrapper chose was discarded together with its ` &` and the
+    // continuation stayed behind as a bare procedure name on its own line —
+    // not Fortran, and one more copy of it on every further run.
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        refactor_end: true,
+        uppercase_end: true,
+        style: StyleConfig {
+            keyword_case: KeywordCase::Upper,
+            ..StyleConfig::default()
+        },
+        wrap: forformat::WrapConfig {
+            enabled: true,
+            line_length: 80,
+        },
+        ..FormatConfig::default()
+    };
+    let source = "\
+module m
+contains
+   subroutine mpas_particle_list_transfer_particles_from_block_to_named_block(a)
+      integer :: a
+      a = 1
+   end subroutine mpas_particle_list_transfer_particles_from_block_to_named_block !}}}
+end module m
+";
+    let (once, twice) = full_twice(source, &config);
+    assert_eq!(
+        once.matches("mpas_particle_list_transfer_particles_from_block_to_named_block")
+            .count(),
+        2,
+        "the refactored end statement was wrapped:\n{once}"
+    );
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+}
+
+#[test]
+fn a_second_space_after_a_separator_is_not_measured_as_a_column() {
+    // Reduced from CP2K `src/common/cp_iter_types.F` under the corpus
+    // `full-layout-edge` profile.  The author wrote `::  each_desc_labels`, and
+    // step 17 writes exactly one space after a separator — so the wrapper was
+    // measuring a column the emitted line does not have.  At this width that
+    // one column is the difference between the literal split the wrapper can
+    // make and `NoSafeBreak`: the first run left the statement at 185 columns
+    // and the second, reading the collapsed separator, wrapped it.
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        indent: 8,
+        construct_indents: forformat::ConstructIndents::with_indent(8),
+        indent_continuation: false,
+        align_paren: true,
+        align_paren_value: 8,
+        wrap: forformat::WrapConfig {
+            enabled: true,
+            line_length: 80,
+        },
+        ..FormatConfig::default()
+    };
+    let source = "\
+MODULE m
+   IMPLICIT NONE
+   CHARACTER(LEN=default_path_length), PARAMETER, PUBLIC, DIMENSION(19) ::  each_desc_labels = [ &
+                                                \"Iteration level for __ROOT__ (fictitious iteration level)                      \", &
+                                                \"Iteration level for an ENERGY/ENERGY_FORCE calculation.                        \"]
+END MODULE m
+";
+    let (once, twice) = full_twice(source, &config);
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+}
+
+#[test]
+fn one_wide_declaration_does_not_pad_its_block_out_of_the_budget() {
+    // Reduced from SPECFEM3D `input_output_mod.f90` under the corpus
+    // `full-indent-none` profile.  The wide `ALLOCATABLE` declaration wraps,
+    // and its head then sets the block column for eight short neighbours —
+    // pushing them to 88 columns, which the next run wrapped, which narrowed
+    // the block again.  Step 17 now exempts the member that cannot share the
+    // column inside the budget instead of padding the block past it.
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        apply_indent: false,
+        align_paren: true,
+        align_paren_value: 8,
+        align_comments: true,
+        wrap: forformat::WrapConfig {
+            enabled: true,
+            line_length: 80,
+        },
+        ..FormatConfig::default()
+    };
+    let source = "\
+module m
+contains
+  subroutine read_data()
+    real(kind=CUSTOM_REAL), dimension(:,:,:), allocatable :: Gather, Gather_loc
+    integer                                             :: status(MPI_STATUS_SIZE)
+    real(kind=CUSTOM_REAL)                              :: dummy_real, W
+    character(len=MAX_LEN_STRING)                       :: filename
+    logical                                             :: data_comp_inv, data_comp_read
+    character(len=1)                                    :: data_type_inv, data_type_read
+    character(len=3)                                    :: data_sys_inv, data_sys_read
+  end subroutine read_data
+end module m
+";
+    let (once, twice) = full_twice(source, &config);
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+    for line in once.lines() {
+        assert!(
+            line.len() <= 80,
+            "alignment emitted {} columns: {line}",
+            line.len()
+        );
+    }
+    assert!(
+        once.lines()
+            .any(|line| line.contains("logical                       :: data_comp_inv")),
+        "the block lost the alignment it could still afford:\n{once}"
+    );
+}
+
+#[test]
+fn a_trailing_comment_does_not_collapse_a_declaration_block() {
+    // OpenFAST `FAST_Farm.f90` aligns declarations that carry long trailing
+    // comments.  The comment is step 17b's to place and cannot be shortened by
+    // a narrower `::`, so it is not charged to the block: only the code decides
+    // whether a member can share the column.
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        align_comments: true,
+        wrap: forformat::WrapConfig {
+            enabled: true,
+            line_length: 80,
+        },
+        ..FormatConfig::default()
+    };
+    let source = "\
+program p
+   integer(IntKi)          :: i_turb          ! current turbine number, described at some length
+   integer(IntKi)          :: n_t_global      ! simulation time step, also described at length
+   character(ErrMsgLen)    :: ErrMsg          ! error message, and this one runs long as well
+end program p
+";
+    let (once, twice) = full_twice(source, &config);
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+    assert!(
+        once.contains("integer(IntKi)       :: i_turb"),
+        "the block lost the alignment its code could still afford:\n{once}"
+    );
+}
+
+#[test]
+fn refactor_end_only_rewrites_a_statement_that_owns_its_line() {
+    // The rewritten text replaces the whole first physical line, so a statement
+    // that does not own that line loses something when it is replaced: a
+    // continued `end subroutine &` leaves its continuation behind as a bare
+    // name — which gfortran rejects — and a semicolon-joined `end module`
+    // disappears with the line that carried it.
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        refactor_end: true,
+        uppercase_end: true,
+        ..FormatConfig::default()
+    };
+    let continued = "\
+module m
+contains
+   subroutine foo(a)
+      integer :: a
+   end subroutine &
+      foo
+end module m
+";
+    let (once, twice) = full_twice(continued, &config);
+    assert!(
+        once.contains("end subroutine &"),
+        "the continued end statement was rewritten:\n{once}"
+    );
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+
+    let joined = "\
+module m
+contains
+   subroutine foo(a)
+      integer :: a
+   end subroutine foo; end module m
+";
+    let (once, twice) = full_twice(joined, &config);
+    assert!(
+        once.contains("end subroutine foo; end module m"),
+        "the semicolon-joined end statement lost its second half:\n{once}"
     );
     assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
 }

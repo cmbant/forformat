@@ -20,5 +20,5 @@
       ]
     }
   },
-  "postCreateCommand": "findent -h > /dev/null && git config --global --add safe.directory \"${containerWorkspaceFolder}\""
+  "postCreateCommand": "findent -h > /dev/null && git config --global --add safe.directory \"${containerWorkspaceFolder}\" && git -C \"${containerWorkspaceFolder}\" config core.hooksPath .githooks"
 }

@@ -204,6 +204,14 @@ impl Planner {
         info: &StatementInfo,
         config: &FormatConfig,
     ) -> Option<Vec<u8>> {
+        // The replacement stands in for the whole *first physical line*, so it
+        // may only be produced when that line is the whole statement. A
+        // continued `end subroutine &` / `foo` would keep its continuation as a
+        // bare name on a line of its own, and `end subroutine foo; end module m`
+        // would lose the second statement with the line that carried it.
+        if group.lines.len() > 1 || group.statements.len() > 1 {
+            return None;
+        }
         let frame = self
             .stack
             .frames
@@ -468,6 +476,38 @@ fn sentinel_payload_is_blank(code: &[u8]) -> bool {
     let code = code.trim_ascii_start();
     let payload = code.strip_prefix(b"!$ ".as_slice()).unwrap_or(code);
     payload.iter().all(u8::is_ascii_whitespace)
+}
+
+/// Resolve `--start-indent=auto` against the authored text, once.
+///
+/// The guess reads the indentation of the first significant statement — and
+/// full mode is about to remove exactly that. The wrapper emits statement text
+/// at column zero, because the layout engine owns every column, so a document
+/// whose first statement was wrapped guesses zero when the engine runs over it
+/// and the whole file slides left. Worse, the width the wrapper measured
+/// against came from the *authored* guess, so the two disagree and the next run
+/// wraps differently (I1).
+///
+/// Resolving here and handing the later stages a fixed base is the only place
+/// the answer is still knowable: `plan` is deliberately a pure function of the
+/// buffer it is given.
+pub fn resolve_auto_start_indent(
+    buf: &SourceBuffer,
+    groups: &[LogicalGroup],
+    config: &FormatConfig,
+) -> usize {
+    let mut planner = Planner::new(config);
+    let mut resolved = config.start_indent;
+    for group in groups {
+        if !planner.significant_seen && !group.statements.is_empty() {
+            resolved = guess_start_indent(buf.line_bytes(&buf.lines[group.lines.start]));
+        }
+        planner.plan(buf, group, config);
+        if planner.significant_seen {
+            break;
+        }
+    }
+    resolved
 }
 
 pub fn guess_start_indent(line: &[u8]) -> usize {

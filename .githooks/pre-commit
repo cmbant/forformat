@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Mirrors the source-only gates in .github/workflows/rust-checks.yml so a
+# formatting or lint slip fails here rather than after the push. The rest of the
+# bar stays in CI: `cargo test`, `cargo doc` and check_fuzz_regression.sh each
+# cost 15s+, and the check_*.sh binary checks would validate a stale
+# target/debug/forformat unless the hook also paid for a rebuild.
+#
+# Note this checks the working tree, not the staged content: unformatted
+# unstaged edits in a .rs file will fail the commit too. Run `cargo fmt` and
+# restage, or pass --no-verify for a deliberate exception.
+
+# Filtering via git pathspecs rather than grep keeps this to git, cargo and
+# shell builtins, so it behaves the same under the MSYS2 bash that Git for
+# Windows runs hooks with.
+if [ -z "$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs' Cargo.toml Cargo.lock)" ]; then
+    exit 0
+fi
+
+# rustup puts cargo on PATH for Git Bash too, but a Rust-less checkout (docs
+# work, a CI container) should not be blocked from committing.
+if ! command -v cargo > /dev/null; then
+    echo "pre-commit: cargo not found, skipping Rust checks" >&2
+    exit 0
+fi
+
+if ! cargo fmt --check; then
+    echo >&2
+    echo "pre-commit: formatting check failed. Run 'cargo fmt' and restage." >&2
+    exit 1
+fi
+
+if ! cargo clippy --locked --all-targets -- -D warnings; then
+    echo >&2
+    echo "pre-commit: clippy failed. Fix the lints above and restage." >&2
+    exit 1
+fi

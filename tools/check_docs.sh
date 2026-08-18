@@ -36,7 +36,10 @@ if grep -Fqi 'automatic format detection are not supported' README.md README_PYP
 fi
 
 # Check local Markdown links without adding a documentation dependency.
-python - <<'PY'
+# CI runners provide `python`; a bare Debian/devcontainer image only has `python3`.
+python_bin=${PYTHON:-python}
+command -v "$python_bin" > /dev/null 2>&1 || python_bin=python3
+"$python_bin" - <<'PY'
 from pathlib import Path
 import re
 import sys

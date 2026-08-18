@@ -182,6 +182,127 @@ PROFILES: dict[str, list[str]] = {
     ],
 }
 
+# These profiles cover option branches that are useful independently of the
+# broad style/layout combinations above.  Keep them as named profiles rather
+# than multiplying the whole matrix: the corpus is an I1/I2 stress test, not a
+# parser-value Cartesian product.
+PROFILES.update(
+    {
+        # Style passes also run in normalize-only mode, where layout and
+        # wrapping cannot mask a non-idempotent normalization rule.
+        "normalize-style-on": [
+            "--normalize-only",
+            "--no-config",
+            *PROFILES["style-explicit-on"][2:],
+        ],
+        "normalize-style-off": [
+            "--normalize-only",
+            "--no-config",
+            *PROFILES["style-all-off"][2:],
+        ],
+        # Indent-only must cover the layout engine without full-mode
+        # normalization or wrapping in front of it.
+        "indent-only-layout-edge": [
+            *INDENT_ONLY,
+            "--indent=8",
+            "--start-indent=auto",
+            "--max-indent=0",
+            "--indent-continuation=0",
+            "--indent-contains=4",
+            "--indent-ampersand",
+            "--align-paren=8",
+            "--align-comments=1",
+        ],
+        "indent-only-constructs": [
+            *INDENT_ONLY,
+            "--indent=4",
+            "--indent-associate=1",
+            "--indent-block=2",
+            "--indent-changeteam=3",
+            "--indent-critical=4",
+            "--indent-case=5",
+            "--indent-do=6",
+            "--indent-entry=1",
+            "--indent-enum=2",
+            "--indent-forall=3",
+            "--indent-if=4",
+            "--indent-interface=5",
+            "--indent-module=6",
+            "--indent-procedure=1",
+            "--indent-select=2",
+            "--indent-type=3",
+            "--indent-where=4",
+            "--indent-contains=5",
+        ],
+        # Exercise the wrapper against the less common layout boundaries and
+        # a preserved authored indentation profile.
+        "full-layout-edge": [
+            *FULL,
+            "--line-length=80",
+            "--indent=8",
+            "--start-indent=auto",
+            "--max-indent=0",
+            "--indent-continuation=0",
+            "--indent-contains=4",
+            "--indent-ampersand",
+            "--align-paren=8",
+            "--align-declarations=1",
+            "--align-comments=1",
+        ],
+        "full-indent-none": [
+            *FULL,
+            "--indent=none",
+            "--line-length=80",
+            "--align-paren=8",
+            "--align-comments=1",
+        ],
+        "full-left-options-off": [
+            *FULL,
+            "--line-length=80",
+            "--include-left=0",
+            "--label-left=0",
+            "--openmp=0",
+        ],
+        # A style profile with wrapping disabled catches interactions that the
+        # default wrapped profiles cannot reach.
+        "style-all-off-no-wrap": [
+            *FULL,
+            "--no-wrap",
+            *PROFILES["style-all-off"][2:],
+        ],
+        "style-lex-remred-layout": [
+            *PROFILES["style-lex-spacing-layout"],
+            "--ws-remred=1",
+            "--align-declarations=1",
+            "--align-comments=1",
+        ],
+        # These options change source bytes and also participate in case
+        # resolution, so they deserve a real full-mode corpus pass.
+        "full-refactor-macros": [
+            *FULL,
+            "--line-length=80",
+            "--keyword-case=upper",
+            "--refactor-end=upcase",
+            "--uppercase-single-l",
+            "--define=USE_MPI",
+            "--define=REAL_KIND=8",
+        ],
+        # Verify command-line values override a discovered project config
+        # (where one exists) while retaining the ordinary corpus invocation.
+        "config-cli-overrides": [
+            "--full",
+            "--line-length=80",
+            "--indent=8",
+            "--indent-module=2",
+            "--keyword-case=upper",
+            "--wrap=1",
+        ],
+        # `invoke` selects explicit paths for this profile; all other profiles
+        # intentionally retain project-wide context via `--all`.
+        "full-isolated": [*FULL, "--isolated"],
+    }
+)
+
 
 SEQUENCES: dict[str, list[list[str]]] = {
     "line80-indent8": [PROFILES["line80"], PROFILES["indent8"]],
@@ -198,6 +319,12 @@ SEQUENCES: dict[str, list[list[str]]] = {
     "upper-lower": [PROFILES["keyword-upper"], PROFILES["full-plain"]],
     "line80-line160": [PROFILES["line80"], PROFILES["line160"]],
     "blank-preserve-blank-zero": [PROFILES["blank-preserve"], PROFILES["blank-zero"]],
+    "normalize-style-off-on": [
+        PROFILES["normalize-style-off"],
+        PROFILES["normalize-style-on"],
+    ],
+    "full-plain-layout-edge": [PROFILES["full-plain"], PROFILES["full-layout-edge"]],
+    "style-off-no-wrap": [PROFILES["style-all-off"], PROFILES["style-all-off-no-wrap"]],
 }
 
 
@@ -317,11 +444,22 @@ def changed_paths(before: dict[str, bytes], after: dict[str, bytes]) -> list[str
     return sorted(path for path in after if before.get(path) != after[path])
 
 
-def invoke(binary: Path, repo: Path, args: list[str], log: Path, *, check: bool = False) -> int:
+def invoke(
+    binary: Path,
+    repo: Path,
+    sources: list[Path],
+    args: list[str],
+    log: Path,
+    *,
+    check: bool = False,
+) -> int:
     command = [str(binary), *args]
     if check:
         command.append("--check")
-    command.append("--all")
+    if "--isolated" in args:
+        command.extend(path.as_posix() for path in sources)
+    else:
+        command.append("--all")
     result = run(command, cwd=repo)
     log.parent.mkdir(parents=True, exist_ok=True)
     log.with_name(f"{log.name}.stdout").write_bytes(result.stdout)
@@ -334,11 +472,11 @@ def profile(
 ) -> tuple[ProfileResult, dict[str, tuple[bytes, bytes]]]:
     restore(repo)
     before = read_sources(repo, sources)
-    first_rc = invoke(binary, repo, args, report / f"{name}.first")
+    first_rc = invoke(binary, repo, sources, args, report / f"{name}.first")
     after_first = read_sources(repo, sources)
-    second_rc = invoke(binary, repo, args, report / f"{name}.second")
+    second_rc = invoke(binary, repo, sources, args, report / f"{name}.second")
     after_second = read_sources(repo, sources)
-    check_rc = invoke(binary, repo, args, report / f"{name}.check", check=True)
+    check_rc = invoke(binary, repo, sources, args, report / f"{name}.check", check=True)
     unstable = changed_paths(after_first, after_second)
     unstable_states = {path: (after_first[path], after_second[path]) for path in unstable}
     return (
@@ -368,18 +506,22 @@ def sequence(
     snapshots: list[dict[str, bytes]] = []
     return_codes: list[int] = []
     for stage_number, args in enumerate(stages, 1):
-        return_codes.append(invoke(binary, repo, args, report / f"{name}.stage{stage_number}"))
+        return_codes.append(
+            invoke(binary, repo, sources, args, report / f"{name}.stage{stage_number}")
+        )
         snapshots.append(read_sources(repo, sources))
     # The stages deliberately create a non-default starting point.  Only the
     # final stage is checked for I1 from that point; replaying the whole
     # sequence would test whether two different style configurations commute,
     # which is neither required nor useful.
     final_args = stages[-1]
-    return_codes.append(invoke(binary, repo, final_args, report / f"{name}.probe1"))
+    return_codes.append(invoke(binary, repo, sources, final_args, report / f"{name}.probe1"))
     snapshots.append(read_sources(repo, sources))
-    return_codes.append(invoke(binary, repo, final_args, report / f"{name}.probe2"))
+    return_codes.append(invoke(binary, repo, sources, final_args, report / f"{name}.probe2"))
     snapshots.append(read_sources(repo, sources))
-    return_codes.append(invoke(binary, repo, final_args, report / f"{name}.check", check=True))
+    return_codes.append(
+        invoke(binary, repo, sources, final_args, report / f"{name}.check", check=True)
+    )
     unstable = changed_paths(snapshots[-2], snapshots[-1])
     unstable_states = {path: (snapshots[-2][path], snapshots[-1][path]) for path in unstable}
     return SequenceResult(repo.name, name, stages, return_codes, unstable), unstable_states
@@ -520,7 +662,8 @@ def write_markdown(
             lines += [f"### `{result.repo}` / `{result.name}`", ""]
             if isinstance(result, ProfileResult):
                 lines += [
-                    f"Command: `forformat {shell_args(result.args)} --all`",
+                    f"Command: `forformat {shell_args(result.args)} "
+                    f"{'<explicit paths>' if '--isolated' in result.args else '--all'}`",
                     "",
                     f"Return codes: first `{result.first_rc}`, second `{result.second_rc}`, "
                     f"check `{result.check_rc}`; files changed on first pass: `{result.changed_count}`.",

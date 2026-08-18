@@ -185,10 +185,62 @@ pub(super) fn is_declaration_statement(tokens: &[crate::source::Token<'_>]) -> b
     )
 }
 
-fn is_specifier_keyword_argument(tokens: &[crate::source::Token<'_>], index: usize) -> bool {
+/// Whether the name at `index` is the *name* half of a `keyword=value` pair.
+///
+/// A continuation line carries no statement context, so the `(` or `,` that
+/// makes the pair a keyword argument may be on an earlier line: the shape has
+/// to be recognized from the threaded context as well, or a keyword argument
+/// is read as an ordinary name on exactly the lines the wrapper creates, and
+/// the two readings disagree from one run to the next (I1).
+fn is_specifier_keyword_argument(
+    tokens: &[crate::source::Token<'_>],
+    index: usize,
+    inside_paren: &[bool],
+    context: &super::LineContext<'_>,
+) -> bool {
+    tokens.get(index + 1).is_some_and(|token| {
+        token.text == b"=" && is_keyword_argument_equals(tokens, index + 1, inside_paren, context)
+    })
+}
+
+/// The `=` at `index` separates a keyword argument from its value, on this
+/// line or through the continuation context threaded into it.
+pub(super) fn is_keyword_argument_equals(
+    tokens: &[crate::source::Token<'_>],
+    index: usize,
+    inside_paren: &[bool],
+    context: &super::LineContext<'_>,
+) -> bool {
+    is_named_parameter_token(tokens, index)
+        || context.continued_statement
+            && (!context.continued_declaration && context.continued_named_parameter
+                || context.continued_bind_parameter)
+            && is_continued_named_parameter(tokens, index, inside_paren[index])
+}
+
+/// Whether the line's first token continues a `%` component selector left
+/// open by the previous line, as in `ptr % &` / `data % simple_int`.
+pub(super) fn continues_component_selector(
+    tokens: &[crate::source::Token<'_>],
+    index: usize,
+    context: &super::LineContext<'_>,
+) -> bool {
+    context.continued_component
+        && tokens[..index]
+            .iter()
+            .all(|token| token.kind == TokenKind::Ampersand)
+}
+
+/// Whether `line`'s last significant token is the `%` of a component
+/// selector, so the statement's next line opens with a component name.
+pub(super) fn trailing_component_selector(line: &[u8]) -> bool {
+    let mut state = LexState::default();
+    let tokens = tokenize(line, &mut state);
     tokens
-        .get(index + 1)
-        .is_some_and(|token| token.text == b"=" && is_named_parameter_token(tokens, index + 1))
+        .iter()
+        .rev()
+        .find(|token| !matches!(token.kind, TokenKind::Ampersand | TokenKind::Comment))
+        .is_some_and(|token| token.kind == TokenKind::Operator && token.text == b"%")
 }
 
 fn is_contextual_declaration_name(

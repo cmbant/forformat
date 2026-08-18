@@ -8,7 +8,7 @@ jobs:
     name: checks (Rust ${{ matrix.toolchain }})
     runs-on: ubuntu-latest
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         toolchain: ["1.85.0", stable]
     steps:

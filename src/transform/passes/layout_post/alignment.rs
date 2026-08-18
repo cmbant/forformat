@@ -2,8 +2,13 @@
 //!
 //! A pass here may not change a line's width unless `format::full` has already
 //! measured that change. Both declaration and trailing-comment alignment only
-//! remove authored slack; a line is never padded out to a wider neighbour. The
-//! declaration separator's owed one-space minimum is the only exception.
+//! remove authored slack: a block is compressed onto the narrowest column its
+//! members already share, never spread out to a wider one. The declaration
+//! separator's owed one-space minimum is the only exception.
+//!
+//! Compression still pads the short members of a block up to that shared
+//! column, so the wrap budget bounds it: a member the column would push past
+//! the budget is left out of the block rather than padded over it.
 
 use crate::{
     config::FormatConfig,
@@ -24,6 +29,17 @@ pub fn declaration_separator_alignment(
     if !config.align_declarations {
         return Ok(false);
     }
+    // The shared column is the one thing here that makes a line *longer*, and a
+    // line this pass pushes past the wrap budget is a line the next run wraps —
+    // taking that member out of the block, narrowing the column, and leaving the
+    // wrapped fragment to be measured against a layout it just invalidated (I1).
+    // The budget is therefore part of "the narrowest column every member can
+    // reach", exactly as it is for trailing comments.
+    let budget = if config.wrap.enabled {
+        config.wrap.line_length
+    } else {
+        usize::MAX
+    };
     let widths: Vec<usize> = document.lines.iter().map(Vec::len).collect();
     let mut lines = document.lines.clone();
     loop {
@@ -36,6 +52,7 @@ pub fn declaration_separator_alignment(
             &cpp_lines,
             &separators,
             &mut updated,
+            budget,
             normalize_declaration_block,
         );
         if updated == lines {
@@ -236,13 +253,14 @@ fn column_info(
 }
 
 type BlockMember = (usize, (usize, usize, usize));
-type BlockNormalizer = fn(&[Vec<u8>], &mut [Vec<u8>], &[BlockMember]);
+type BlockNormalizer = fn(&[Vec<u8>], &mut [Vec<u8>], &[BlockMember], usize);
 
 fn align_blocks(
     original: &[Vec<u8>],
     cpp_lines: &[bool],
     infos: &[Option<(usize, usize, usize)>],
     updated: &mut [Vec<u8>],
+    budget: usize,
     normalize: BlockNormalizer,
 ) {
     let mut index = 0;
@@ -275,7 +293,7 @@ fn align_blocks(
                         .iter()
                         .any(|(_, (column, _, _))| *column < proposed_column))
             {
-                normalize(original, updated, &block);
+                normalize(original, updated, &block, budget);
                 block.clear();
                 column = 0;
             }
@@ -283,7 +301,7 @@ fn align_blocks(
             block.push((line_index, info));
             column = proposed_column;
         }
-        normalize(original, updated, &block);
+        normalize(original, updated, &block, budget);
     }
 }
 
@@ -291,25 +309,19 @@ fn normalize_declaration_block(
     original: &[Vec<u8>],
     updated: &mut [Vec<u8>],
     block: &[BlockMember],
+    budget: usize,
 ) {
     if block.is_empty() {
         return;
     }
-    let separator_column = block
-        .iter()
-        .map(|(_, (column, before, _))| column - before + 1)
-        .max()
-        .expect("non-empty declaration block");
-    let can_compress_alignment = block.len() > 1
-        && block
-            .iter()
-            .all(|(_, (column, _, _))| *column >= separator_column);
+    let aligned = aligned_members(original, block, budget);
     for (line_index, (column, before, after)) in block {
         let prefix_end = column - before;
-        let target_column = if can_compress_alignment {
-            separator_column
-        } else {
-            prefix_end + 1
+        let target_column = match aligned {
+            Some((separator_column, ref members)) if members.contains(line_index) => {
+                separator_column
+            }
+            _ => prefix_end + 1,
         };
         let suffix_start = column + 2 + after;
         let mut line = original[*line_index][..prefix_end].to_vec();
@@ -318,6 +330,63 @@ fn normalize_declaration_block(
         line.extend_from_slice(&original[*line_index][suffix_start..]);
         *updated.get_mut(*line_index).expect("block line in range") = line;
     }
+}
+
+/// The shared column for a block, and which of its members reach it.
+///
+/// A member is left out when the shared column would push it past the budget:
+/// the column is set by the *widest prefix* in the block, so one wide
+/// declaration among short ones would otherwise pad every one of them out of
+/// the budget.  Exempting the wide member instead — it keeps its own single
+/// space, which is the shortest it can be — is what leaves the rest aligned and
+/// inside the budget.  A member already too long at its own single space is the
+/// wrapper's problem, not the block's, so it never joins and never sets the
+/// column.
+fn aligned_members(
+    original: &[Vec<u8>],
+    block: &[BlockMember],
+    budget: usize,
+) -> Option<(usize, Vec<usize>)> {
+    let minimum_column = |(_, (column, before, _)): &BlockMember| column - before + 1;
+    // Only the code is measured. A trailing comment is not the block's to
+    // shorten — step 17b owns its column, and a comment that overruns is not
+    // something a narrower `::` could have saved — so charging the block for
+    // one would collapse the alignment of every commented declaration.
+    let width_at = |(line_index, (column, _, after)): &BlockMember, target: usize| {
+        let line = &original[*line_index];
+        let code_end =
+            comment_start(line).map_or(line.len(), |at| line[..at].trim_ascii_end().len());
+        target + 3 + code_end.saturating_sub(column + 2 + after)
+    };
+    let mut members: Vec<&BlockMember> = block
+        .iter()
+        .filter(|member| width_at(member, minimum_column(member)) <= budget)
+        .collect();
+    while members.len() > 1 {
+        let separator_column = members
+            .iter()
+            .map(|member| minimum_column(member))
+            .max()
+            .expect("non-empty member list");
+        if members
+            .iter()
+            .all(|member| width_at(member, separator_column) <= budget)
+        {
+            // Alignment is only ever preserved or compressed, never introduced:
+            // every member has to have been written at or right of the column.
+            return members
+                .iter()
+                .all(|(_, (column, _, _))| *column >= separator_column)
+                .then(|| {
+                    (
+                        separator_column,
+                        members.iter().map(|(line, _)| *line).collect(),
+                    )
+                });
+        }
+        members.retain(|member| minimum_column(member) < separator_column);
+    }
+    None
 }
 
 fn continues_previous_line(lines: &[Vec<u8>], index: usize) -> bool {
