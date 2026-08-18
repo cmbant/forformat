@@ -63,10 +63,23 @@ across the five corpus checkouts are affected.
   `attributes(global) subroutine k(a)` (CUDA Fortran), so their bodies and matching `END` are left
   unindented. CP2K `src/dbt/tas/dbt_tas_util.F`, Q-E `upflib/ylmr2_gpu.f90`.
 
-Everything else that still differs is input that is not valid free-form Fortran — fypp template
-bodies, files whose `#ifdef` branches open and close constructs asymmetrically, and one source using
-Matlab operators. Those, and the current per-checkout counts, are tracked in
-[`outstanding-issues.md`](outstanding-issues.md).
+## Inputs outside the supported contract
+
+The accepted format is free-form Fortran. Some corpus inputs remain outside that compatibility
+contract because they are not valid Fortran in isolation or require preprocessing semantics that
+the formatter does not provide. Current families include:
+
+- FYPP template bodies whose template syntax is not valid Fortran in isolation.
+- Preprocessor configurations whose conditional branches open and close Fortran constructs
+  asymmetrically.
+- Inputs using non-Fortran operators or syntax from another language.
+- COCO (`??`) and FYPP (`#:`) directives beyond the safe grouping and continuation behaviour
+  described below.
+
+These cases are not silently promoted to supported behaviour. A family becomes supported only with
+a checked-in fixture, an explicit compatibility decision, and corresponding regression coverage.
+Checked-in fixtures and the corpus audit remain the source of truth for individual cases and
+counts.
 
 ## Intentional full-format divergences
 
