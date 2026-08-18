@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import difflib
-import hashlib
 import os
 import shutil
 import subprocess
@@ -13,7 +12,6 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-
 
 # Several large Fortran projects use uppercase suffixes for free-form sources
 # that are preprocessed by their build systems (notably CP2K and Q-E).  The
@@ -367,8 +365,7 @@ def run(
             command,
             cwd=cwd,
             input=data,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             check=False,
             timeout=COMMAND_TIMEOUT_SECONDS,
         )
@@ -393,13 +390,25 @@ def restore(repo: Path) -> None:
     result = git(repo, "restore", "--source=HEAD", "--worktree", "--", ".")
     if result.returncode:
         raise RuntimeError(result.stderr.decode(errors="replace").strip())
-    result = git(repo, "submodule", "foreach", "--recursive", "git restore --source=HEAD --worktree -- .")
+    result = git(
+        repo,
+        "submodule",
+        "foreach",
+        "--recursive",
+        "git restore --source=HEAD --worktree -- .",
+    )
     if result.returncode:
         raise RuntimeError(result.stderr.decode(errors="replace").strip())
 
 
 def clean_status(repo: Path) -> str:
-    result = git(repo, "status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=none")
+    result = git(
+        repo,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+        "--ignore-submodules=none",
+    )
     if result.returncode:
         raise RuntimeError(result.stderr.decode(errors="replace").strip())
     return result.stdout.decode(errors="replace")
@@ -429,7 +438,9 @@ def tracked_sources(repo: Path, binary: Path) -> list[Path]:
             f"{query.stderr.decode(errors='replace').strip()}"
         )
     forms = query.stdout.splitlines()
-    if len(forms) != len(paths) or any(form not in {b"free", b"fixed"} for form in forms):
+    if len(forms) != len(paths) or any(
+        form not in {b"free", b"fixed"} for form in forms
+    ):
         raise RuntimeError(
             f"format detector returned {len(forms)} results for {len(paths)} sources in {repo}"
         )
@@ -468,7 +479,12 @@ def invoke(
 
 
 def profile(
-    binary: Path, repo: Path, sources: list[Path], name: str, args: list[str], report: Path
+    binary: Path,
+    repo: Path,
+    sources: list[Path],
+    name: str,
+    args: list[str],
+    report: Path,
 ) -> tuple[ProfileResult, dict[str, tuple[bytes, bytes]]]:
     restore(repo)
     before = read_sources(repo, sources)
@@ -478,7 +494,9 @@ def profile(
     after_second = read_sources(repo, sources)
     check_rc = invoke(binary, repo, sources, args, report / f"{name}.check", check=True)
     unstable = changed_paths(after_first, after_second)
-    unstable_states = {path: (after_first[path], after_second[path]) for path in unstable}
+    unstable_states = {
+        path: (after_first[path], after_second[path]) for path in unstable
+    }
     return (
         ProfileResult(
             repo.name,
@@ -515,16 +533,24 @@ def sequence(
     # sequence would test whether two different style configurations commute,
     # which is neither required nor useful.
     final_args = stages[-1]
-    return_codes.append(invoke(binary, repo, sources, final_args, report / f"{name}.probe1"))
+    return_codes.append(
+        invoke(binary, repo, sources, final_args, report / f"{name}.probe1")
+    )
     snapshots.append(read_sources(repo, sources))
-    return_codes.append(invoke(binary, repo, sources, final_args, report / f"{name}.probe2"))
+    return_codes.append(
+        invoke(binary, repo, sources, final_args, report / f"{name}.probe2")
+    )
     snapshots.append(read_sources(repo, sources))
     return_codes.append(
         invoke(binary, repo, sources, final_args, report / f"{name}.check", check=True)
     )
     unstable = changed_paths(snapshots[-2], snapshots[-1])
-    unstable_states = {path: (snapshots[-2][path], snapshots[-1][path]) for path in unstable}
-    return SequenceResult(repo.name, name, stages, return_codes, unstable), unstable_states
+    unstable_states = {
+        path: (snapshots[-2][path], snapshots[-1][path]) for path in unstable
+    }
+    return SequenceResult(
+        repo.name, name, stages, return_codes, unstable
+    ), unstable_states
 
 
 def oracle(
@@ -536,7 +562,14 @@ def oracle(
         source = (repo / relative).read_bytes()
         reference = run([findent, "-ifree"], data=source)
         rust = run(
-            [str(binary), "--indent-only", "--no-config", "--isolated", "--stdout", str(relative)],
+            [
+                str(binary),
+                "--indent-only",
+                "--no-config",
+                "--isolated",
+                "--stdout",
+                str(relative),
+            ],
             cwd=repo,
         )
         if reference.returncode or rust.returncode:
@@ -554,13 +587,21 @@ def oracle(
             )
         elif reference.stdout != rust.stdout:
             mismatches.append(
-                OracleMismatch(repo.name, relative.as_posix(), source, reference.stdout, rust.stdout)
+                OracleMismatch(
+                    repo.name,
+                    relative.as_posix(),
+                    source,
+                    reference.stdout,
+                    rust.stdout,
+                )
             )
     return errors, mismatches
 
 
 def discover(root: Path, requested: list[str]) -> list[Path]:
-    candidates = sorted(path for path in root.iterdir() if path.is_dir() and (path / ".git").exists())
+    candidates = sorted(
+        path for path in root.iterdir() if path.is_dir() and (path / ".git").exists()
+    )
     if not requested:
         return candidates
     selected = []
@@ -578,7 +619,10 @@ def discover(root: Path, requested: list[str]) -> list[Path]:
 def default_binary(root: Path) -> Path:
     configured = os.environ.get("FORFORMAT")
     candidates = [Path(configured)] if configured else []
-    candidates += [root.parent / "target/release/forformat", root.parent / "target/debug/forformat"]
+    candidates += [
+        root.parent / "target/release/forformat",
+        root.parent / "target/debug/forformat",
+    ]
     found = shutil.which("forformat")
     if found:
         candidates.append(Path(found))
@@ -588,11 +632,15 @@ def default_binary(root: Path) -> Path:
     raise SystemExit("forformat binary not found; set FORFORMAT or pass --binary")
 
 
-def short_diff(left: bytes, right: bytes, left_name: str, right_name: str, limit: int = 80) -> str:
+def short_diff(
+    left: bytes, right: bytes, left_name: str, right_name: str, limit: int = 80
+) -> str:
     left_lines = left.decode(errors="replace").splitlines()
     right_lines = right.decode(errors="replace").splitlines()
     diff = list(
-        difflib.unified_diff(left_lines, right_lines, fromfile=left_name, tofile=right_name, lineterm="")
+        difflib.unified_diff(
+            left_lines, right_lines, fromfile=left_name, tofile=right_name, lineterm=""
+        )
     )
     if len(diff) <= limit:
         return "\n".join(diff)
@@ -618,7 +666,9 @@ def write_markdown(
         for result in profiles
         if result.first_rc or result.second_rc or result.check_rc or result.unstable
     ]
-    failures += [result for result in sequences if any(result.return_codes) or result.unstable]
+    failures += [
+        result for result in sequences if any(result.return_codes) or result.unstable
+    ]
     destination.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         "# Corpus formatting test failures",
@@ -627,16 +677,20 @@ def write_markdown(
         "",
         f"Binary: `{binary}`",
         "",
-        "The harness restores each corpus checkout from its current `HEAD` before every profile "
-        "or sequence. A profile is a failure if formatting errors, `--check` errors, or changes "
-        "between the first and second application. A sequence first applies its stages once to "
-        "create a starting point, then checks the final stage twice from that point.",
+        (
+            "The harness restores each corpus checkout from its current `HEAD` before every profile "
+            "or sequence. A profile is a failure if formatting errors, `--check` errors, or changes "
+            "between the first and second application. A sequence first applies its stages once to "
+            "create a starting point, then checks the final stage twice from that point."
+        ),
         "",
         "## Summary",
         "",
         f"- Profile failures: **{len(failures)}**",
-        f"- `findent -ifree` mismatches/errors: **{len(mismatches)}** "
-        f"({sum(oracle_errors.values())} command errors)",
+        (
+            f"- `findent -ifree` mismatches/errors: **{len(mismatches)}** "
+            f"({sum(oracle_errors.values())} command errors)"
+        ),
         "",
     ]
     if not failures and not mismatches:
@@ -650,23 +704,31 @@ def write_markdown(
         ]
         for result in failures:
             if isinstance(result, ProfileResult):
-                codes = f"{result.first_rc}, {result.second_rc}, check {result.check_rc}"
+                codes = (
+                    f"{result.first_rc}, {result.second_rc}, check {result.check_rc}"
+                )
                 unstable = ", ".join(f"`{path}`" for path in result.unstable) or "—"
             else:
                 codes = ", ".join(map(str, result.return_codes))
                 unstable = ", ".join(f"`{path}`" for path in result.unstable) or "—"
-            lines.append(f"| `{result.repo}` | `{result.name}` | `{codes}` | {unstable} |")
+            lines.append(
+                f"| `{result.repo}` | `{result.name}` | `{codes}` | {unstable} |"
+            )
         lines.append("")
 
         for result in failures:
             lines += [f"### `{result.repo}` / `{result.name}`", ""]
             if isinstance(result, ProfileResult):
                 lines += [
-                    f"Command: `forformat {shell_args(result.args)} "
-                    f"{'<explicit paths>' if '--isolated' in result.args else '--all'}`",
+                    (
+                        f"Command: `forformat {shell_args(result.args)} "
+                        f"{'<explicit paths>' if '--isolated' in result.args else '--all'}`"
+                    ),
                     "",
-                    f"Return codes: first `{result.first_rc}`, second `{result.second_rc}`, "
-                    f"check `{result.check_rc}`; files changed on first pass: `{result.changed_count}`.",
+                    (
+                        f"Return codes: first `{result.first_rc}`, second `{result.second_rc}`, "
+                        f"check `{result.check_rc}`; files changed on first pass: `{result.changed_count}`."
+                    ),
                     "",
                 ]
                 states = profile_states[(result.repo, result.name)]
@@ -677,7 +739,12 @@ def write_markdown(
                         "The second application changed the first output:",
                         "",
                         "```diff",
-                        short_diff(states[path][0], states[path][1], "first pass", "second pass"),
+                        short_diff(
+                            states[path][0],
+                            states[path][1],
+                            "first pass",
+                            "second pass",
+                        ),
                         "```",
                         "",
                         "Reproduce with:",
@@ -685,10 +752,14 @@ def write_markdown(
                         f"```sh\nforformat {shell_args(result.args)} --stdout {path}\n```",
                         "",
                     ]
-                if not result.unstable and (result.first_rc or result.second_rc or result.check_rc):
+                if not result.unstable and (
+                    result.first_rc or result.second_rc or result.check_rc
+                ):
                     lines += [
-                        "See the corresponding `.stderr` log beside the harness report directory "
-                        "for the command diagnostic.",
+                        (
+                            "See the corresponding `.stderr` log beside the harness report directory "
+                            "for the command diagnostic."
+                        ),
                         "",
                     ]
             else:
@@ -700,8 +771,10 @@ def write_markdown(
                         for number, args in enumerate(result.stages, 1)
                     ],
                     "",
-                    f"Return codes (stages, probe 1, probe 2, check): "
-                    f"`{', '.join(map(str, result.return_codes))}`.",
+                    (
+                        f"Return codes (stages, probe 1, probe 2, check): "
+                        f"`{', '.join(map(str, result.return_codes))}`."
+                    ),
                     "",
                 ]
                 states = sequence_states[(result.repo, result.name)]
@@ -709,8 +782,10 @@ def write_markdown(
                     lines += [
                         f"#### `{path}`",
                         "",
-                        "The final stage changed its first result when applied a second time from "
-                        "the sequence-created starting point:",
+                        (
+                            "The final stage changed its first result when applied a second time from "
+                            "the sequence-created starting point:"
+                        ),
                         "",
                         "```diff",
                         short_diff(
@@ -728,9 +803,11 @@ def write_markdown(
             lines += ["No mismatches or command errors.", ""]
         else:
             lines += [
-                "Each example compares `findent -ifree` with `forformat --indent-only --no-config "
-                "--isolated --stdout <path>`. The diff is intentionally capped to keep examples "
-                "short; the path names the complete tracked input.",
+                (
+                    "Each example compares `findent -ifree` with `forformat --indent-only --no-config "
+                    "--isolated --stdout <path>`. The diff is intentionally capped to keep examples "
+                    "short; the path names the complete tracked input."
+                ),
                 "",
             ]
             for mismatch in mismatches:
@@ -740,15 +817,19 @@ def write_markdown(
                 else:
                     lines += [
                         "```diff",
-                        short_diff(mismatch.expected, mismatch.actual, "findent", "forformat"),
+                        short_diff(
+                            mismatch.expected, mismatch.actual, "findent", "forformat"
+                        ),
                         "```",
                         "",
                     ]
                 lines += [
                     "Reproduce with:",
                     "",
-                    f"```sh\nfindent -ifree < {mismatch.path}\n"
-                    f"forformat --indent-only --no-config --isolated --stdout {mismatch.path}\n```",
+                    (
+                        f"```sh\nfindent -ifree < {mismatch.path}\n"
+                        f"forformat --indent-only --no-config --isolated --stdout {mismatch.path}\n```"
+                    ),
                     "",
                 ]
     destination.write_text("\n".join(lines), encoding="utf-8")
@@ -756,18 +837,35 @@ def write_markdown(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", type=Path, help="forformat executable (default: target/release or target/debug)")
-    parser.add_argument("--findent", default=shutil.which("findent"), help="findent executable for oracle comparison")
+    parser.add_argument(
+        "--binary",
+        type=Path,
+        help="forformat executable (default: target/release or target/debug)",
+    )
+    parser.add_argument(
+        "--findent",
+        default=shutil.which("findent"),
+        help="findent executable for oracle comparison",
+    )
     parser.add_argument(
         "--repo",
         action="append",
         default=[],
         help="repository name/path; repeatable (default: repositories under corpora/)",
     )
-    parser.add_argument("--profile", action="append", choices=sorted(PROFILES), help="profile to run; repeatable")
+    parser.add_argument(
+        "--profile",
+        action="append",
+        choices=sorted(PROFILES),
+        help="profile to run; repeatable",
+    )
     parser.add_argument("--skip-sequences", action="store_true")
     parser.add_argument("--skip-oracle", action="store_true")
-    parser.add_argument("--allow-dirty", action="store_true", help="run despite local changes; tracked changes are restored")
+    parser.add_argument(
+        "--allow-dirty",
+        action="store_true",
+        help="run despite local changes; tracked changes are restored",
+    )
     parser.add_argument("--report-dir", type=Path, help="directory for command logs")
     parser.add_argument(
         "--markdown-report",
@@ -780,8 +878,12 @@ def main() -> int:
     binary = (options.binary or default_binary(root)).resolve()
     repositories = discover(root, options.repo)
     profiles = options.profile or list(PROFILES)
-    report_root = (options.report_dir or Path(tempfile.mkdtemp(prefix="forformat-corpora-"))).resolve()
-    markdown_report = (options.markdown_report or root.parent / "docs/corpora-formatting-failures.md").resolve()
+    report_root = (
+        options.report_dir or Path(tempfile.mkdtemp(prefix="forformat-corpora-"))
+    ).resolve()
+    markdown_report = (
+        options.markdown_report or root.parent / "docs/corpora-formatting-failures.md"
+    ).resolve()
     report_root.mkdir(parents=True, exist_ok=True)
     failed = False
     profile_results: list[ProfileResult] = []
@@ -798,24 +900,35 @@ def main() -> int:
         if not options.allow_dirty:
             status = clean_status(repo)
             if status:
-                raise SystemExit(f"dirty repository (use --allow-dirty to override): {repo}\n{status}")
+                raise SystemExit(
+                    f"dirty repository (use --allow-dirty to override): {repo}\n{status}"
+                )
         sources = tracked_sources(repo, binary)
         repo_report = report_root / repo.name
         repo_report.mkdir(parents=True, exist_ok=True)
         print(f"\n{repo.name}: {len(sources)} free-form sources")
         try:
             for name in profiles:
-                result, states = profile(binary, repo, sources, name, PROFILES[name], repo_report)
+                result, states = profile(
+                    binary, repo, sources, name, PROFILES[name], repo_report
+                )
                 profile_results.append(result)
                 profile_states[(repo.name, name)] = states
-                failed |= bool(result.first_rc or result.second_rc or result.check_rc or result.unstable)
+                failed |= bool(
+                    result.first_rc
+                    or result.second_rc
+                    or result.check_rc
+                    or result.unstable
+                )
                 print(
                     f"  {name:28} rc={result.first_rc},{result.second_rc} check={result.check_rc} "
                     f"stable={'yes' if not result.unstable else 'NO'} changed={result.changed_count}"
                 )
             if not options.skip_sequences:
                 for name, stages in SEQUENCES.items():
-                    result, states = sequence(binary, repo, sources, name, stages, repo_report)
+                    result, states = sequence(
+                        binary, repo, sources, name, stages, repo_report
+                    )
                     sequence_results.append(result)
                     sequence_states[(repo.name, name)] = states
                     failed |= bool(any(result.return_codes) or result.unstable)
@@ -829,7 +942,9 @@ def main() -> int:
                     oracle_errors[repo.name] = errors
                     oracle_mismatches.extend(mismatches)
                     failed |= bool(errors or mismatches)
-                    print(f"  findent oracle             errors={errors} mismatches={len(mismatches)}")
+                    print(
+                        f"  findent oracle             errors={errors} mismatches={len(mismatches)}"
+                    )
                     if mismatches:
                         print(f"    first mismatch: {mismatches[0].path}")
                 else:

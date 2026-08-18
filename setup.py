@@ -13,7 +13,6 @@ from setuptools import setup
 from setuptools.command.build_py import build_py
 from wheel.bdist_wheel import bdist_wheel
 
-
 ROOT = Path(__file__).resolve().parent
 
 
@@ -92,7 +91,9 @@ class build_py_with_binary(build_py):
         destination = destination_dir / source.name
         shutil.copy2(source, destination)
         if os.name != "nt":
-            destination.chmod(destination.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            destination.chmod(
+                destination.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+            )
 
 
 class bdist_wheel_with_binary(bdist_wheel):

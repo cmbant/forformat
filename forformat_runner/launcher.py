@@ -6,7 +6,6 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import NoReturn
 
 
 def bundled_binary() -> Path:
@@ -18,7 +17,7 @@ def bundled_binary() -> Path:
     raise RuntimeError("the installed forformat wheel has no bundled native binary")
 
 
-def main() -> int | NoReturn:
+def main() -> int:
     binary = os.fspath(bundled_binary())
     command = [binary, *sys.argv[1:]]
     if os.name == "nt":

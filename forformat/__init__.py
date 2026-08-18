@@ -5,7 +5,8 @@ from __future__ import annotations
 import os
 import subprocess
 import warnings
-from typing import Optional, Sequence, Union, overload
+from collections.abc import Sequence
+from typing import Optional, Union, overload
 
 from forformat_runner.launcher import bundled_binary
 

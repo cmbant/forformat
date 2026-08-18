@@ -55,8 +55,7 @@ forformat --keyword-case=upper --line-length=100 src/module.f90
 ```
 
 The main option reference, including defaults, project settings, and file-selection options, is in
-the project documentation:
-https://github.com/cmbant/forformat/blob/main/docs/options.md
+the [project documentation](https://github.com/cmbant/forformat/blob/main/docs/options.md).
 
 ## Project context and configuration
 
