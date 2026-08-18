@@ -60,6 +60,12 @@ pub fn format_with_context(
     }
 
     let mut document = Document::from_bytes(source);
+    // `--start-indent=auto` has to be answered while the authored indentation
+    // is still there; see `resolve_auto_start_indent`.  Every stage below then
+    // reads one fixed base, so the wrapper measures the columns the engine
+    // will really emit.
+    let resolved = resolve_start_indent(&document, config)?;
+    let config = resolved.as_ref().unwrap_or(config);
     let local = analyze_file(source)?;
     pipeline::normalize(&mut document, project, &local, config)?;
 
@@ -127,6 +133,26 @@ fn lay_out(
         }
         source = output.to_lf_bytes();
     }
+}
+
+/// Freeze `--start-indent=auto` into a plain `start_indent`, or `None` when the
+/// option is off and the caller's own config already answers every question.
+fn resolve_start_indent(
+    document: &Document,
+    config: &FormatConfig,
+) -> Result<Option<FormatConfig>, FormatError> {
+    if !config.auto_start_indent {
+        return Ok(None);
+    }
+    let analysis = document.analyze()?;
+    let mut resolved = config.clone();
+    resolved.start_indent = crate::format::planner::resolve_auto_start_indent(
+        &analysis.buffer,
+        &analysis.groups,
+        config,
+    );
+    resolved.auto_start_indent = false;
+    Ok(Some(resolved))
 }
 
 /// Step 16: reflow statements that overrun the budget.
@@ -222,8 +248,18 @@ fn reflow_with_context_inner(
         .iter()
         .zip(&plans)
         .map(|(group, plan)| {
-            matches!(plan.body, PlanBody::Code { .. })
-                && join_openmp_directive(document, group).is_none()
+            // A group `--refactor-end` rewrites is never wrapped. The engine
+            // emits the replacement in place of the *first* physical line's
+            // body, trailing `&` and all, so a break chosen here would be
+            // thrown away and its continuation left behind as a bare name on
+            // its own line — not Fortran, and a line the next run wraps again.
+            matches!(
+                plan.body,
+                PlanBody::Code {
+                    replacement: None,
+                    ..
+                }
+            ) && join_openmp_directive(document, group).is_none()
                 && eligible(&analysis.buffer, group)
                 && group.statements.len() == 1
         })
@@ -714,19 +750,24 @@ fn laid_out_separator_line<'a>(
         })
 }
 
-/// Rewrite the whitespace run in front of `body`'s `::` to the run step 17 has
+/// Rewrite the whitespace runs around `body`'s `::` to the ones step 17 has
 /// already chosen for the same line, so the wrapper measures and breaks the
 /// text that will be emitted rather than the text that was authored.
 ///
-/// Only the run is copied, never the column: `body` is the statement without
+/// Only the runs are copied, never the column: `body` is the statement without
 /// its indent, and for a continued declaration it is the joined form, but in
 /// both cases the bytes in front of the `::` are the same ones the laid-out
 /// line carries after its indent.
+///
+/// The run *after* `::` matters as much as the one before it. Step 17 writes
+/// exactly one space there, so an author's second space is slack the emitted
+/// line does not have — and one phantom column is enough to turn a break the
+/// next run finds into `NoSafeBreak` on this one.
 fn with_laid_out_separator(body: Vec<u8>, laid_out: Option<&Vec<u8>>) -> Vec<u8> {
     let Some(laid_out) = laid_out else {
         return body;
     };
-    let (Some((at, run, _)), Some((_, laid_out_run, _))) = (
+    let (Some((at, run, after)), Some((_, laid_out_run, laid_out_after))) = (
         crate::transform::passes::layout_post::declaration_separator_info(&body),
         crate::transform::passes::layout_post::declaration_separator_info(laid_out),
     ) else {
@@ -734,13 +775,25 @@ fn with_laid_out_separator(body: Vec<u8>, laid_out: Option<&Vec<u8>>) -> Vec<u8>
     };
     // A missing space on either side is `declaration_separator_growth`'s
     // business, not this function's.
-    if run == laid_out_run || run == 0 || laid_out_run == 0 {
+    let before_run = if run == 0 || laid_out_run == 0 {
+        run
+    } else {
+        laid_out_run
+    };
+    let after_run = if after == 0 || laid_out_after == 0 {
+        after
+    } else {
+        laid_out_after
+    };
+    if before_run == run && after_run == after {
         return body;
     }
-    let mut result = Vec::with_capacity(body.len() + laid_out_run);
+    let mut result = Vec::with_capacity(body.len() + before_run + after_run);
     result.extend_from_slice(&body[..at - run]);
-    result.resize(result.len() + laid_out_run, b' ');
-    result.extend_from_slice(&body[at..]);
+    result.resize(result.len() + before_run, b' ');
+    result.extend_from_slice(b"::");
+    result.resize(result.len() + after_run, b' ');
+    result.extend_from_slice(&body[at + 2 + after..]);
     result
 }
 

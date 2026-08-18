@@ -33,7 +33,7 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
 ) -> Vec<u8> {
     let tokens = tokenize(line, state);
     let inside_paren = inside_paren_at(context.open_groups, &tokens);
-    let continued_entity_list = context.continued_declaration
+    let continued_entity_list = (context.continued_declaration || context.continued_separator)
         && context.open_groups.is_empty()
         && !context.continued_initializer;
     let mut edits = EditBuffer::new(line);
@@ -80,16 +80,7 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                     && is_spaced_operator_token(line, &tokens, index, token)
                 {
                     let named = token.text == b"="
-                        && (is_named_parameter_token(&tokens, index)
-                            || context.continued_statement
-                                && (!context.continued_declaration
-                                    && context.continued_named_parameter
-                                    || context.continued_bind_parameter)
-                                && is_continued_named_parameter(
-                                    &tokens,
-                                    index,
-                                    inside_paren[index],
-                                ));
+                        && is_keyword_argument_equals(&tokens, index, &inside_paren, context);
                     add_operator_edit(line, &mut edits, token, token.text, !named, &mut spacing);
                     spacing.previous_compact_named = named;
                 } else if !is_labelled_format_statement(&tokens)
@@ -125,11 +116,15 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                 if index > 0 && tokens[index - 1].text == b"%" {
                     continue;
                 }
+                if continues_component_selector(&tokens, index, context) {
+                    continue;
+                }
                 if cx.project.macros.contains(token.text) {
                     continue;
                 }
                 let cased = apply_case(token.text, cx.config.style.keyword_case);
-                let specifier_argument = is_specifier_keyword_argument(&tokens, index);
+                let specifier_argument =
+                    is_specifier_keyword_argument(&tokens, index, &inside_paren, context);
                 if (is_contextual_declaration_name(line, &tokens, index, continued_entity_list)
                     || is_old_style_declaration_entity(&tokens, index))
                     && !specifier_argument

@@ -52,6 +52,13 @@ struct LineContext<'a> {
     open_groups: &'a [bool],
     continued_format: bool,
     continued_initializer: bool,
+    /// The statement so far carried a top-level `::`, so this line continues
+    /// an entity list even when the head's type token is unrecognizable — a
+    /// preprocessor template expansion, say.
+    continued_separator: bool,
+    /// The previous line ended on `%`, so this line opens with a component
+    /// name that no token on the line itself identifies as one.
+    continued_component: bool,
 }
 
 /// State carried from one physical line to the next while step 11 runs.
@@ -63,6 +70,7 @@ struct LineState {
     continued_openmp_infix: bool,
     continued_named_parameter: bool,
     continued_bind_parameter: bool,
+    continued_component: bool,
     open_groups: Vec<bool>,
     entity_list: EntityListCursor,
 }
@@ -99,6 +107,8 @@ impl LineState {
             open_groups,
             continued_format,
             continued_initializer: self.entity_list.initializer,
+            continued_separator: self.continued_statement && self.entity_list.separator,
+            continued_component: self.continued_component,
         }
     }
 
@@ -108,6 +118,7 @@ impl LineState {
         self.continued_infix = false;
         self.continued_named_parameter = false;
         self.continued_bind_parameter = false;
+        self.continued_component = false;
         self.open_groups.clear();
         self.entity_list = EntityListCursor::default();
     }
@@ -117,6 +128,8 @@ impl LineState {
         self.continued_infix = trailing_continuation_operand(code);
         self.continued_named_parameter = self.continued_statement && is_call_group(cx, line_index);
         self.continued_bind_parameter = self.continued_statement && is_bind_group(cx, line_index);
+        self.continued_component =
+            self.continued_statement && common::trailing_component_selector(code);
         self.entity_list.advance(code, self.open_groups.len());
         fold_open_groups(code, &mut self.open_groups);
         if !self.continued_statement {
