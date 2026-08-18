@@ -75,11 +75,33 @@ where
             let value = cursor.required_short(option, attached)?;
             draft.config.max_indent = parse_num(&value)?;
         }
-        'R' => {
-            draft.config.refactor_end = true;
-            draft.config.uppercase_end = attached == "R"
-        }
+        'R' => match attached {
+            "r" => {
+                draft.config.refactor_end = true;
+                draft.config.uppercase_end = false;
+            }
+            "R" => {
+                draft.config.refactor_end = true;
+                draft.config.uppercase_end = true;
+            }
+            _ => return Err(FormatError::InvalidOption(arg)),
+        },
         _ => return Err(FormatError::InvalidOption(arg)),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{cli::parse, error::FormatError};
+
+    #[test]
+    fn rejects_undocumented_refactor_short_forms() {
+        for argument in ["-R", "-Rx"] {
+            assert!(matches!(
+                parse(["forformat".to_string(), argument.to_string()].into_iter()),
+                Err(FormatError::InvalidOption(message)) if message == argument
+            ));
+        }
+    }
 }
