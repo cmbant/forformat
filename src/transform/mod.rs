@@ -10,4 +10,5 @@ pub mod passes;
 pub mod pipeline;
 pub mod refactor_end;
 pub mod vocab;
+pub mod vocab_2023;
 pub mod whitespace;

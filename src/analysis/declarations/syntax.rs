@@ -21,10 +21,12 @@ pub(super) fn declared_variable_names(text: &[u8]) -> Vec<Vec<u8>> {
     let Some(separator) = separator else {
         return old_style_variable_names(&tokens, first_index);
     };
-    if (first.is(b"type") || first.is(b"class"))
-        && tokens
-            .get(first_index + 1)
-            .is_none_or(|token| token.kind != TokenKind::LParen)
+    if matches!(
+        first.text.to_ascii_lowercase().as_slice(),
+        b"type" | b"class" | b"typeof" | b"classof"
+    ) && tokens
+        .get(first_index + 1)
+        .is_none_or(|token| token.kind != TokenKind::LParen)
     {
         return Vec::new();
     }
@@ -64,7 +66,16 @@ fn old_style_variable_names(tokens: &[Token<'_>], first_index: usize) -> Vec<Vec
     let first = &tokens[first_index];
     let declaration = matches!(
         first.text.to_ascii_lowercase().as_slice(),
-        b"integer" | b"real" | b"complex" | b"logical" | b"character" | b"type" | b"class"
+        b"integer"
+            | b"real"
+            | b"complex"
+            | b"logical"
+            | b"character"
+            | b"type"
+            | b"class"
+            | b"typeof"
+            | b"classof"
+            | b"doubleprecision"
     ) || first.is(b"double")
         && tokens
             .get(first_index + 1)

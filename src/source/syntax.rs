@@ -34,6 +34,7 @@ pub(crate) fn is_end_construct_keyword(tokens: &[Token<'_>], index: usize) -> bo
                 | b"type"
                 | b"interface"
                 | b"enum"
+                | b"enumeration"
                 | b"function"
                 | b"subroutine"
                 | b"program"
@@ -72,6 +73,9 @@ mod tests {
     fn end_construct_recognition_is_shape_only() {
         let end_do = tokens(b"END DO loop");
         assert!(is_end_construct_keyword(&end_do, 0));
+
+        let end_enumeration = tokens(b"END ENUMERATION TYPE colour");
+        assert!(is_end_construct_keyword(&end_enumeration, 0));
 
         let expression = tokens(b"x = end + 1");
         assert!(!is_end_construct_keyword(&expression, 2));
