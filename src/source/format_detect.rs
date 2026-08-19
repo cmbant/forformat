@@ -129,8 +129,7 @@ fn has_strong_fixed_form_evidence(source: &[u8]) -> bool {
         }
 
         if !previous_free_continuation
-            && (fixed_comment_signature(line)
-                || fixed_continuation_signature(line, previous_code))
+            && (fixed_comment_signature(line) || fixed_continuation_signature(line, previous_code))
         {
             return true;
         }
@@ -205,9 +204,8 @@ fn line_requires_continuation(line: &[u8]) -> bool {
     if code.last() == Some(&b'&') {
         return false;
     }
-    code.last().is_some_and(|byte| {
-        matches!(byte, b',' | b'+' | b'-' | b'*' | b'=' | b'(' | b'%')
-    })
+    code.last()
+        .is_some_and(|byte| matches!(byte, b',' | b'+' | b'-' | b'*' | b'=' | b'(' | b'%'))
 }
 
 fn free_line_continues(line: &[u8]) -> bool {
