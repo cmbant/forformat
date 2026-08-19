@@ -1,4 +1,5 @@
 use crate::source::{
+    syntax::declaration_type_head_len,
     tokens::{tokenize, Token, TokenKind},
     LexState,
 };
@@ -63,34 +64,10 @@ pub(super) fn declared_binding_names(text: &[u8]) -> Vec<Vec<u8>> {
 }
 
 fn old_style_variable_names(tokens: &[Token<'_>], first_index: usize) -> Vec<Vec<u8>> {
-    let first = &tokens[first_index];
-    let declaration = matches!(
-        first.text.to_ascii_lowercase().as_slice(),
-        b"integer"
-            | b"real"
-            | b"complex"
-            | b"logical"
-            | b"character"
-            | b"type"
-            | b"class"
-            | b"typeof"
-            | b"classof"
-            | b"doubleprecision"
-    ) || first.is(b"double")
-        && tokens
-            .get(first_index + 1)
-            .is_some_and(|token| token.is_name(b"precision"));
-    if !declaration {
+    let Some(head_len) = declaration_type_head_len(tokens, first_index) else {
         return Vec::new();
-    }
-    let start = first_index
-        + 1
-        + usize::from(
-            first.is(b"double")
-                && tokens
-                    .get(first_index + 1)
-                    .is_some_and(|token| token.is_name(b"precision")),
-        );
+    };
+    let start = first_index + head_len;
     if tokens.iter().skip(start).any(|token| {
         token.kind == TokenKind::Name && token.depth == 0 && token.is_name(b"function")
     }) {
@@ -283,4 +260,22 @@ pub(super) fn old_style_type_name<'a>(
         .take_while(|token| token.depth > open.depth)
         .find(|token| token.kind == TokenKind::Name)
         .map(|token| token.text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::declared_variable_names;
+
+    #[test]
+    fn old_style_declarations_use_shared_type_heads() {
+        for (source, expected) in [
+            (b"DOUBLEPRECISION sum".as_slice(), b"sum".as_slice()),
+            (b"TYPEOF(x) result", b"result"),
+            (b"CLASSOF(x) kind", b"kind"),
+            (b"DOUBLE COMPLEX product", b"product"),
+            (b"INTEGER*1 count", b"count"),
+        ] {
+            assert_eq!(declared_variable_names(source), vec![expected.to_vec()]);
+        }
+    }
 }
