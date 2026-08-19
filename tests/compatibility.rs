@@ -136,3 +136,55 @@ fn type_bound_procedure_case_requires_resolved_owner() {
         resolved_expected
     );
 }
+
+#[test]
+fn a_bang_inside_a_continued_literal_is_never_detached_as_a_comment() {
+    // The `!` in `...invalid!')` is literal text, not a comment marker: the
+    // literal opened on the previous physical line and the `&` carried it
+    // across. Reading it per line from a clean state cut `!')` out of the
+    // statement and re-emitted it above the group, so the reflowed body and
+    // the "comment" both carried the tail.
+    let source = b"program p\ncall exit_with_message('ERROR: trying to use arrays hxir_adjstore/hetar_adjstore/hgammar_adjstore &\n                       &but these arrays are invalid!')\nend program p\n";
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        wrap: forformat::WrapConfig {
+            enabled: true,
+            line_length: 80,
+        },
+        ..FormatConfig::default()
+    };
+    let output = format_source(source, &config).unwrap().bytes;
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.lines().any(|line| line.trim() == "!')"), "{text}");
+    assert_eq!(text.matches("invalid!").count(), 1, "{text}");
+    assert_eq!(
+        format_source(text.as_bytes(), &config).unwrap().bytes,
+        text.as_bytes()
+    );
+}
+
+#[test]
+fn post_layout_alignment_never_writes_into_a_continued_literal() {
+    // `::` and `!` on the second physical line of a continued character
+    // literal are literal text.  The alignment passes measured each line from
+    // a clean lexical state, so they padded `'a b::c'` out to `'a b :: c'` and
+    // `'xx yy!zz'` out to `'xx yy !zz'` — silent content corruption, and the
+    // declaration case fires under the default configuration.
+    let separator =
+        b"program p\ncharacter(len=9) :: s = 'a &\n&b::c'\ninteger    :: nn\nend program p\n";
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        ..FormatConfig::default()
+    };
+    let text = String::from_utf8(format_source(separator, &config).unwrap().bytes).unwrap();
+    assert!(text.contains("&b::c'"), "{text}");
+
+    let comment = b"program p\ncall a('xx &\n&yy!zz')\ncall bb(1)   ! note\ncall ccc(2)  ! note2\nend program p\n";
+    let aligned = FormatConfig {
+        mode: FormatMode::Full,
+        align_comments: true,
+        ..FormatConfig::default()
+    };
+    let text = String::from_utf8(format_source(comment, &aligned).unwrap().bytes).unwrap();
+    assert!(text.contains("&yy!zz')"), "{text}");
+}

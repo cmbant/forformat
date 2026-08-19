@@ -1,12 +1,10 @@
-use super::{Newline, PhysicalLine, PhysicalLineKind};
+use super::{regions::LexState, Newline, PhysicalLine, PhysicalLineKind};
 use crate::error::FormatError;
 use std::ops::Range;
 
-/// The inline comment marker offset of one physical line.
-///
-/// findent decides this per physical line, from a clean lexical state, so this
-/// is the stateless entry point of the shared region walker rather than a
-/// second implementation of it.
+/// The inline comment marker offset of one standalone slice, scanned from a
+/// clean lexical state.  Callers that own a whole line sequence go through
+/// [`SourceBuffer`], which carries the state across continuations instead.
 pub use super::regions::comment_start;
 
 #[derive(Debug, Clone)]
@@ -26,6 +24,11 @@ impl SourceBuffer {
         }
         let mut lines = Vec::new();
         let mut start = 0usize;
+        // One lexical state for the whole file: a character literal or
+        // Hollerith payload that a `&` carries onto the next physical line is
+        // still protected there, so the `!` in `&def!ghi')` is literal text
+        // rather than the start of a comment.
+        let mut state = LexState::default();
         for (i, b) in bytes.iter().enumerate() {
             if *b == b'\n' {
                 let is_crlf = i > start && bytes[i - 1] == b'\r';
@@ -34,6 +37,7 @@ impl SourceBuffer {
                     &bytes[start..end],
                     start..end,
                     if is_crlf { Newline::CrLf } else { Newline::Lf },
+                    &mut state,
                 ));
                 start = i + 1;
             }
@@ -43,12 +47,18 @@ impl SourceBuffer {
                 &bytes[start..],
                 start..bytes.len(),
                 Newline::None,
+                &mut state,
             ));
         }
         Ok(Self { bytes, lines })
     }
 
-    fn line(content: &[u8], span: Range<usize>, newline: Newline) -> PhysicalLine {
+    fn line(
+        content: &[u8],
+        span: Range<usize>,
+        newline: Newline,
+        state: &mut LexState,
+    ) -> PhysicalLine {
         let mut first = 0;
         while first < content.len() && (content[first] == b' ' || content[first] == b'\t') {
             first += 1;
@@ -73,11 +83,16 @@ impl SourceBuffer {
         let mut comment = None;
         if matches!(kind, PhysicalLineKind::Code | PhysicalLineKind::FindentFix) {
             let code = if omp { &trimmed[3..] } else { trimmed };
-            if let Some(i) = comment_start(code) {
+            if let Some(i) = super::regions::line_comment_start(state, code) {
                 comment = Some(
                     (span.start + first + if omp { 3 } else { 0 } + i) as u32..span.end as u32,
                 );
             }
+        } else {
+            // A blank, comment or directive line cannot sit inside a continued
+            // character context, so it ends any state a malformed buffer left
+            // open.
+            *state = LexState::default();
         }
         let code_end = comment.as_ref().map_or(span.end, |r| r.start as usize);
         let code_start = span.start + first + if omp { 3 } else { 0 };

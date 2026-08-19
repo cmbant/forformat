@@ -5,7 +5,11 @@
 //! existed the same quote state machine was reimplemented in `comment_start`,
 //! `split_statements`, `is_assignment`, `paren_alignment` and `reduce_line_into`;
 //! each copy was a place where doubled quotes or a Hollerith count could be
-//! handled slightly differently.
+//! handled slightly differently.  The classifier's copies were the last to go,
+//! and they had both failure modes: `is_assignment` left `'a''b'` half-open, and
+//! `single_line_after_paren` forgot to advance its cursor inside a literal, so
+//! any `WHERE` or `FORALL` holding one looped forever.  A recognizer that needs
+//! a raw byte scan now takes it from [`for_each_code_byte`].
 //!
 //! The scanner is byte oriented: it never assumes UTF-8, and it carries its
 //! state across physical lines so a character literal continued with `&` is a
@@ -193,8 +197,9 @@ impl LexState {
     /// The offset of the inline comment marker, if this slice starts one.
     ///
     /// This is the single implementation behind `SourceBuffer`'s per-line
-    /// comment detection; a stateless call reproduces findent's per-physical
-    /// line rule exactly.
+    /// comment detection.  `SourceBuffer` threads one state through the whole
+    /// file, so a `!` carried inside a continued character literal is literal
+    /// text rather than the start of a comment.
     pub fn comment_start(&mut self, s: &[u8]) -> Option<usize> {
         let mut found = None;
         self.scan(s, |region| {
@@ -248,6 +253,71 @@ pub fn is_code_offset(s: &[u8], offset: usize) -> bool {
         }
     });
     code
+}
+
+/// The comment offset of one physical line of a continuation group, carrying
+/// `state` on to the next line.
+///
+/// A `!` only starts a comment when the scan reaches it outside a protected
+/// region, and a character literal continued with `&` keeps that region open
+/// across the line break — so the group has to be walked in order with one
+/// state.  Only the trailing continuation marker licenses that carry: without
+/// it the literal is merely unterminated, and leaking its state forward would
+/// swallow every later line's comment.
+pub fn line_comment_start(state: &mut LexState, line: &[u8]) -> Option<usize> {
+    let mut found = None;
+    line_scan(state, line, |region| {
+        if found.is_none() && region.kind == RegionKind::Comment {
+            found = Some(region.range.start);
+        }
+    });
+    found
+}
+
+/// [`line_comment_start`]'s sibling for a pass that needs the code bytes rather
+/// than the comment offset: the code spans of one physical line of a
+/// continuation group, with `state` carried on to the next line.
+pub fn line_code_spans<F: FnMut(usize, &[u8])>(state: &mut LexState, line: &[u8], mut f: F) {
+    line_scan(state, line, |region| {
+        if region.kind == RegionKind::Code {
+            f(region.range.start, &line[region.range]);
+        }
+    });
+}
+
+/// Scan one line of a group, then decide whether the state survives it.
+fn line_scan<F: FnMut(Region)>(state: &mut LexState, line: &[u8], push: F) {
+    state.scan(line, push);
+    if line.trim_ascii_end().last() != Some(&b'&') {
+        *state = LexState::default();
+    }
+}
+
+/// Visit every code region of `s` as `(start offset, bytes)`, skipping string
+/// literals, Hollerith payloads and any trailing comment.
+///
+/// This is the allocation-free entry point for the recognizers, which need a
+/// byte scan with their own bracket bookkeeping rather than a token stream.
+/// Each of them used to carry a private copy of the quote state machine, and
+/// those copies were where doubled delimiters and missing loop increments went
+/// wrong; walking the shared regions removes the state machine from the caller
+/// entirely.
+pub fn for_each_code_span<F: FnMut(usize, &[u8])>(s: &[u8], mut f: F) {
+    LexState::default().scan(s, |region| {
+        if region.kind == RegionKind::Code {
+            f(region.range.start, &s[region.range]);
+        }
+    });
+}
+
+/// Visit every code byte of `s` as `(offset, byte)`.  Offsets index `s`, so a
+/// caller may still look at the neighbouring protected bytes deliberately.
+pub fn for_each_code_byte<F: FnMut(usize, u8)>(s: &[u8], mut f: F) {
+    for_each_code_span(s, |start, span| {
+        for (index, byte) in span.iter().enumerate() {
+            f(start + index, *byte);
+        }
+    });
 }
 
 /// Apply `f` to every code region of `s`, copying protected regions through
@@ -352,6 +422,53 @@ mod tests {
         assert_eq!(comment_start(b"x=\"a\"\xff ! real"), Some(7));
         assert_eq!(comment_start(b"x=3h\xff! real"), None);
         assert_eq!(comment_start(b"x = 1"), None);
+    }
+
+    #[test]
+    fn a_group_walk_keeps_a_continued_literal_out_of_comment_detection() {
+        let mut state = LexState::default();
+        assert_eq!(
+            super::line_comment_start(&mut state, b"if (s == 'abc &"),
+            None
+        );
+        assert!(state.in_literal());
+        assert_eq!(
+            super::line_comment_start(&mut state, b"&def!ghi') then ! tail"),
+            Some(16)
+        );
+        assert!(!state.in_literal());
+
+        // No trailing marker, so the unterminated literal ends with its line
+        // rather than swallowing the next one's comment.
+        let mut broken = LexState::default();
+        assert_eq!(super::line_comment_start(&mut broken, b"x = 'abc"), None);
+        assert_eq!(
+            super::line_comment_start(&mut broken, b"y = 1 ! note"),
+            Some(6)
+        );
+    }
+
+    #[test]
+    fn code_walkers_report_only_rewritable_bytes() {
+        let source = b"a('x!y') = 3Hz!q + b ! tail";
+        let mut spans = Vec::new();
+        super::for_each_code_span(source, |start, span| spans.push((start, span.to_vec())));
+        assert_eq!(
+            spans
+                .iter()
+                .map(|(start, span)| (*start, span.as_slice()))
+                .collect::<Vec<_>>(),
+            [
+                (0, b"a(".as_slice()),
+                (7, b") = ".as_slice()),
+                (16, b" + b ".as_slice()),
+            ]
+        );
+        let mut seen = Vec::new();
+        super::for_each_code_byte(b"x = 'a''b' + y", |i, byte| seen.push((i, byte)));
+        assert_eq!(seen.first(), Some(&(0, b'x')));
+        assert!(!seen.iter().any(|(i, _)| (4..10).contains(i)));
+        assert_eq!(seen.last(), Some(&(13, b'y')));
     }
 
     #[test]

@@ -309,6 +309,36 @@ x = 1
     }
 
     #[test]
+    fn a_bang_inside_a_continued_literal_is_not_a_comment() {
+        // The physical-line comment scan used to start each line from a clean
+        // lexical state, so the `!` on the continuation was read as a comment
+        // marker and everything after it was cut out of the statement — which
+        // lost the `) then` that makes this an IF construct.
+        for source in [
+            b"if (s == 'abc &\n&def!ghi') then\nx = 1\nend if\n".as_slice(),
+            b"if (s == \"abc &\n&def!ghi\") then\nx = 1\nend if\n".as_slice(),
+        ] {
+            let buffer = SourceBuffer::new(source).unwrap();
+            assert!(buffer.lines[1].comment_span.is_none(), "{source:?}");
+            let groups = LogicalGroup::assemble(&buffer);
+            assert!(
+                groups[0].statements[0].text.ends_with(b") then"),
+                "{:?}",
+                String::from_utf8_lossy(&groups[0].statements[0].text)
+            );
+        }
+    }
+
+    #[test]
+    fn an_unterminated_literal_does_not_leak_past_its_own_line() {
+        // Without a trailing `&` the literal is simply unterminated; carrying
+        // its state forward would swallow every following line's comment.
+        let buffer = SourceBuffer::new(b"x = 'abc\ny = 1 ! note\n").unwrap();
+        assert!(buffer.lines[1].comment_span.is_some());
+        assert_eq!(buffer.code_bytes(&buffer.lines[1]), b"y = 1 ");
+    }
+
+    #[test]
     fn continued_source_accepts_blank_lines_and_leading_ampersands() {
         let buffer = SourceBuffer::new(b"x = a &\n\n & b &\n & c\n").unwrap();
         let groups = LogicalGroup::assemble(&buffer);

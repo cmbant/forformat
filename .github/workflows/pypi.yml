@@ -64,6 +64,9 @@ jobs:
           - os: windows-latest
             platform: windows-x86_64
             wheel_platform_tag: win_amd64
+          - os: windows-11-arm
+            platform: windows-arm64
+            wheel_platform_tag: win_arm64
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

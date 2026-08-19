@@ -91,3 +91,7 @@ fixed/free wording, and the quick-start formatter examples; it is not an exhaust
 - A continuation line has no statement context of its own. Thread facts into line rules rather
   than inferring them from the continuation's first token.
 - A new post-layout width change must be included in the wrapper's emitted-width measurement.
+- Never hand-roll a quote scanner. `src/source/regions.rs` owns the lexical state; take a byte scan
+  from `for_each_code_byte`/`for_each_code_span` and a rewrite from `map_code` or `tokenize`. Every
+  private copy so far has gone wrong the same two ways: closing `'a''b'` on the first byte of the
+  doubled pair, and forgetting to advance the cursor inside a literal.

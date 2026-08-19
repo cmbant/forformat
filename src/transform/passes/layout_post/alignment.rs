@@ -13,7 +13,11 @@
 use crate::{
     config::FormatConfig,
     error::FormatError,
-    source::{regions::comment_start, syntax::is_directive_comment},
+    source::{
+        regions::{comment_start, line_code_spans, line_comment_start},
+        syntax::is_directive_comment,
+        LexState,
+    },
     transform::{
         document::Document,
         passes::structure::{cpp_line_continues, is_preprocessor_line},
@@ -44,7 +48,7 @@ pub fn declaration_separator_alignment(
     let mut lines = document.lines.clone();
     loop {
         let cpp_lines = preprocessor_lines(&lines);
-        let separators = column_info(&lines, &cpp_lines, declaration_separator_info);
+        let separators = column_info(&lines, &cpp_lines, declaration_separator_info_in);
         let original = lines.clone();
         let mut updated = original.clone();
         align_blocks(
@@ -99,8 +103,8 @@ pub fn trailing_comment_alignment(
     Ok(())
 }
 
-fn trailing_comment_info(line: &[u8]) -> Option<(usize, usize, usize)> {
-    let start = comment_start(line)?;
+fn trailing_comment_info(line: &[u8], lex: &mut LexState) -> Option<(usize, usize, usize)> {
+    let start = line_comment_start(lex, line)?;
     let comment = &line[start..];
     if comment.starts_with(b"!!")
         || is_directive_comment(comment)
@@ -190,43 +194,34 @@ fn set_comment_column(
     *updated.get_mut(line_index).expect("run line in range") = line;
 }
 
+/// The `::` a standalone line offers for alignment, scanned from a clean state.
 pub(crate) fn declaration_separator_info(line: &[u8]) -> Option<(usize, usize, usize)> {
-    let mut quote = 0;
-    let mut index = 0;
-    while index < line.len() {
-        let byte = line[index];
-        if quote != 0 {
-            if byte == quote {
-                if line.get(index + 1) == Some(&quote) {
-                    index += 2;
-                    continue;
-                }
-                quote = 0;
+    declaration_separator_info_in(line, &mut LexState::default())
+}
+
+/// The same, for one line of a group whose lexical state is already known.
+fn declaration_separator_info_in(line: &[u8], lex: &mut LexState) -> Option<(usize, usize, usize)> {
+    let mut found = None;
+    line_code_spans(lex, line, |start, span| {
+        if found.is_none() {
+            if let Some(at) = span.windows(2).position(|pair| pair == b"::") {
+                found = Some(start + at);
             }
-            index += 1;
-        } else if byte == b'\'' || byte == b'"' {
-            quote = byte;
-            index += 1;
-        } else if byte == b'!' {
-            return None;
-        } else if line.get(index..index + 2) == Some(b"::") {
-            let mut before = index;
-            while before > 0 && matches!(line[before - 1], b' ' | b'\t') {
-                before -= 1;
-            }
-            let mut after = index + 2;
-            while after < line.len() && matches!(line[after], b' ' | b'\t') {
-                after += 1;
-            }
-            if before == 0 || after == line.len() {
-                return None;
-            }
-            return Some((index, index - before, after - index - 2));
-        } else {
-            index += 1;
         }
+    });
+    let index = found?;
+    let mut before = index;
+    while before > 0 && matches!(line[before - 1], b' ' | b'\t') {
+        before -= 1;
     }
-    None
+    let mut after = index + 2;
+    while after < line.len() && matches!(line[after], b' ' | b'\t') {
+        after += 1;
+    }
+    if before == 0 || after == line.len() {
+        return None;
+    }
+    Some((index, index - before, after - index - 2))
 }
 
 fn preprocessor_lines(lines: &[Vec<u8>]) -> Vec<bool> {
@@ -240,15 +235,29 @@ fn preprocessor_lines(lines: &[Vec<u8>]) -> Vec<bool> {
     cpp_lines
 }
 
+/// Measure one column carrier per line, walking the file in order.
+///
+/// The lexical state is threaded through the walk because a `!` or a `::` on
+/// the second physical line of a continued character literal is literal text:
+/// padding it to a column would write bytes into the literal.  A directive line
+/// carries no column and ends any state a malformed buffer left open.
 fn column_info(
     lines: &[Vec<u8>],
     cpp_lines: &[bool],
-    info: impl Fn(&[u8]) -> Option<(usize, usize, usize)>,
+    mut info: impl FnMut(&[u8], &mut LexState) -> Option<(usize, usize, usize)>,
 ) -> Vec<Option<(usize, usize, usize)>> {
+    let mut lex = LexState::default();
     lines
         .iter()
         .zip(cpp_lines)
-        .map(|(line, cpp)| if *cpp { None } else { info(line) })
+        .map(|(line, cpp)| {
+            if *cpp {
+                lex = LexState::default();
+                None
+            } else {
+                info(line, &mut lex)
+            }
+        })
         .collect()
 }
 

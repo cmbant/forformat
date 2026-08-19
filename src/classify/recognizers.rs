@@ -1,5 +1,5 @@
 use super::statement::{StatementClass, StatementInfo, StatementKind};
-use crate::source::scanner::tokens;
+use crate::source::{regions, scanner::tokens};
 
 pub fn classify(input: &[u8]) -> StatementInfo {
     let text = trim(input);
@@ -235,23 +235,16 @@ fn is_assignment(s: &[u8]) -> bool {
         }
     }
     let mut depth: usize = 0;
-    let mut quote = 0;
-    for (i, c) in s.iter().enumerate() {
-        if quote != 0 {
-            if *c == quote && s.get(i + 1) != Some(c) {
-                quote = 0
-            };
-            continue;
-        }
-        if *c == b'\'' || *c == b'"' {
-            quote = *c;
-            continue;
+    let mut verdict = None;
+    regions::for_each_code_byte(s, |i, c| {
+        if verdict.is_some() {
+            return;
         }
         match c {
             b'(' => depth += 1,
             b')' => depth = depth.saturating_sub(1),
             b'=' if depth == 0 => {
-                return match s.get(i + 1) {
+                verdict = Some(match s.get(i + 1) {
                     // A pointer assignment is an assignment too: findent's
                     // grammar spells it `assignment: lvalue '=' skipnoop /*
                     // this includes '=>' */`.  Without this, `block => list`
@@ -264,12 +257,12 @@ fn is_assignment(s: &[u8]) -> bool {
                     Some(b'>') => is_designator(&s[..i]),
                     Some(b'=') => false,
                     _ => true,
-                };
+                });
             }
             _ => {}
         }
-    }
-    false
+    });
+    verdict.unwrap_or(false)
 }
 
 /// Does this text read as a bare variable designator — a name, then any mix of
@@ -286,27 +279,15 @@ fn is_designator(s: &[u8]) -> bool {
         return false;
     }
     let mut depth: usize = 0;
-    let mut quote = 0u8;
-    for (i, c) in t.iter().enumerate() {
-        if quote != 0 {
-            if *c == quote && t.get(i + 1) != Some(c) {
-                quote = 0;
-            }
-            continue;
-        }
-        match c {
-            b'\'' | b'"' => quote = *c,
-            b'(' | b'[' => depth += 1,
-            b')' | b']' => depth = depth.saturating_sub(1),
-            _ if depth > 0 => {}
-            c if c.is_ascii_alphanumeric()
-                || *c == b'_'
-                || *c == b'%'
-                || c.is_ascii_whitespace() => {}
-            _ => return false,
-        }
-    }
-    true
+    let mut designator = true;
+    regions::for_each_code_byte(t, |_, c| match c {
+        b'(' | b'[' => depth += 1,
+        b')' | b']' => depth = depth.saturating_sub(1),
+        _ if depth > 0 => {}
+        c if c.is_ascii_alphanumeric() || c == b'_' || c == b'%' || c.is_ascii_whitespace() => {}
+        _ => designator = false,
+    });
+    designator
 }
 
 fn prefixed_procedure(source: &[u8], words: &[Vec<u8>]) -> Option<(StatementKind, StatementClass)> {
@@ -424,22 +405,12 @@ fn keyword_stands_alone(source: &[u8], start: usize) -> bool {
 fn bracket_scan(before: &[u8]) -> (usize, bool) {
     let mut depth: usize = 0;
     let mut comma = false;
-    let mut quote = 0u8;
-    for (i, c) in before.iter().enumerate() {
-        if quote != 0 {
-            if *c == quote && before.get(i + 1) != Some(c) {
-                quote = 0;
-            }
-            continue;
-        }
-        match c {
-            b'\'' | b'"' => quote = *c,
-            b'(' | b'[' => depth += 1,
-            b')' | b']' => depth = depth.saturating_sub(1),
-            b',' if depth == 0 => comma = true,
-            _ => {}
-        }
-    }
+    regions::for_each_code_byte(before, |_, c| match c {
+        b'(' | b'[' => depth += 1,
+        b')' | b']' => depth = depth.saturating_sub(1),
+        b',' if depth == 0 => comma = true,
+        _ => {}
+    });
     (depth, comma)
 }
 
@@ -478,44 +449,29 @@ fn explicit_end_kind(words: &[Vec<u8>]) -> Option<StatementKind> {
     }
 }
 fn has_then(s: &[u8]) -> bool {
-    // A byte scan, like `single_line_after_paren` above, not the `tokens`
-    // scanner: `tokens` treats an unterminated `.something` (the DEC
-    // RECORD field-access dot in `TYPES_MESH.i == 1 ) THEN`, which has no
-    // closing `.`) as one token running to the end of the statement,
-    // which would swallow a real trailing THEN. Quote-skipping is still
-    // needed so a `then` inside a string-literal argument
-    // (`call foo('..., then ...', x)`) is not mistaken for the keyword.
+    // A byte scan over the code regions, not the `tokens` scanner: `tokens`
+    // treats an unterminated `.something` (the DEC RECORD field-access dot in
+    // `TYPES_MESH.i == 1 ) THEN`, which has no closing `.`) as one token
+    // running to the end of the statement, which would swallow a real trailing
+    // THEN. Walking code regions is what keeps a `then` inside a
+    // string-literal argument (`call foo('..., then ...', x)`) from being
+    // mistaken for the keyword.
     let t = trim(s);
-    let mut quote = 0u8;
-    let mut i = 0;
-    while i < t.len() {
-        let byte = t[i];
-        if quote != 0 {
-            if byte == quote {
-                if t.get(i + 1) == Some(&quote) {
-                    i += 2;
-                    continue;
-                }
-                quote = 0;
+    let mut found = false;
+    regions::for_each_code_span(t, |start, span| {
+        for i in 0..span.len() {
+            let at = start + i;
+            if span[i..].len() >= 4
+                && span[i..i + 4].eq_ignore_ascii_case(b"then")
+                && (at == 0 || !is_identifier_byte(t[at - 1]))
+                && t.get(at + 4).is_none_or(|c| !is_identifier_byte(*c))
+            {
+                found = true;
+                return;
             }
-            i += 1;
-            continue;
         }
-        if byte == b'\'' || byte == b'"' {
-            quote = byte;
-            i += 1;
-            continue;
-        }
-        if t[i..].len() >= 4
-            && t[i..i + 4].eq_ignore_ascii_case(b"then")
-            && (i == 0 || !is_identifier_byte(t[i - 1]))
-            && t.get(i + 4).is_none_or(|c| !is_identifier_byte(*c))
-        {
-            return true;
-        }
-        i += 1;
-    }
-    false
+    });
+    found
 }
 
 fn single_line_after_paren(s: &[u8], keyword: &[u8]) -> bool {
@@ -527,33 +483,21 @@ fn single_line_after_paren(s: &[u8], keyword: &[u8]) -> bool {
         return false;
     }
     let mut depth = 0usize;
-    let mut quote = 0u8;
-    let mut i = 0;
-    while i < rest.len() {
-        let byte = rest[i];
-        if quote != 0 {
-            if byte == quote {
-                if rest.get(i + 1) == Some(&quote) {
-                    i += 2;
-                    continue;
-                }
-                quote = 0;
-            }
-            continue;
+    let mut close = None;
+    regions::for_each_code_byte(rest, |i, byte| {
+        if close.is_some() {
+            return;
         }
-        if byte == b'\'' || byte == b'"' {
-            quote = byte;
-        } else if byte == b'(' {
+        if byte == b'(' {
             depth += 1;
         } else if byte == b')' {
             depth = depth.saturating_sub(1);
             if depth == 0 {
-                return !trim(&rest[i + 1..]).is_empty();
+                close = Some(i);
             }
         }
-        i += 1;
-    }
-    false
+    });
+    close.is_some_and(|i| !trim(&rest[i + 1..]).is_empty())
 }
 
 fn is_identifier_byte(byte: u8) -> bool {
@@ -693,7 +637,7 @@ fn referenced_labels(s: &[u8], kind: &StatementKind) -> Vec<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::classify;
+    use super::{classify, has_then};
     use crate::classify::{StatementClass, StatementKind};
 
     #[test]
@@ -938,6 +882,50 @@ mod tests {
         for (source, expected) in cases {
             assert_eq!(classify(source).kind, expected, "{source:?}");
         }
+    }
+
+    #[test]
+    fn a_character_literal_never_hides_the_masked_construct_head() {
+        // `single_line_after_paren` used to run its own quote scanner, whose
+        // in-literal branch never advanced the cursor: every WHERE or FORALL
+        // holding a character literal spun forever.  Walking the shared
+        // regions removes the loop and the copy at once.
+        for source in [
+            b"where (s == 'a')".as_slice(),
+            b"where (s == 'don''t')".as_slice(),
+            b"where (s == \"a\")".as_slice(),
+        ] {
+            assert_eq!(classify(source).kind, StatementKind::Where, "{source:?}");
+        }
+        assert_eq!(
+            classify(b"where (s == 'a') t = 1").kind,
+            StatementKind::Unknown
+        );
+        assert_eq!(
+            classify(b"forall (i = 1:n, t(i) == 'a')").kind,
+            StatementKind::Forall
+        );
+        assert_eq!(
+            classify(b"forall (i = 1:n, t(i) == 'a') x(i) = 1").kind,
+            StatementKind::Unknown
+        );
+    }
+
+    #[test]
+    fn a_doubled_delimiter_does_not_invert_the_lexical_state() {
+        // `'a''b'` is one literal.  A scanner that closes on the first byte of
+        // the doubled pair reopens on the second and reads the rest of the
+        // statement as literal text, which hid the `=` of an assignment and
+        // exposed the `=` inside a literal as if it were one.
+        assert_eq!(
+            classify(b"write(*,*) 'it''s = fine'").class,
+            StatementClass::Neutral
+        );
+        assert_eq!(classify(b"call f('a''b=c')").class, StatementClass::Neutral);
+        assert_eq!(classify(b"x('a''b') = 1").class, StatementClass::Executable);
+        assert_eq!(classify(b"block").kind, StatementKind::Block);
+        assert!(has_then(b"if (x == 'don''t') then"));
+        assert!(!has_then(b"call f('a''then''b')"));
     }
 
     #[test]

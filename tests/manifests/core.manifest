@@ -25,6 +25,18 @@ stderr = ""
 status = "0"
 args = "-ifree"
 
+[case.continued_literal]
+source_test = "local-continued-literal"
+oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+category = "lexical-continuation"
+support = "supported"
+normalization = "none"
+input = "../fixtures/continued_literal.f90"
+stdout = "../expected/continued_literal.out"
+stderr = ""
+status = "0"
+args = "-ifree"
+
 [case.fixed_rejected]
 source_test = "manifest.rs::fixed_form_rejection_contract"
 oracle = "fixed-form input is outside the Rust free-form contract"
