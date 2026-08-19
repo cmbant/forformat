@@ -66,6 +66,21 @@ impl Document {
         }
     }
 
+    /// Write the document with its terminator policy applied.
+    pub fn write_to<W: std::io::Write>(&self, out: &mut W) -> Result<(), FormatError> {
+        let terminator: &[u8] = match self.newline {
+            Newline::CrLf => b"\r\n",
+            _ => b"\n",
+        };
+        for (i, line) in self.lines.iter().enumerate() {
+            out.write_all(line).map_err(FormatError::Write)?;
+            if i + 1 < self.lines.len() || self.trailing_newline {
+                out.write_all(terminator).map_err(FormatError::Write)?;
+            }
+        }
+        Ok(())
+    }
+
     /// Render the document with its terminator policy applied.
     pub fn to_bytes(&self) -> Vec<u8> {
         let terminator: &[u8] = match self.newline {
@@ -182,6 +197,9 @@ mod tests {
         ] {
             let document = Document::from_bytes(source);
             assert_eq!(document.to_bytes(), source, "round trip of {source:?}");
+            let mut written = Vec::new();
+            document.write_to(&mut written).unwrap();
+            assert_eq!(written, source, "streamed round trip of {source:?}");
         }
     }
 
