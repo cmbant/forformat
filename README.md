@@ -23,6 +23,36 @@ forformat --version
 
 The package requires Python 3.9 or newer.
 
+Native static Linux binaries are also published for x86_64 and arm64. The following installs the
+latest release into `~/.local/bin` and verifies its SHA-256 checksum first:
+
+```sh
+case "$(uname -m)" in
+  x86_64|amd64) target=x86_64-unknown-linux-musl ;;
+  aarch64|arm64) target=aarch64-unknown-linux-musl ;;
+  *) echo "unsupported Linux architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+
+archive="forformat-$target.tar.gz"
+base="https://github.com/cmbant/forformat/releases/latest/download/$archive"
+curl -LO "$base"
+curl -LO "$base.sha256"
+sha256sum -c "$archive.sha256"
+tar -xzf "$archive"
+mkdir -p "$HOME/.local/bin"
+install -m 0755 "forformat-$target/forformat" "$HOME/.local/bin/forformat"
+forformat --version
+```
+
+Release archives also receive GitHub artifact provenance attestations. If the GitHub CLI is
+available, the downloaded archive can be checked with:
+
+```sh
+gh attestation verify "$archive" --repo cmbant/forformat
+```
+
+This provenance attestation is separate from platform code signing.
+
 For pre-commit, use the separate hook repository:
 
 ```yaml
