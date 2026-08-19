@@ -664,28 +664,82 @@ fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
     lines
 }
 
+const DIFF_CONTEXT_LINES: usize = 3;
+
+fn append_diff_line(output: &mut Vec<u8>, marker: u8, line: &[u8]) {
+    output.push(marker);
+    output.extend_from_slice(line);
+    if !line.ends_with(b"\n") {
+        output.extend_from_slice(b"\n\\ No newline at end of file\n");
+    }
+}
+
+fn hunk_line_number(start: usize, count: usize) -> usize {
+    if count == 0 {
+        start
+    } else {
+        start + 1
+    }
+}
+
 fn unified_diff(path: &Path, old: &[u8], new: &[u8], root: Option<&Path>) -> Vec<u8> {
+    if old == new {
+        return Vec::new();
+    }
+
     let relative = display_path(path, root).display().to_string();
     let old_lines = split_lines(old);
     let new_lines = split_lines(new);
+    let common_limit = old_lines.len().min(new_lines.len());
+
+    let mut common_prefix = 0usize;
+    while common_prefix < common_limit && old_lines[common_prefix] == new_lines[common_prefix] {
+        common_prefix += 1;
+    }
+
+    let mut common_suffix = 0usize;
+    while common_suffix < common_limit - common_prefix
+        && old_lines[old_lines.len() - 1 - common_suffix]
+            == new_lines[new_lines.len() - 1 - common_suffix]
+    {
+        common_suffix += 1;
+    }
+
+    let context_before = common_prefix.min(DIFF_CONTEXT_LINES);
+    let context_after = common_suffix.min(DIFF_CONTEXT_LINES);
+    let old_change_end = old_lines.len() - common_suffix;
+    let new_change_end = new_lines.len() - common_suffix;
+    let old_start = common_prefix - context_before;
+    let new_start = common_prefix - context_before;
+    let old_end = old_change_end + context_after;
+    let new_end = new_change_end + context_after;
+    let old_count = old_end - old_start;
+    let new_count = new_end - new_start;
+
     let mut output = Vec::new();
     output.extend_from_slice(format!("--- a/{relative}\n+++ b/{relative}\n").as_bytes());
     output.extend_from_slice(
-        format!("@@ -1,{} +1,{} @@\n", old_lines.len(), new_lines.len()).as_bytes(),
+        format!(
+            "@@ -{},{} +{},{} @@\n",
+            hunk_line_number(old_start, old_count),
+            old_count,
+            hunk_line_number(new_start, new_count),
+            new_count,
+        )
+        .as_bytes(),
     );
-    for line in old_lines {
-        output.push(b'-');
-        output.extend_from_slice(line);
-        if !line.ends_with(b"\n") {
-            output.push(b'\n');
-        }
+
+    for line in &old_lines[old_start..common_prefix] {
+        append_diff_line(&mut output, b' ', line);
     }
-    for line in new_lines {
-        output.push(b'+');
-        output.extend_from_slice(line);
-        if !line.ends_with(b"\n") {
-            output.push(b'\n');
-        }
+    for line in &old_lines[common_prefix..old_change_end] {
+        append_diff_line(&mut output, b'-', line);
+    }
+    for line in &new_lines[common_prefix..new_change_end] {
+        append_diff_line(&mut output, b'+', line);
+    }
+    for line in &old_lines[old_change_end..old_end] {
+        append_diff_line(&mut output, b' ', line);
     }
     output
 }
@@ -1209,7 +1263,9 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
 mod tests {
     #[cfg(unix)]
     use super::atomic_replace;
-    use super::{decline_message, project_context, validate_extension, DeclineReporter};
+    use super::{
+        decline_message, project_context, unified_diff, validate_extension, DeclineReporter,
+    };
     use crate::{analysis::names::NameSpace, config::FormatConfig, format::wrapping::Decline};
     #[cfg(unix)]
     use std::fs;
@@ -1219,6 +1275,35 @@ mod tests {
     fn section_9_1_valid_extension_is_pure_and_accepts_missing_path() {
         assert!(validate_extension(Path::new("does-not-exist.F90")).is_ok());
         assert!(validate_extension(Path::new("does-not-exist.txt")).is_err());
+    }
+
+    #[test]
+    fn unified_diff_marks_missing_final_newlines() {
+        let diff = unified_diff(Path::new("source.f90"), b"a\nold", b"a\nnew", None);
+        assert_eq!(
+            diff,
+            b"--- a/source.f90\n+++ b/source.f90\n@@ -1,2 +1,2 @@\n a\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n"
+        );
+    }
+
+    #[test]
+    fn unified_diff_reports_a_newline_only_change() {
+        let diff = unified_diff(Path::new("source.f90"), b"same", b"same\n", None);
+        assert_eq!(
+            diff,
+            b"--- a/source.f90\n+++ b/source.f90\n@@ -1,1 +1,1 @@\n-same\n\\ No newline at end of file\n+same\n"
+        );
+    }
+
+    #[test]
+    fn unified_diff_trims_unchanged_file_ends() {
+        let old = b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n";
+        let new = b"1\n2\n3\n4\n5\n6\n7\nchanged\n9\n10\n11\n12\n13\n14\n15\n";
+        let diff = unified_diff(Path::new("source.f90"), old, new, None);
+        assert_eq!(
+            diff,
+            b"--- a/source.f90\n+++ b/source.f90\n@@ -5,7 +5,7 @@\n 5\n 6\n 7\n-8\n+changed\n 9\n 10\n 11\n"
+        );
     }
 
     #[test]
@@ -1296,6 +1381,6 @@ mod tests {
         let failure = atomic_replace(&directory, b"nope\n");
         assert!(failure.is_err());
         assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
-        let _ = fs::remove_dir_all(&directory);
+        let _ = fs::remove_dir_all(directory);
     }
 }
