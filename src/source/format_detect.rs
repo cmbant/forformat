@@ -179,7 +179,7 @@ fn update_cpp_conditional_depth(line: &[u8], depth: &mut usize) {
         .position(|byte| !byte.is_ascii_alphabetic())
         .unwrap_or(rest.len());
     let keyword = &rest[..keyword_len];
-    if matches!(keyword, b"if" | b"ifdef" | b"ifndef") {
+    if keyword == b"if" || keyword == b"ifdef" || keyword == b"ifndef" {
         *depth = depth.saturating_add(1);
     } else if keyword == b"endif" {
         *depth = depth.saturating_sub(1);
@@ -578,7 +578,8 @@ mod tests {
 
     #[test]
     fn confirmation_skips_continued_preprocessor_directives() {
-        let source = b"#define CONT \\\n     &\nprogram p\ninteger :: x\nx = 1 CONT\n+ 2\nend program p\n";
+        let source =
+            b"#define CONT \\\n     &\nprogram p\ninteger :: x\nx = 1 CONT\n+ 2\nend program p\n";
         assert_eq!(
             detect_path(Path::new("macro.F90"), source),
             SourceForm::Free
