@@ -76,7 +76,35 @@ pub(crate) fn format_with_context_and_local(
     if config.mode == FormatMode::IndentOnly {
         return engine::format(source, config);
     }
+    let (document, meta) = format_document_with_context_and_local(source, project, local, config)?;
+    Ok(FormatResult {
+        bytes: document.to_bytes(),
+        meta,
+    })
+}
 
+/// Format one buffer with project context directly into a writer.
+pub(crate) fn format_to_with_context<W: std::io::Write>(
+    source: &[u8],
+    project: &ProjectContext,
+    config: &FormatConfig,
+    out: &mut W,
+) -> Result<FormatMeta, FormatError> {
+    if config.mode == FormatMode::IndentOnly {
+        return engine::format_to(source, config, out);
+    }
+    let local = analyze_file(source)?;
+    let (document, meta) = format_document_with_context_and_local(source, project, &local, config)?;
+    document.write_to(out)?;
+    Ok(meta)
+}
+
+fn format_document_with_context_and_local(
+    source: &[u8],
+    project: &ProjectContext,
+    local: &crate::analysis::FileFacts,
+    config: &FormatConfig,
+) -> Result<(Document, FormatMeta), FormatError> {
     let mut document = Document::from_bytes(source);
     // `--start-indent=auto` has to be answered while the authored indentation
     // is still there; see `resolve_auto_start_indent`.  Every stage below then
@@ -87,11 +115,7 @@ pub(crate) fn format_with_context_and_local(
     pipeline::normalize(&mut document, project, local, config)?;
 
     if config.mode == FormatMode::NormalizeOnly {
-        let bytes = document.to_bytes();
-        return Ok(FormatResult {
-            bytes,
-            meta: FormatMeta::default(),
-        });
+        return Ok((document, FormatMeta::default()));
     }
 
     if config.wrap.enabled {
@@ -99,21 +123,17 @@ pub(crate) fn format_with_context_and_local(
         // Every long line the wrapper refuses is explainable; the diagnostic
         // separates "unwrappable by design" from a wrapper bug.
         let (output, meta) = lay_out(&document, config)?;
-        return Ok(FormatResult {
-            bytes: output.to_bytes(),
-            meta: FormatMeta {
+        return Ok((
+            output,
+            FormatMeta {
                 last_indent: meta.last_indent,
                 last_usable: meta.last_usable,
                 declines: declined,
             },
-        });
+        ));
     }
 
-    let (output, meta) = lay_out(&document, config)?;
-    Ok(FormatResult {
-        bytes: output.to_bytes(),
-        meta,
-    })
+    lay_out(&document, config)
 }
 
 /// Run the layout engine and the post-layout passes over the normalized text.
