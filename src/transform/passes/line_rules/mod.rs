@@ -189,17 +189,34 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
         // share this state.
         state.continued_openmp_infix = false;
         if kind == PhysicalLineKind::Preprocessor {
+            // A directive is stepped over by a continued statement, so it
+            // cannot close a character literal the previous line left open;
+            // only the statement context goes.
+            let lex = state.lex;
             state.reset_statement();
+            state.lex = lex;
             continue;
         }
 
         let context = state.context(&state.open_groups, document, index, cx);
+        // A comment or blank line is stepped over too. It is still normalized
+        // on its own terms, but through a scratch state: reading the group's
+        // state would make the `!` of a comment inside an open literal look
+        // like literal text, and writing it back would let the apostrophe in
+        // prose like `! don't` close the literal, so the `!` in `&def!ghi'` on
+        // the resumed line would be rewritten as a comment marker.
+        let mut scratch = LexState::default();
+        let lex = if matches!(kind, PhysicalLineKind::Comment | PhysicalLineKind::Blank) {
+            &mut scratch
+        } else {
+            &mut state.lex
+        };
         let line = apply_rules(
             &document.lines[index],
             cx,
             &declared_names,
             index,
-            &mut state.lex,
+            lex,
             RuleMode::Physical(context),
         );
 

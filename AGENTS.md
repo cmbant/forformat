@@ -95,3 +95,5 @@ fixed/free wording, and the quick-start formatter examples; it is not an exhaust
   from `for_each_code_byte`/`for_each_code_span` and a rewrite from `map_code` or `tokenize`. Every
   private copy so far has gone wrong the same two ways: closing `'a''b'` on the first byte of the
   doubled pair, and forgetting to advance the cursor inside a literal.
+- A continued statement *steps over* blank, comment and directive lines: they are emitted verbatim
+  and never lexed. `line_comment_start`/`line_code_spans` walk a group's physical lines through them and carry one `LexState` across the whole group.

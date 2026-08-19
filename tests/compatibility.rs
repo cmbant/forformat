@@ -164,6 +164,47 @@ fn a_bang_inside_a_continued_literal_is_never_detached_as_a_comment() {
 }
 
 #[test]
+fn a_stepped_over_line_never_disturbs_the_literal_it_sits_inside() {
+    // A continued statement steps over blank, comment and directive lines, so
+    // they must be normalized on their own terms without reading or writing the
+    // group's lexical state.  The line rules used to thread the live state
+    // through them, so the lone apostrophe in `! don't` closed the literal and
+    // the `!` of `&def!ghi'` was then rewritten as a comment marker — turning
+    // the string `abc def!ghi` into `abc def ! ghi`.
+    for separator in [
+        "! don't stop here",
+        "! a \" here",
+        "",
+        "   ",
+        "#ifdef FOO",
+        "! one\n\n! two don't",
+    ] {
+        for (open, close) in [("'abc &", "&def!ghi'"), ("\"abc &", "&def!ghi\"")] {
+            let source =
+                format!("program p\ncharacter(len=60) :: s\ns = {open}\n{separator}\n{close}\nend program p\n");
+            for config in [
+                FormatConfig {
+                    mode: FormatMode::Full,
+                    ..FormatConfig::default()
+                },
+                FormatConfig {
+                    mode: FormatMode::Full,
+                    align_comments: true,
+                    ..FormatConfig::default()
+                },
+            ] {
+                let out = format_source(source.as_bytes(), &config).unwrap().bytes;
+                let text = String::from_utf8(out).unwrap();
+                assert!(
+                    text.contains("def!ghi"),
+                    "separator {separator:?} corrupted the literal:\n{text}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn post_layout_alignment_never_writes_into_a_continued_literal() {
     // `::` and `!` on the second physical line of a continued character
     // literal are literal text.  The alignment passes measured each line from
