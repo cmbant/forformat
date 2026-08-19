@@ -48,6 +48,7 @@ Format files in place:
 ```sh
 forformat src/module.f90
 forformat src/*.f90
+forformat src/
 ```
 
 Explicit paths use declarations from the surrounding project for identifier case resolution; add

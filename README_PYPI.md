@@ -5,13 +5,25 @@ findent-compatible indentation with lexical normalization, project-aware identif
 statement wrapping. `--indent-only` provides the findent-compatible indentation contract.
 
 The package installs the `forformat` command and an importable in-memory API. It requires Python
-3.9 or newer; wheels bundle the native Rust executable.
+3.9 or newer. Published wheels bundle the native Rust executable, so they do not require Rust or a
+Fortran compiler; Rust is only needed when building from source.
 
 ## Install
 
 ```sh
 python -m pip install forformat
 forformat --version
+```
+
+For pre-commit, use the separate hook repository:
+
+```yaml
+repos:
+  - repo: https://github.com/cmbant/forformat-pre-commit
+    rev: v0.1.3
+    hooks:
+      - id: forformat
+      # - id: forformat-check  # check only; do not rewrite
 ```
 
 ## Quick start
@@ -21,6 +33,7 @@ Format files in place:
 ```sh
 forformat src/module.f90
 forformat src/*.f90
+forformat src/
 ```
 
 Check or preview changes without rewriting files:
@@ -28,6 +41,13 @@ Check or preview changes without rewriting files:
 ```sh
 forformat --check src/*.f90
 forformat --diff src/*.f90
+```
+
+Format every tracked free-form source in the current checkout, or check the whole checkout:
+
+```sh
+forformat --all-files
+forformat --all-files --check
 ```
 
 Use stdin/stdout in a pipeline:
@@ -54,6 +74,15 @@ forformat --indent=4 --indent-module=0 --indent-procedure=0 src/module.f90
 forformat --keyword-case=upper --line-length=100 src/module.f90
 ```
 
+If authored internal spacing must be preserved, use the indentation-only mode:
+
+```sh
+forformat --indent-only src/module.f90
+```
+
+This changes indentation and trailing whitespace but deliberately does not apply keyword casing or
+full-mode normalization.
+
 The main option reference, including defaults, project settings, and file-selection options, is in
 the [project documentation](https://github.com/cmbant/forformat/blob/main/docs/options.md).
 
@@ -72,6 +101,7 @@ Project settings can live in `.forformat.toml`, the compatibility spelling `.fin
 
 ```toml
 [tool.forformat]
+mode = "full"
 indent = 4
 line_length = 100
 keyword_case = "lower"

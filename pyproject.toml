@@ -32,3 +32,9 @@ packages = ["forformat", "forformat_runner"]
 
 [tool.setuptools.package-data]
 forformat_runner = ["bin/*"]
+
+[tool.ruff]
+target-version = "py39"
+
+[tool.ruff.lint]
+ignore = ["UP045"]
