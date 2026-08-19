@@ -41,14 +41,14 @@ sha256sum -c "$archive.sha256"
 tar -xzf "$archive"
 mkdir -p "$HOME/.local/bin"
 install -m 0755 "forformat-$target/forformat" "$HOME/.local/bin/forformat"
-forformat --version
+"$HOME/.local/bin/forformat" --version
 ```
 
 Release archives also receive GitHub artifact provenance attestations. If the GitHub CLI is
-available, the downloaded archive can be checked with:
+available, a downloaded archive can additionally be checked, for example:
 
 ```sh
-gh attestation verify "$archive" --repo cmbant/forformat
+gh attestation verify forformat-x86_64-unknown-linux-musl.tar.gz --repo cmbant/forformat
 ```
 
 This provenance attestation is separate from platform code signing.
