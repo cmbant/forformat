@@ -14,29 +14,6 @@ use crate::{
 };
 use std::io::Write;
 
-struct QueryWriter<'a, W: Write> {
-    inner: &'a mut W,
-    discard: bool,
-}
-
-impl<W: Write> Write for QueryWriter<'_, W> {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if self.discard {
-            Ok(bytes.len())
-        } else {
-            self.inner.write(bytes)
-        }
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        if self.discard {
-            Ok(())
-        } else {
-            self.inner.flush()
-        }
-    }
-}
-
 pub fn format(source: &[u8], config: &FormatConfig) -> Result<FormatResult, FormatError> {
     let mut output = Vec::with_capacity(source.len() + 64);
     let meta = format_to(source, config, &mut output)?;
@@ -82,10 +59,6 @@ pub fn format_buffer<W: Write>(
         });
     }
     let query_mode = config.last_indent || config.last_usable;
-    let mut output = QueryWriter {
-        inner: out,
-        discard: query_mode,
-    };
     let mut planner = Planner::new(config);
     let mut last_indent = 0;
     let mut last_usable = 1;
@@ -97,13 +70,12 @@ pub fn format_buffer<W: Write>(
         if let Some(value) = plan.last_usable {
             last_usable = value;
         }
-        emit_group(buf, &plan, config, &mut output)
+        if query_mode {
+            Ok(())
+        } else {
+            emit_group(buf, &plan, config, out)
+        }
     })?;
-    // Release the mutable sink borrow before the query result is written to
-    // the caller's original writer. QueryWriter deliberately has no Drop
-    // behavior; this explicit lifetime boundary is what matters here.
-    #[allow(clippy::drop_non_drop)]
-    drop(output);
     if config.last_usable {
         writeln!(out, "{last_usable}").map_err(FormatError::Write)?;
         return Ok(FormatMeta {
