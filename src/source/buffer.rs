@@ -88,12 +88,13 @@ impl SourceBuffer {
                     (span.start + first + if omp { 3 } else { 0 } + i) as u32..span.end as u32,
                 );
             }
-        } else {
-            // A blank, comment or directive line cannot sit inside a continued
-            // character context, so it ends any state a malformed buffer left
-            // open.
-            *state = LexState::default();
         }
+        // The other kinds deliberately leave `state` alone.  A continued
+        // statement steps over blank, comment and directive lines, so one
+        // appearing inside an open character context neither closes it nor
+        // lexes as part of it; the literal resumes on the next code line.
+        // Outside such a context the scan above already left `state` default,
+        // so there is nothing to reset either way.
         let code_end = comment.as_ref().map_or(span.end, |r| r.start as usize);
         let code_start = span.start + first + if omp { 3 } else { 0 };
         PhysicalLine {

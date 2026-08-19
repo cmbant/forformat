@@ -287,10 +287,35 @@ pub fn line_code_spans<F: FnMut(usize, &[u8])>(state: &mut LexState, line: &[u8]
 
 /// Scan one line of a group, then decide whether the state survives it.
 fn line_scan<F: FnMut(Region)>(state: &mut LexState, line: &[u8], push: F) {
+    if *state != LexState::default() && stepped_over_by_continuation(line) {
+        return;
+    }
     state.scan(line, push);
     if line.trim_ascii_end().last() != Some(&b'&') {
         *state = LexState::default();
     }
+}
+
+/// Does a continued statement step over this line rather than absorb it?
+///
+/// A blank, a comment and a preprocessor directive are not part of the
+/// statement they sit inside: [`LogicalGroup::visit`] skips exactly these three
+/// kinds when it joins a group's continuation lines, and findent copies them to
+/// the output without ever lexing them.  So while a character literal or a
+/// Hollerith payload is open, such a line contributes no regions and cannot
+/// close it -- the apostrophe in prose like `! don't stop here` is not a
+/// delimiter, and the literal resumes at the `&` on the next code line.
+///
+/// The OpenMP sentinel is deliberately not in the set: `!$ ` introduces
+/// conditionally compiled *code*, which a group absorbs like any other line.
+///
+/// [`LogicalGroup::visit`]: crate::source::LogicalGroup::visit
+fn stepped_over_by_continuation(line: &[u8]) -> bool {
+    let line = line.trim_ascii_start();
+    line.is_empty()
+        || line.starts_with(b"#")
+        || line.starts_with(b"??")
+        || (line.starts_with(b"!") && !line.starts_with(b"!$ "))
 }
 
 /// Visit every code region of `s` as `(start offset, bytes)`, skipping string
@@ -446,6 +471,55 @@ mod tests {
             super::line_comment_start(&mut broken, b"y = 1 ! note"),
             Some(6)
         );
+    }
+
+    #[test]
+    fn a_skipped_line_neither_lexes_into_nor_closes_an_open_literal() {
+        // A continued statement steps over blanks, comments and directives, so
+        // the odd apostrophe in `! don't` must not invert the literal state and
+        // the `!` on the resumed line must stay literal text.
+        for separator in [
+            &b""[..],
+            b"   ",
+            b"! don't stop here",
+            b"      ! tail",
+            b"#ifdef FOO",
+            b"??cpp",
+        ] {
+            let mut state = LexState::default();
+            assert_eq!(
+                super::line_comment_start(&mut state, b"if (s == 'abc &"),
+                None
+            );
+            assert!(state.in_literal());
+            assert_eq!(super::line_comment_start(&mut state, separator), None);
+            assert!(
+                state.in_literal(),
+                "separator {:?} closed the literal",
+                String::from_utf8_lossy(separator)
+            );
+            assert_eq!(
+                super::line_comment_start(&mut state, b"&def!ghi') then ! tail"),
+                Some(16)
+            );
+            assert!(!state.in_literal());
+        }
+    }
+
+    #[test]
+    fn an_openmp_sentinel_is_code_not_a_skipped_line() {
+        // `!$ ` introduces conditionally compiled code, so a group absorbs it
+        // like any other line rather than stepping over it.
+        assert!(!super::stepped_over_by_continuation(b"!$ x = 1"));
+        assert!(super::stepped_over_by_continuation(b"!$OMP parallel"));
+    }
+
+    #[test]
+    fn a_skipped_line_is_still_lexed_outside_a_literal() {
+        // The step-over applies only while a context is open; an ordinary
+        // comment line keeps reporting its own start.
+        let mut state = LexState::default();
+        assert_eq!(super::line_comment_start(&mut state, b"! plain"), Some(0));
     }
 
     #[test]

@@ -12,6 +12,23 @@ program p
       s = "x &
       &y!z"
    end if
+! A continued character context steps over comment and blank lines: the
+! separator is not part of the statement, so it neither closes the literal
+! nor lets the `!` in `def!ghi` open a comment.
+   if (s == 'abc &
+! explanatory comment
+   &def!ghi') then
+      s = 'p &
+
+      &q!r'
+   end if
+   if (s == 'abc &
+! don't stop here
+   &def!ghi') then
+      s = "u &
+! nor " here
+      &v!w"
+   end if
    where (t == 'a')
       m = .true.
    end where

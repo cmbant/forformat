@@ -252,7 +252,8 @@ fn column_info(
         .zip(cpp_lines)
         .map(|(line, cpp)| {
             if *cpp {
-                lex = LexState::default();
+                // A directive line is stepped over, not lexed: it can sit
+                // between the halves of a continued literal without ending it.
                 None
             } else {
                 info(line, &mut lex)

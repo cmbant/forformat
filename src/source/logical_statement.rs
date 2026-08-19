@@ -330,6 +330,25 @@ x = 1
     }
 
     #[test]
+    fn a_separator_line_does_not_break_a_continued_literal() {
+        // A continued statement resumes on the next code line, so a comment or
+        // blank between the halves must leave the literal open.  Scanning the
+        // separator would be worse than useless: the lone apostrophe in
+        // `! don't` would close the literal and invert the state for the rest.
+        for separator in ["! explanatory comment", "", "   ", "! don't stop here"] {
+            let source = format!("if (s == 'abc &\n{separator}\n&def!ghi') then\nx = 1\nend if\n");
+            let buffer = SourceBuffer::new(source.as_bytes()).unwrap();
+            assert!(buffer.lines[2].comment_span.is_none(), "{separator:?}");
+            let groups = LogicalGroup::assemble(&buffer);
+            assert!(
+                groups[0].statements[0].text.ends_with(b") then"),
+                "{separator:?} gave {:?}",
+                String::from_utf8_lossy(&groups[0].statements[0].text)
+            );
+        }
+    }
+
+    #[test]
     fn an_unterminated_literal_does_not_leak_past_its_own_line() {
         // Without a trailing `&` the literal is simply unterminated; carrying
         // its state forward would swallow every following line's comment.
