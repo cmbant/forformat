@@ -81,9 +81,9 @@ impl Planner {
     }
 
     /// Plan one logical group, advancing the structural state.
-    pub fn plan(
+    pub fn plan<B: AsRef<[u8]>>(
         &mut self,
-        buf: &SourceBuffer,
+        buf: &SourceBuffer<B>,
         group: &LogicalGroup,
         config: &FormatConfig,
     ) -> GroupPlan {
@@ -197,9 +197,9 @@ impl Planner {
         }
     }
 
-    fn refactor_end_text(
+    fn refactor_end_text<B: AsRef<[u8]>>(
         &self,
-        buf: &SourceBuffer,
+        buf: &SourceBuffer<B>,
         group: &LogicalGroup,
         info: &StatementInfo,
         config: &FormatConfig,
@@ -227,7 +227,9 @@ impl Planner {
         }
         if let Some(comment) = &buf.lines[group.lines.start].comment_span {
             replacement.push(b' ');
-            replacement.extend_from_slice(&buf.bytes[comment.start as usize..comment.end as usize]);
+            replacement.extend_from_slice(
+                &buf.bytes.as_ref()[comment.start as usize..comment.end as usize],
+            );
         }
         Some(replacement)
     }
