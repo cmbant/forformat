@@ -58,8 +58,8 @@ pub struct LinePlacement {
 
 /// Compatibility wrapper used by small callers and tests.  The formatter's
 /// production path uses `emit_line_to`, which writes directly to its sink.
-pub fn emit_line(
-    buf: &SourceBuffer,
+pub fn emit_line<B: AsRef<[u8]>>(
+    buf: &SourceBuffer<B>,
     index: usize,
     place: LinePlacement,
     style: &EmitStyle,
@@ -75,8 +75,8 @@ pub fn emit_line(
 /// The default policy replaces leading horizontal whitespace and trims
 /// trailing horizontal whitespace.  Other bytes in the line body remain
 /// source-owned unless an explicit transformation is enabled.
-pub fn emit_line_to<W: Write>(
-    buf: &SourceBuffer,
+pub fn emit_line_to<B: AsRef<[u8]>, W: Write>(
+    buf: &SourceBuffer<B>,
     index: usize,
     place: LinePlacement,
     style: &EmitStyle,
@@ -89,8 +89,8 @@ pub fn emit_line_to<W: Write>(
 
 /// Emit one physical line while carrying the redundant-whitespace transform's
 /// quote state across a logical continuation group.
-pub fn emit_line_to_with_quote<W: Write>(
-    buf: &SourceBuffer,
+pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
+    buf: &SourceBuffer<B>,
     index: usize,
     place: LinePlacement,
     style: &EmitStyle,
@@ -302,8 +302,8 @@ fn write_near_openmp_comment<W: Write>(rest: &[u8], out: &mut W) -> Result<(), F
     Ok(())
 }
 
-fn write_newline<W: Write>(
-    buf: &SourceBuffer,
+fn write_newline<B: AsRef<[u8]>, W: Write>(
+    buf: &SourceBuffer<B>,
     index: usize,
     out: &mut W,
 ) -> Result<(), FormatError> {

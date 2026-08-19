@@ -74,71 +74,62 @@ impl<'a> PassContext<'a> {
 
 /// Steps 1-15: everything before wrapping.
 ///
-/// The re-analysis points are the load-bearing part.  A pass that removes a
-/// `RETURN` or joins a split token changes which physical line a statement
-/// starts on, and every later pass that consults scope information would
-/// otherwise read stale line numbers.
+/// Re-analysis is required before a pass that reads statement or scope data
+/// whenever an earlier pass may have changed the text it describes. Passes
+/// that only need stable configuration/project data, or deliberately ignore
+/// `PassContext`, can share the preceding snapshot without observing it. This
+/// keeps the conservative freshness rule while avoiding parses that no code
+/// in the grouped follow-up passes can consume.
 pub fn normalize(
     document: &mut Document,
     project: &ProjectContext,
     local: &FileFacts,
     config: &FormatConfig,
 ) -> Result<(), FormatError> {
-    let mut changed;
-
     // Steps 1-3: macro-name casing, from `-D` and from `#define`.
-    changed = with_context(document, project, local, config, passes::case_pass::macros)?;
+    let mut changed = with_context(document, project, local, config, passes::case_pass::macros)?;
 
-    // Step 5: the whole declared-case engine, which runs before the joins.
+    // Step 5 needs a fresh statement view after macro casing. Steps 6 and 7 do
+    // not inspect their PassContext at all, so they can follow on the same
+    // snapshot even though they mutate the document.
     changed = changed.or(with_context(
         document,
         project,
         local,
         config,
-        passes::case_pass::declared,
+        |document, cx| {
+            let mut stage = passes::case_pass::declared(document, cx)?;
+            stage = stage.or(passes::structure::join_lexical_token_continuations(
+                document, cx,
+            )?);
+            if config.style.remove_redundant_parens {
+                stage = stage.or(passes::structure::remove_redundant_nested_parentheses(
+                    document, cx,
+                )?);
+            }
+            Ok(stage)
+        },
     )?);
 
-    // Step 6: rejoin `&` splits that cut a token in half.
+    // Step 11 consumes statement/scope data, so rebuild after the lexical and
+    // parenthesis edits above. Steps 12-13 read only config/project fields from
+    // PassContext; they intentionally share this snapshot after line rules.
     changed = changed.or(with_context(
         document,
         project,
         local,
         config,
-        passes::structure::join_lexical_token_continuations,
+        |document, cx| {
+            let mut stage = passes::line_rules::run(document, cx)?;
+            if config.style.continuation_markers {
+                stage = stage.or(passes::continuations::run(document, cx)?);
+            }
+            Ok(stage)
+        },
     )?);
 
-    // Step 7: drop redundant nested parentheses where it is safe.
-    if config.style.remove_redundant_parens {
-        changed = changed.or(with_context(
-            document,
-            project,
-            local,
-            config,
-            passes::structure::remove_redundant_nested_parentheses,
-        )?);
-    }
-
-    // Step 11: the per-line rule chain, in this exact order.
-    changed = changed.or(with_context(
-        document,
-        project,
-        local,
-        config,
-        passes::line_rules::run,
-    )?);
-
-    // Steps 12-13: continuation markers and OpenMP sentinels.
-    if config.style.continuation_markers {
-        changed = changed.or(with_context(
-            document,
-            project,
-            local,
-            config,
-            passes::continuations::run,
-        )?);
-    }
-
-    // Steps 14-15: terminal `RETURN` removal, which changes the line count.
+    // Steps 14-15 consume scope and statement structure, so they get a fresh
+    // view after every preceding text transformation.
     if config.style.remove_terminal_return {
         let _ = changed.or(with_context(
             document,
@@ -179,12 +170,11 @@ pub fn post_layout(document: &mut Document, config: &FormatConfig) -> Result<boo
     Ok(widths_changed)
 }
 
-/// Rebuild the statement view, run one pass, and report what it changed.
+/// Rebuild the statement view, run one stage, and report what it changed.
 ///
-/// Rebuilding before every pass is deliberately simple rather than clever: a
-/// pass that needs no context pays a parse it does not use, but no pass can
-/// ever read a stale one. Passes that measurably matter can take a cached
-/// context later, once focused tests can prove the two agree.
+/// A stage may contain context-free follow-up passes, but every pass that reads
+/// `analysis` or `scopes` must see a snapshot built after the most recent text
+/// mutation that can affect those facts.
 fn with_context<F>(
     document: &mut Document,
     project: &ProjectContext,

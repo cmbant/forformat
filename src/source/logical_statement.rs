@@ -67,7 +67,7 @@ impl LogicalGroup {
         }
     }
 
-    pub fn assemble(buf: &SourceBuffer) -> Vec<Self> {
+    pub fn assemble<B: AsRef<[u8]>>(buf: &SourceBuffer<B>) -> Vec<Self> {
         let mut groups = Vec::new();
         Self::visit(buf, |group| {
             groups.push(group);
@@ -77,7 +77,7 @@ impl LogicalGroup {
         groups
     }
 
-    pub fn visit<E, F>(buf: &SourceBuffer, mut visit: F) -> Result<(), E>
+    pub fn visit<B: AsRef<[u8]>, E, F>(buf: &SourceBuffer<B>, mut visit: F) -> Result<(), E>
     where
         F: FnMut(Self) -> Result<(), E>,
     {

@@ -58,6 +58,24 @@ pub fn format_with_context(
     if config.mode == FormatMode::IndentOnly {
         return engine::format(source, config);
     }
+    let local = analyze_file(source)?;
+    format_with_context_and_local(source, project, &local, config)
+}
+
+/// Format one buffer using declaration facts already extracted from `source`.
+///
+/// The file workflow analyzes project members before formatting so it can both
+/// build the project tables and retain each target's local precedence facts.
+/// Reusing those facts here avoids parsing every full-mode target a second time.
+pub(crate) fn format_with_context_and_local(
+    source: &[u8],
+    project: &ProjectContext,
+    local: &crate::analysis::FileFacts,
+    config: &FormatConfig,
+) -> Result<FormatResult, FormatError> {
+    if config.mode == FormatMode::IndentOnly {
+        return engine::format(source, config);
+    }
 
     let mut document = Document::from_bytes(source);
     // `--start-indent=auto` has to be answered while the authored indentation
@@ -66,8 +84,7 @@ pub fn format_with_context(
     // will really emit.
     let resolved = resolve_start_indent(&document, config)?;
     let config = resolved.as_ref().unwrap_or(config);
-    let local = analyze_file(source)?;
-    pipeline::normalize(&mut document, project, &local, config)?;
+    pipeline::normalize(&mut document, project, local, config)?;
 
     if config.mode == FormatMode::NormalizeOnly {
         let bytes = document.to_bytes();
@@ -78,7 +95,7 @@ pub fn format_with_context(
     }
 
     if config.wrap.enabled {
-        let declined = reflow_with_context_inner(&mut document, project, &local, config)?;
+        let declined = reflow_with_context_inner(&mut document, project, local, config)?;
         // Every long line the wrapper refuses is explainable; the diagnostic
         // separates "unwrappable by design" from a wrapper bug.
         let (output, meta) = lay_out(&document, config)?;

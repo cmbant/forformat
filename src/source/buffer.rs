@@ -8,18 +8,27 @@ use std::ops::Range;
 pub use super::regions::comment_start;
 
 #[derive(Debug, Clone)]
-pub struct SourceBuffer {
-    pub bytes: Vec<u8>,
+pub struct SourceBuffer<B = Vec<u8>> {
+    pub bytes: B,
     pub lines: Vec<PhysicalLine>,
 }
 
-impl SourceBuffer {
-    pub fn new(bytes: &[u8]) -> Result<Self, FormatError> {
-        Self::from_vec(bytes.to_vec())
+impl SourceBuffer<Vec<u8>> {
+    /// Build a zero-copy source view over borrowed input.
+    pub fn new<'a>(bytes: &'a [u8]) -> Result<SourceBuffer<&'a [u8]>, FormatError> {
+        SourceBuffer::<&'a [u8]>::from_storage(bytes)
     }
 
+    /// Build an owning source buffer, reusing the caller's allocation.
     pub fn from_vec(bytes: Vec<u8>) -> Result<Self, FormatError> {
-        if bytes.len() > u32::MAX as usize {
+        Self::from_storage(bytes)
+    }
+}
+
+impl<B: AsRef<[u8]>> SourceBuffer<B> {
+    fn from_storage(bytes: B) -> Result<Self, FormatError> {
+        let source = bytes.as_ref();
+        if source.len() > u32::MAX as usize {
             return Err(FormatError::InputTooLarge);
         }
         let mut lines = Vec::new();
@@ -29,12 +38,12 @@ impl SourceBuffer {
         // still protected there, so the `!` in `&def!ghi')` is literal text
         // rather than the start of a comment.
         let mut state = LexState::default();
-        for (i, b) in bytes.iter().enumerate() {
+        for (i, b) in source.iter().enumerate() {
             if *b == b'\n' {
-                let is_crlf = i > start && bytes[i - 1] == b'\r';
+                let is_crlf = i > start && source[i - 1] == b'\r';
                 let end = if is_crlf { i - 1 } else { i };
                 lines.push(Self::line(
-                    &bytes[start..end],
+                    &source[start..end],
                     start..end,
                     if is_crlf { Newline::CrLf } else { Newline::Lf },
                     &mut state,
@@ -42,10 +51,10 @@ impl SourceBuffer {
                 start = i + 1;
             }
         }
-        if start < bytes.len() || bytes.is_empty() {
+        if start < source.len() || source.is_empty() {
             lines.push(Self::line(
-                &bytes[start..],
-                start..bytes.len(),
+                &source[start..],
+                start..source.len(),
                 Newline::None,
                 &mut state,
             ));
@@ -108,10 +117,13 @@ impl SourceBuffer {
     }
 
     pub fn line_bytes(&self, line: &PhysicalLine) -> &[u8] {
-        &self.bytes[line.span.start as usize..line.span.end as usize]
+        let bytes = self.bytes.as_ref();
+        &bytes[line.span.start as usize..line.span.end as usize]
     }
+
     pub fn code_bytes(&self, line: &PhysicalLine) -> &[u8] {
-        &self.bytes[line.code_span.start as usize..line.code_span.end as usize]
+        let bytes = self.bytes.as_ref();
+        &bytes[line.code_span.start as usize..line.code_span.end as usize]
     }
 
     pub fn newline(&self, index: usize) -> Newline {
@@ -145,6 +157,14 @@ pub fn is_fix(s: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{comment_start, Newline, SourceBuffer};
+
+    #[test]
+    fn borrowed_source_buffer_reuses_input_bytes() {
+        let source = b"program p\nend program p\n".to_vec();
+        let buffer = SourceBuffer::new(&source).unwrap();
+        assert_eq!(buffer.bytes.as_ptr(), source.as_ptr());
+        assert_eq!(buffer.bytes.len(), source.len());
+    }
 
     #[test]
     fn comment_scanning_ignores_quotes_and_hollerith_constants() {

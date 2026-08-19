@@ -2652,3 +2652,40 @@ contains
     );
     assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
 }
+
+#[test]
+fn shared_snapshot_declared_case_then_lexical_join_is_stable() {
+    let config = FormatConfig {
+        mode: FormatMode::NormalizeOnly,
+        ..FormatConfig::default()
+    };
+    let source = b"program p\ninteger :: FooBar\nfoo&\n&bar=1\nend program p\n";
+    let once = format_source(source, &config).unwrap().bytes;
+    let text = String::from_utf8(once.clone()).unwrap();
+    assert!(
+        text.contains("FooBar = 1\n"),
+        "declared spelling did not survive the lexical join:\n{text}"
+    );
+    assert!(
+        !text.contains("foo&"),
+        "split token was not joined:\n{text}"
+    );
+    assert_eq!(once, format_source(&once, &config).unwrap().bytes);
+}
+
+#[test]
+fn shared_snapshot_line_rules_then_continuation_openmp_normalization_is_stable() {
+    let config = FormatConfig {
+        mode: FormatMode::NormalizeOnly,
+        ..FormatConfig::default()
+    };
+    let source = b"program p\ninteger :: i, x\nx=1\n!$omp parallel do &\n!$omp& private(i)\ndo i=1,2\nx=x+i\nend do\n!$omp end parallel do\nend program p\n";
+    let once = format_source(source, &config).unwrap().bytes;
+    let text = String::from_utf8(once.clone()).unwrap();
+    assert!(text.contains("x = 1\n"), "line rules did not run:\n{text}");
+    assert!(
+        text.contains("!$OMP PARALLEL DO &\n!$OMP PRIVATE(i)\n"),
+        "OpenMP continuation normalization did not follow line rules:\n{text}"
+    );
+    assert_eq!(once, format_source(&once, &config).unwrap().bytes);
+}

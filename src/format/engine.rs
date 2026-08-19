@@ -64,12 +64,12 @@ pub fn format_to_owned<W: Write>(
     format_buffer(&buf, config, out)
 }
 
-pub fn format_buffer<W: Write>(
-    buf: &SourceBuffer,
+pub fn format_buffer<B: AsRef<[u8]>, W: Write>(
+    buf: &SourceBuffer<B>,
     config: &FormatConfig,
     out: &mut W,
 ) -> Result<FormatMeta, FormatError> {
-    if buf.bytes.is_empty() {
+    if buf.bytes.as_ref().is_empty() {
         if config.last_usable {
             writeln!(out, "1").map_err(FormatError::Write)?;
         } else if config.last_indent {
@@ -128,8 +128,8 @@ pub fn format_buffer<W: Write>(
 }
 
 /// Write the physical lines of one planned group.
-pub fn emit_group<W: Write>(
-    buf: &SourceBuffer,
+pub fn emit_group<B: AsRef<[u8]>, W: Write>(
+    buf: &SourceBuffer<B>,
     plan: &GroupPlan,
     config: &FormatConfig,
     out: &mut W,
@@ -248,8 +248,8 @@ pub fn emit_group<W: Write>(
 /// column the emitter actually used, which is not always the configured
 /// indentation: labels and OpenMP sentinels shift the body.
 #[allow(clippy::too_many_arguments)]
-fn advance_alignment(
-    buf: &SourceBuffer,
+fn advance_alignment<B: AsRef<[u8]>>(
+    buf: &SourceBuffer<B>,
     index: usize,
     paren_state: &mut ParenAlignmentState,
     first_indent: usize,

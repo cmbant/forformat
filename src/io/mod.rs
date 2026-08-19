@@ -5,11 +5,11 @@
 //! performs the requested output operation.
 
 use crate::{
-    analysis::{analyze_project, ProjectContext},
+    analysis::{analyze_file, FileFacts, ProjectContext},
     cli::{ContextPath, Invocation},
     config::FormatMode,
     error::FormatError,
-    format_source, format_source_with_context,
+    format_source,
     source::SourceForm,
     FormatResult,
 };
@@ -379,31 +379,43 @@ fn context_sources(
     }
 }
 
+fn analyze_sources(
+    sources: &[Source],
+    indices: &[usize],
+) -> Result<Vec<Option<FileFacts>>, WorkflowError> {
+    let mut facts = (0..sources.len()).map(|_| None).collect::<Vec<_>>();
+    for &index in indices {
+        facts[index] = Some(analyze_file(&sources[index].bytes)?);
+    }
+    Ok(facts)
+}
+
 fn project_context(
     sources: &[Source],
     indices: &[usize],
-    stdin_source: Option<(&Path, &[u8])>,
+    facts: &[Option<FileFacts>],
+    stdin_source: Option<(&Path, &FileFacts)>,
     config: &crate::config::FormatConfig,
-) -> Result<ProjectContext, WorkflowError> {
-    // The caller has already read every source. This is the one project
-    // analysis pass for the invocation; formatting receives the resulting
-    // context rather than rebuilding it per target.
-    let mut context = analyze_project(
-        indices
-            .iter()
-            .map(|&index| &sources[index])
-            .map(|source| (source.path.as_path(), source.bytes.as_slice())),
-    )?;
+) -> ProjectContext {
+    // Source facts are extracted once for the invocation, then reused both to
+    // build project tables and as target-local precedence data during format.
+    let mut context = ProjectContext::empty();
+    for &index in indices {
+        context.absorb(
+            &sources[index].path,
+            facts[index]
+                .as_ref()
+                .expect("every project source must have precomputed facts"),
+        );
+    }
     // A file-valued --project-context makes stdin the current version of that
-    // tracked source. Fold those bytes into every project table after omitting
-    // the disk copy above; the formatter will also analyze them as target-local
-    // facts, which retain their normal highest-priority resolution.
-    if let Some((path, source)) = stdin_source {
-        context.add_source(path, source)?;
+    // tracked source. Its already-extracted facts replace the stale disk copy.
+    if let Some((path, local)) = stdin_source {
+        context.absorb(path, local);
     }
     context.define(&config.defines);
     context.enable_target_local_component_resolution();
-    Ok(context)
+    context
 }
 
 fn isolated_context(config: &crate::config::FormatConfig) -> ProjectContext {
@@ -414,13 +426,19 @@ fn isolated_context(config: &crate::config::FormatConfig) -> ProjectContext {
 
 fn format_one(
     source: &Source,
+    local: Option<&FileFacts>,
     context: &ProjectContext,
     config: &crate::config::FormatConfig,
 ) -> Result<FormatResult, WorkflowError> {
     let result = if config.mode == FormatMode::IndentOnly {
         format_source(&source.bytes, config)?
     } else {
-        format_source_with_context(&source.bytes, context, config)?
+        crate::format::full::format_with_context_and_local(
+            &source.bytes,
+            context,
+            local.expect("every full-mode target must have precomputed facts"),
+            config,
+        )?
     };
     Ok(result)
 }
@@ -446,6 +464,7 @@ type FormattedTarget = (crate::FormatMeta, Option<Vec<u8>>);
 fn format_targets(
     sources: &[Source],
     target_indices: &[usize],
+    facts: &[Option<FileFacts>],
     context: &ProjectContext,
     config: &crate::config::FormatConfig,
 ) -> Result<Vec<FormattedTarget>, WorkflowError> {
@@ -467,10 +486,11 @@ fn format_targets(
                     return;
                 };
                 let target = &sources[source_index];
-                let outcome = format_one(target, context, config).map(|result| {
-                    let changed = result.bytes != target.bytes;
-                    (result.meta, changed.then_some(result.bytes))
-                });
+                let outcome = format_one(target, facts[source_index].as_ref(), context, config)
+                    .map(|result| {
+                        let changed = result.bytes != target.bytes;
+                        (result.meta, changed.then_some(result.bytes))
+                    });
                 if sender.send((index, outcome)).is_err() {
                     return;
                 }
@@ -1151,7 +1171,30 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         .iter()
         .map(|path| loaded_index[path])
         .collect();
-    let context = if invocation.isolated {
+
+    let mut analysis_needed = vec![false; loaded.len()];
+    if invocation.config.mode != FormatMode::IndentOnly {
+        for &index in target_indices.iter().chain(project_indices.iter()) {
+            analysis_needed[index] = true;
+        }
+    }
+    let analysis_indices = analysis_needed
+        .iter()
+        .enumerate()
+        .filter_map(|(index, needed)| (*needed).then_some(index))
+        .collect::<Vec<_>>();
+    let facts = analyze_sources(&loaded, &analysis_indices)?;
+    let stdin_local = if stdin_mode && invocation.config.mode != FormatMode::IndentOnly {
+        Some(analyze_file(
+            stdin_source
+                .as_deref()
+                .expect("stdin mode must have read stdin"),
+        )?)
+    } else {
+        None
+    };
+
+    let context = if invocation.isolated || invocation.config.mode == FormatMode::IndentOnly {
         isolated_context(&invocation.config)
     } else {
         let stdin_project_source = project_scope
@@ -1163,19 +1206,17 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
                         .iter()
                         .any(|context_path| path.starts_with(context_path))
             })
-            .zip(stdin_source.as_deref());
+            .zip(stdin_local.as_ref());
         project_context(
             &loaded,
             &project_indices,
+            &facts,
             stdin_project_source,
             &invocation.config,
-        )?
+        )
     };
     if profile {
-        eprintln!(
-            "forformat profile: project-analysis={:?}",
-            profile_start.elapsed(),
-        );
+        eprintln!("forformat profile: analysis={:?}", profile_start.elapsed(),);
     }
 
     if stdin_mode {
@@ -1185,7 +1226,14 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         let formatted = if invocation.config.mode == FormatMode::IndentOnly {
             format_source(source, &invocation.config)?
         } else {
-            format_source_with_context(source, &context, &invocation.config)?
+            crate::format::full::format_with_context_and_local(
+                source,
+                &context,
+                stdin_local
+                    .as_ref()
+                    .expect("full-mode stdin must have precomputed facts"),
+                &invocation.config,
+            )?
         };
         let mut declines = DeclineReporter::default();
         declines.report(&formatted.meta, None, root.as_deref());
@@ -1201,7 +1249,12 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
             declines.report_fixed(&target_paths[0], root.as_deref());
             write_all_stdout(&loaded[source_index].bytes)?;
         } else {
-            let formatted = format_one(&loaded[source_index], &context, &invocation.config)?;
+            let formatted = format_one(
+                &loaded[source_index],
+                facts[source_index].as_ref(),
+                &context,
+                &invocation.config,
+            )?;
             declines.report(&formatted.meta, Some(&target_paths[0]), root.as_deref());
             write_all_stdout(&formatted.bytes)?;
         }
@@ -1210,7 +1263,13 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     }
 
     let formatting_start = Instant::now();
-    let formatted = format_targets(&loaded, &target_indices, &context, &invocation.config)?;
+    let formatted = format_targets(
+        &loaded,
+        &target_indices,
+        &facts,
+        &context,
+        &invocation.config,
+    )?;
     let mut changed = Vec::new();
     let mut declines = DeclineReporter::default();
     let mut formatted = formatted.into_iter();
@@ -1345,13 +1404,14 @@ mod tests {
     #[test]
     fn stdin_replacement_is_present_in_the_project_tables() {
         let replacement = b"module CurrentName\nend module CurrentName\n";
+        let replacement_facts = crate::analysis::analyze_file(replacement).unwrap();
         let context = project_context(
             &[],
             &[],
-            Some((Path::new("target.f90"), replacement)),
+            &[],
+            Some((Path::new("target.f90"), &replacement_facts)),
             &FormatConfig::default(),
-        )
-        .unwrap();
+        );
         let local = crate::analysis::analyze_file(b"program p\nend program p\n").unwrap();
         assert_eq!(
             context
