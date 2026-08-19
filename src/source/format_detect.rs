@@ -113,18 +113,38 @@ pub fn detect(source: &[u8]) -> SourceForm {
 fn has_strong_fixed_form_evidence(source: &[u8]) -> bool {
     let mut previous_code = None;
     let mut previous_free_continuation = false;
+    let mut continued_directive = None;
+    let mut cpp_conditional_depth = 0usize;
 
     for raw_line in source.split_inclusive(|byte| *byte == b'\n').take(4000) {
         let mut line = raw_line.strip_suffix(b"\n").unwrap_or(raw_line);
         line = line.strip_suffix(b"\r").unwrap_or(line);
-        line = rtrim(line);
-        if line.is_empty() {
+
+        if let Some(kind) = continued_directive {
+            continued_directive = preprocessor_line_continues(kind, line).then_some(kind);
             continue;
         }
 
-        // Directives and comment-only lines may appear between parts of a
-        // free-form continuation, so do not let them clear continuation state.
-        if preprocessor_kind(line) != PreprocessorKind::Other || line.first() == Some(&b'!') {
+        let preprocessor = preprocessor_kind(line);
+        if preprocessor != PreprocessorKind::Other {
+            if preprocessor == PreprocessorKind::Cpp {
+                update_cpp_conditional_depth(line, &mut cpp_conditional_depth);
+            }
+            continued_directive =
+                preprocessor_line_continues(preprocessor, line).then_some(preprocessor);
+            continue;
+        }
+
+        // We cannot know which CPP branch is active without evaluating macros.
+        // Evidence inside any conditional region therefore cannot safely veto
+        // a free-form candidate. Directives and skipped regions also leave the
+        // surrounding free-form continuation state untouched.
+        if cpp_conditional_depth > 0 {
+            continue;
+        }
+
+        line = rtrim(line);
+        if line.is_empty() || line.first() == Some(&b'!') {
             continue;
         }
 
@@ -138,6 +158,32 @@ fn has_strong_fixed_form_evidence(source: &[u8]) -> bool {
         previous_code = Some(line);
     }
     false
+}
+
+fn preprocessor_line_continues(kind: PreprocessorKind, line: &[u8]) -> bool {
+    match kind {
+        PreprocessorKind::Cpp => line.last() == Some(&b'\\'),
+        PreprocessorKind::Coco | PreprocessorKind::Fypp => line.last() == Some(&b'&'),
+        PreprocessorKind::Other => false,
+    }
+}
+
+fn update_cpp_conditional_depth(line: &[u8], depth: &mut usize) {
+    let line = trim_left(line);
+    let Some(rest) = line.strip_prefix(b"#") else {
+        return;
+    };
+    let rest = trim_left(rest);
+    let keyword_len = rest
+        .iter()
+        .position(|byte| !byte.is_ascii_alphabetic())
+        .unwrap_or(rest.len());
+    let keyword = &rest[..keyword_len];
+    if matches!(keyword, b"if" | b"ifdef" | b"ifndef") {
+        *depth = depth.saturating_add(1);
+    } else if keyword == b"endif" {
+        *depth = depth.saturating_sub(1);
+    }
 }
 
 fn fixed_comment_signature(line: &[u8]) -> bool {
@@ -511,6 +557,30 @@ mod tests {
         );
         assert_eq!(
             detect_path(Path::new("modern.F90"), b"     1 continue\nend\n"),
+            SourceForm::Free
+        );
+    }
+
+    #[test]
+    fn confirmation_ignores_cpp_conditional_regions() {
+        let source = b"#if 0\nC legacy fixed-form text in disabled branch\n#endif\nprogram p\nend program p\n";
+        assert_eq!(
+            detect_path(Path::new("conditional.F90"), source),
+            SourceForm::Free
+        );
+
+        let nested = b"#ifdef OUTER\n#if 1\n     & fixed-looking inactive text\n#endif\n#endif\nmodule m\nend module m\n";
+        assert_eq!(
+            detect_path(Path::new("nested.F90"), nested),
+            SourceForm::Free
+        );
+    }
+
+    #[test]
+    fn confirmation_skips_continued_preprocessor_directives() {
+        let source = b"#define CONT \\\n     &\nprogram p\ninteger :: x\nx = 1 CONT\n+ 2\nend program p\n";
+        assert_eq!(
+            detect_path(Path::new("macro.F90"), source),
             SourceForm::Free
         );
     }
