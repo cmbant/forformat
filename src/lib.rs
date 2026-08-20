@@ -91,6 +91,10 @@ pub fn format_source_with_context(
 }
 
 /// Format into a caller-provided writer.
+///
+/// Full and normalize-only modes serialize their final `Document` through a
+/// staging buffer capped at 64 KiB: small outputs are coalesced, while large
+/// outputs avoid a second output-sized allocation.
 pub fn format_to<W: std::io::Write>(
     source: &[u8],
     config: &FormatConfig,
@@ -99,22 +103,17 @@ pub fn format_to<W: std::io::Write>(
     if config.mode == config::FormatMode::IndentOnly {
         return format::engine::format_to(source, config, out);
     }
-    write_result(format_source(source, config)?, out)
-}
-
-fn write_result<W: std::io::Write>(
-    result: FormatResult,
-    out: &mut W,
-) -> Result<FormatMeta, FormatError> {
-    out.write_all(&result.bytes).map_err(FormatError::Write)?;
-    Ok(result.meta)
+    let mut context = analysis::ProjectContext::empty();
+    context.define(&config.defines);
+    format::full::format_to_with_context(source, &context, config, out)
 }
 
 /// Format an owned source buffer into a caller-provided writer.
 ///
-/// This entry point is intended for stdin-style callers that already own the
-/// complete input. It reuses that allocation while retaining `format_to` for
-/// borrowed library callers.
+/// Indent-only mode reuses the caller's input allocation directly. Full and
+/// normalize-only modes still split the input into the formatter's mutable
+/// line-oriented `Document`, so they do not currently reuse that allocation;
+/// final serialization uses the same bounded staging buffer as [`format_to`].
 pub fn format_to_owned<W: std::io::Write>(
     source: Vec<u8>,
     config: &FormatConfig,
@@ -123,7 +122,9 @@ pub fn format_to_owned<W: std::io::Write>(
     if config.mode == config::FormatMode::IndentOnly {
         return format::engine::format_to_owned(source, config, out);
     }
-    write_result(format_source(&source, config)?, out)
+    let mut context = analysis::ProjectContext::empty();
+    context.define(&config.defines);
+    format::full::format_to_with_context(&source, &context, config, out)
 }
 
 #[cfg(test)]

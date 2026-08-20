@@ -9,11 +9,15 @@
 //! `indent_only(full(x)) == full(x)` (I2) holds by construction rather than by
 //! testing.
 
+use std::io::{BufWriter, Write};
+
 use crate::{
     classify::{classify, StatementInfo},
     error::FormatError,
     source::{LogicalGroup, Newline, SourceBuffer},
 };
+
+const WRITE_BUFFER_LIMIT: usize = 64 * 1024;
 
 /// A document as a list of lines without terminators, plus the terminator
 /// policy to restore on output.
@@ -66,13 +70,45 @@ impl Document {
         }
     }
 
-    /// Render the document with its terminator policy applied.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let terminator: &[u8] = match self.newline {
+    fn terminator(&self) -> &'static [u8] {
+        match self.newline {
             Newline::CrLf => b"\r\n",
             _ => b"\n",
-        };
-        let mut out = Vec::with_capacity(self.lines.iter().map(|l| l.len() + 2).sum());
+        }
+    }
+
+    fn serialized_len(&self, terminator_len: usize) -> usize {
+        let terminators = self.lines.len().saturating_sub(1) + usize::from(self.trailing_newline);
+        self.lines.iter().map(Vec::len).sum::<usize>() + terminators * terminator_len
+    }
+
+    /// Write the document with its terminator policy applied.
+    ///
+    /// Small outputs fit in one staging buffer. Larger ones use the same
+    /// buffer with a fixed cap so an unbuffered writer does not receive a
+    /// separate write for every line and terminator.
+    pub fn write_to<W: Write>(&self, out: &mut W) -> Result<(), FormatError> {
+        let terminator = self.terminator();
+        let capacity = self
+            .serialized_len(terminator.len())
+            .min(WRITE_BUFFER_LIMIT);
+        let mut buffered = BufWriter::with_capacity(capacity, out);
+        for (i, line) in self.lines.iter().enumerate() {
+            buffered.write_all(line).map_err(FormatError::Write)?;
+            if i + 1 < self.lines.len() || self.trailing_newline {
+                buffered.write_all(terminator).map_err(FormatError::Write)?;
+            }
+        }
+        buffered
+            .into_inner()
+            .map_err(|error| FormatError::Write(error.into_error()))?;
+        Ok(())
+    }
+
+    /// Render the document with its terminator policy applied.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let terminator = self.terminator();
+        let mut out = Vec::with_capacity(self.serialized_len(terminator.len()));
         for (i, line) in self.lines.iter().enumerate() {
             out.extend_from_slice(line);
             if i + 1 < self.lines.len() || self.trailing_newline {
@@ -167,8 +203,29 @@ impl Analysis {
 
 #[cfg(test)]
 mod tests {
-    use super::Document;
+    use super::{Document, WRITE_BUFFER_LIMIT};
     use crate::source::Newline;
+    use std::io::{self, Write};
+
+    #[derive(Default)]
+    struct CountingWriter {
+        bytes: Vec<u8>,
+        writes: usize,
+        flushes: usize,
+    }
+
+    impl Write for CountingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
 
     #[test]
     fn round_tripping_preserves_bytes_for_uniform_terminators() {
@@ -182,7 +239,38 @@ mod tests {
         ] {
             let document = Document::from_bytes(source);
             assert_eq!(document.to_bytes(), source, "round trip of {source:?}");
+            let mut written = Vec::new();
+            document.write_to(&mut written).unwrap();
+            assert_eq!(written, source, "streamed round trip of {source:?}");
         }
+    }
+
+    #[test]
+    fn small_streamed_documents_use_one_underlying_write() {
+        let source = b"x = 1\n".repeat(128);
+        let document = Document::from_bytes(&source);
+        let mut writer = CountingWriter::default();
+        document.write_to(&mut writer).unwrap();
+        assert_eq!(writer.bytes, source);
+        assert_eq!(writer.writes, 1);
+        assert_eq!(writer.flushes, 0);
+    }
+
+    #[test]
+    fn large_streamed_documents_batch_underlying_writes() {
+        let mut source = Vec::new();
+        for _ in 0..4096 {
+            source.extend_from_slice(&[b'x'; 63]);
+            source.push(b'\n');
+        }
+        assert!(source.len() > WRITE_BUFFER_LIMIT);
+
+        let document = Document::from_bytes(&source);
+        let mut writer = CountingWriter::default();
+        document.write_to(&mut writer).unwrap();
+        assert_eq!(writer.bytes, source);
+        assert!(writer.writes <= 8);
+        assert_eq!(writer.flushes, 0);
     }
 
     #[test]
