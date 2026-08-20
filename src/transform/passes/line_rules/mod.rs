@@ -50,6 +50,7 @@ struct LineContext<'a> {
     continued_named_parameter: bool,
     continued_bind_parameter: bool,
     open_groups: &'a [bool],
+    multiple_subscript_depths: &'a [usize],
     continued_format: bool,
     continued_initializer: bool,
     /// The statement so far carried a top-level `::`, so this line continues
@@ -80,6 +81,7 @@ struct LineState {
     continued_bind_parameter: bool,
     continued_component: bool,
     open_groups: Vec<bool>,
+    multiple_subscript_depths: Vec<usize>,
     entity_list: EntityListCursor,
 }
 
@@ -87,6 +89,7 @@ impl LineState {
     fn context<'a>(
         &self,
         open_groups: &'a [bool],
+        multiple_subscript_depths: &'a [usize],
         document: &Document,
         index: usize,
         cx: &PassContext,
@@ -113,6 +116,7 @@ impl LineState {
             continued_named_parameter: self.continued_named_parameter,
             continued_bind_parameter: self.continued_bind_parameter,
             open_groups,
+            multiple_subscript_depths,
             continued_format,
             continued_initializer: self.entity_list.initializer,
             continued_separator: self.continued_statement && self.entity_list.separator,
@@ -130,6 +134,7 @@ impl LineState {
         self.continued_bind_parameter = false;
         self.continued_component = false;
         self.open_groups.clear();
+        self.multiple_subscript_depths.clear();
         self.entity_list = EntityListCursor::default();
     }
 
@@ -140,10 +145,16 @@ impl LineState {
         self.continued_bind_parameter = self.continued_statement && is_bind_group(cx, line_index);
         self.continued_component =
             self.continued_statement && common::trailing_component_selector(code);
+        common::delimiter_spacing::advance_multiple_subscript_depths(
+            code,
+            self.open_groups.len(),
+            &mut self.multiple_subscript_depths,
+        );
         self.entity_list.advance(code, self.open_groups.len());
         fold_open_groups(code, &mut self.open_groups);
         if !self.continued_statement {
             self.open_groups.clear();
+            self.multiple_subscript_depths.clear();
             self.entity_list = EntityListCursor::default();
         }
     }
@@ -212,7 +223,14 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             continue;
         }
 
-        let context = state.context(&state.open_groups, document, index, cx);
+        let multiple_subscript_depths = state.multiple_subscript_depths.clone();
+        let context = state.context(
+            &state.open_groups,
+            &multiple_subscript_depths,
+            document,
+            index,
+            cx,
+        );
         // A comment or blank line is stepped over too. It is still normalized
         // on its own terms, but through a scratch state: reading the group's
         // state would make the `!` of a comment inside an open literal look
@@ -352,11 +370,13 @@ fn apply_rules(
             common::write_spacing::normalize_write_output_spacing_with_state(&text, cx, incoming);
     }
     // 4. Delimiter spacing.
-    text = common::delimiter_spacing::normalize_delimiter_spacing_with_state(
+    text = common::delimiter_spacing::normalize_delimiter_spacing_with_context(
         &text,
         cx,
         incoming,
         context.continued_statement,
+        context.open_groups.len(),
+        context.multiple_subscript_depths,
     );
     // 5. Comment spacing (physical lines only).
     if physical {
