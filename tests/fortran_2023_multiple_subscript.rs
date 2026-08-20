@@ -99,14 +99,24 @@ fn wrapping_keeps_multiple_subscript_double_colons_compact() {
         apply_indent: false,
         ..FormatConfig::default()
     };
-    config.wrap.line_length = 46;
+    // Both commas are reachable within the first-line budget, while the full
+    // statements still require reflow. This makes the regression exercise the
+    // wrapper's preference rather than an unbreakable-budget decline.
+    config.wrap.line_length = 55;
 
-    for source in [
-        b"x = some_really_long_array_name(@::stride, another_argument)\n".as_slice(),
-        b"x = some_really_long_array_name(@lo::stride, another_argument)\n".as_slice(),
+    for (source, designator) in [
+        (
+            b"x = some_really_long_array_name(@::stride, another_long_argument)\n".as_slice(),
+            "@::stride",
+        ),
+        (
+            b"x = some_really_long_array_name(@lo::stride, another_long_argument)\n".as_slice(),
+            "@lo::stride",
+        ),
     ] {
         let output = String::from_utf8(format_source(source, &config).unwrap().bytes).unwrap();
         assert!(output.contains("&\n"), "expected wrapping: {output:?}");
+        assert!(output.contains(designator), "designator was respaced: {output:?}");
         assert!(
             !output.lines().any(|line| line.trim_end().ends_with(":: &")),
             "multiple-subscript :: became a wrap seam: {output:?}"
