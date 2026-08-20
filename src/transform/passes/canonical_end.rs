@@ -39,8 +39,8 @@ pub fn run(document: &mut Document, config: &FormatConfig) -> Result<Changed, Fo
         let code_start = physical.code_span.start as usize - line_start;
         let code_end = physical.code_span.end as usize - line_start;
 
-        let replacement_end = crate::source::buffer::comment_start(&replacement)
-            .unwrap_or(replacement.len());
+        let replacement_end =
+            crate::source::buffer::comment_start(&replacement).unwrap_or(replacement.len());
         let replacement_code = replacement[..replacement_end].trim_ascii_end().to_vec();
         replacements.push((line_index, code_start, code_end, replacement_code));
     }
@@ -49,14 +49,16 @@ pub fn run(document: &mut Document, config: &FormatConfig) -> Result<Changed, Fo
     for (line_index, code_start, code_end, replacement) in replacements {
         let line = &document.lines[line_index];
         let mut authored_code_end = code_end;
-        while authored_code_end > code_start
-            && matches!(line[authored_code_end - 1], b' ' | b'\t')
+        while authored_code_end > code_start && matches!(line[authored_code_end - 1], b' ' | b'\t')
         {
             authored_code_end -= 1;
         }
 
         let mut updated = Vec::with_capacity(
-            line.len() + replacement.len().saturating_sub(authored_code_end - code_start),
+            line.len()
+                + replacement
+                    .len()
+                    .saturating_sub(authored_code_end - code_start),
         );
         updated.extend_from_slice(&line[..code_start]);
         updated.extend_from_slice(&replacement);

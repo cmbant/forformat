@@ -46,9 +46,7 @@ pub fn prepare(document: &mut Document, config: &FormatConfig) -> Result<Changed
             && group.statements.len() == 1
             && group.lines.clone().all(|index| {
                 analysis.buffer.lines.get(index).is_some_and(|line| {
-                    line.kind == PhysicalLineKind::Code
-                        && !line.omp
-                        && line.comment_span.is_none()
+                    line.kind == PhysicalLineKind::Code && !line.omp && line.comment_span.is_none()
                 })
             });
         if !safe_shape {
@@ -97,11 +95,7 @@ pub fn prepare(document: &mut Document, config: &FormatConfig) -> Result<Changed
     Ok(changed)
 }
 
-fn copy_group(
-    document: &Document,
-    range: std::ops::Range<usize>,
-    output: &mut Vec<Vec<u8>>,
-) {
+fn copy_group(document: &Document, range: std::ops::Range<usize>, output: &mut Vec<Vec<u8>>) {
     for index in range {
         if let Some(line) = document.lines.get(index) {
             output.push(line.clone());
@@ -118,7 +112,10 @@ mod tests {
     fn fitting_authored_continuation_is_joined_for_fresh_layout() {
         let mut document = Document::from_bytes(b"call work(alpha, &\n    beta)\n");
         let config = FormatConfig::default();
-        assert_eq!(prepare(&mut document, &config).unwrap(), crate::transform::pipeline::Changed::Structure);
+        assert_eq!(
+            prepare(&mut document, &config).unwrap(),
+            crate::transform::pipeline::Changed::Structure
+        );
         assert_eq!(document.lines, [b"call work(alpha, beta)".to_vec()]);
     }
 
@@ -127,7 +124,10 @@ mod tests {
         let mut document = Document::from_bytes(b"call work(alpha, & ! note\n    beta)\n");
         let original = document.clone();
         let config = FormatConfig::default();
-        assert_eq!(prepare(&mut document, &config).unwrap(), crate::transform::pipeline::Changed::No);
+        assert_eq!(
+            prepare(&mut document, &config).unwrap(),
+            crate::transform::pipeline::Changed::No
+        );
         assert_eq!(document, original);
     }
 }
