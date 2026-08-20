@@ -96,6 +96,28 @@ fn post_layout_alignment_keeps_continued_double_colons_compact() {
 }
 
 #[test]
+fn multiple_subscript_state_survives_continued_character_literals() {
+    let config = FormatConfig {
+        apply_indent: false,
+        ..FormatConfig::default()
+    };
+    let source = b"x = c(@f('abc &\n! skipped while the literal is open\n& def') + &\n& lo :: stride, other)\n";
+    let once = format_source(source, &config).unwrap().bytes;
+    let output = String::from_utf8(once.clone()).unwrap();
+
+    assert!(output.contains("'abc &\n! skipped while the literal is open\n& def'"));
+    assert!(
+        output.contains("lo::stride"),
+        "continued literal lost active multiple-subscript state: {output:?}"
+    );
+    assert!(
+        !output.contains("lo :: stride") && !output.contains("lo:: stride"),
+        "multiple-subscript :: was treated as a declaration separator: {output:?}"
+    );
+    assert_eq!(format_source(&once, &config).unwrap().bytes, once);
+}
+
+#[test]
 fn wrapping_cannot_split_after_at_when_delimiter_spacing_is_disabled() {
     let mut config = FormatConfig {
         apply_indent: false,
