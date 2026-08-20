@@ -13,9 +13,7 @@ use super::{Token, TokenKind};
 /// the body.  Joined spellings such as `!$OMP` and `!$acc`, and bare `!$`, are
 /// not conditional-compilation code.
 pub(crate) fn conditional_compilation_body_start(line: &[u8]) -> Option<usize> {
-    let start = line
-        .iter()
-        .position(|byte| !matches!(byte, b' ' | b'\t'))?;
+    let start = line.iter().position(|byte| !matches!(byte, b' ' | b'\t'))?;
     if !line
         .get(start..)
         .is_some_and(|rest| rest.starts_with(b"!$"))
@@ -137,7 +135,11 @@ mod tests {
             (b"!$acc parallel", None),
             (b"! ordinary", None),
         ] {
-            assert_eq!(conditional_compilation_body_start(line), expected, "{line:?}");
+            assert_eq!(
+                conditional_compilation_body_start(line),
+                expected,
+                "{line:?}"
+            );
         }
     }
 
