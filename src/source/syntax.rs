@@ -9,8 +9,8 @@ use super::{Token, TokenKind};
 /// accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConditionalPrefixKind {
-    /// An initial (or non-compact continued) line: `!$ ` / `!$\t`.
-    InitialBlank,
+    /// A sentinel separated from its body by a horizontal blank: `!$ ` / `!$\t`.
+    BlankSeparated,
     /// A continued line whose continuation marker immediately follows the
     /// sentinel: `!$&...`.
     CompactContinuation,
@@ -45,7 +45,7 @@ pub(crate) fn conditional_compilation_prefix(line: &[u8]) -> Option<ConditionalP
     match line.get(start + 2) {
         Some(b' ' | b'\t') => Some(ConditionalPrefix {
             body_start: start + 3,
-            kind: ConditionalPrefixKind::InitialBlank,
+            kind: ConditionalPrefixKind::BlankSeparated,
         }),
         Some(b'&') => Some(ConditionalPrefix {
             body_start: start + 2,
@@ -58,7 +58,7 @@ pub(crate) fn conditional_compilation_prefix(line: &[u8]) -> Option<ConditionalP
 /// Start of the Fortran body of a free-form conditional-compilation line.
 ///
 /// Use [`conditional_compilation_prefix`] when the caller needs to distinguish
-/// an ordinary sentinel blank from the compact `!$&` continuation spelling.
+/// a blank-separated sentinel from the compact `!$&` continuation spelling.
 pub(crate) fn conditional_compilation_body_start(line: &[u8]) -> Option<usize> {
     conditional_compilation_prefix(line).map(|prefix| prefix.body_start)
 }
@@ -172,21 +172,21 @@ mod tests {
                 b"!$ x".as_slice(),
                 Some(ConditionalPrefix {
                     body_start: 3,
-                    kind: ConditionalPrefixKind::InitialBlank,
+                    kind: ConditionalPrefixKind::BlankSeparated,
                 }),
             ),
             (
                 b"  !$\tx",
                 Some(ConditionalPrefix {
                     body_start: 5,
-                    kind: ConditionalPrefixKind::InitialBlank,
+                    kind: ConditionalPrefixKind::BlankSeparated,
                 }),
             ),
             (
                 b"!$  x",
                 Some(ConditionalPrefix {
                     body_start: 3,
-                    kind: ConditionalPrefixKind::InitialBlank,
+                    kind: ConditionalPrefixKind::BlankSeparated,
                 }),
             ),
             (
