@@ -54,11 +54,11 @@ fn compact_conditional_literal_continuation_keeps_the_required_ampersand() {
 #[test]
 fn conditional_multiple_subscripts_survive_continuation_and_forced_wrapping() {
     // The first multiple-subscript triplet is physically continued through a
-    // compact conditional sentinel. The long outer expression then gives the
-    // wrapper several ordinary safe break points after that state has been
-    // carried, so this test exercises both PR #16's `@` state and PR #18's
-    // conditional-stream/wrapper behavior in one statement.
-    let source = b"program p\n!$ x = some_really_long_array_name(@ lo : &\n!$& hi : step, @ base :: stride) + first_term + second_term + third_term + fourth_term + fifth_term + sixth_term\nend program p\n";
+    // compact conditional sentinel. The joined prefix remains short enough to
+    // offer a safe comma break, while the long outer expression forces more
+    // wrapper-created physical lines after that state has been carried. This
+    // exercises both PR #16's `@` state and PR #18's conditional wrapper path.
+    let source = b"program p\n!$ x = values(@ lo : &\n!$& hi : step, @ base :: stride) + first_term + second_term + third_term + fourth_term + fifth_term + sixth_term\nend program p\n";
     let mut config = full();
     config.wrap.line_length = 48;
 
