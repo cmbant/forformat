@@ -71,6 +71,31 @@ fn continued_triplet_depth_ignores_nested_and_sibling_section_colons() {
 }
 
 #[test]
+fn post_layout_alignment_keeps_continued_double_colons_compact() {
+    let config = FormatConfig {
+        apply_indent: false,
+        ..FormatConfig::default()
+    };
+
+    for (source, first_line) in [
+        (b"x = c(@ &\n& ::stride, other)\n".as_slice(), "@ &"),
+        (b"x = c(@lo &\n& ::stride, other)\n".as_slice(), "@lo &"),
+    ] {
+        let once = format_source(source, &config).unwrap().bytes;
+        let output = String::from_utf8(once.clone()).unwrap();
+        assert!(
+            output.contains(&format!("{first_line}\n::stride")),
+            "continued multiple-subscript lost compact ::: {output:?}"
+        );
+        assert!(
+            !output.lines().any(|line| line.contains(":: stride")),
+            "post-layout alignment respaced multiple-subscript :: {output:?}"
+        );
+        assert_eq!(format_source(&once, &config).unwrap().bytes, once);
+    }
+}
+
+#[test]
 fn wrapping_cannot_split_after_at_when_delimiter_spacing_is_disabled() {
     let mut config = FormatConfig {
         apply_indent: false,
