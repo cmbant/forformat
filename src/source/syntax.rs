@@ -7,7 +7,10 @@ use super::{Token, TokenKind};
 
 /// Start of the Fortran body of a free-form conditional-compilation line.
 ///
-/// OpenMP conditional compilation uses `!$` followed by a blank.  Accept both
+/// An initial OpenMP conditional-compilation line uses `!$` followed by a
+/// blank.  A continued line may instead put the continuation marker directly
+/// after the sentinel, as in `!$& index`; in that form the returned body starts
+/// at the `&`, because it is still Fortran continuation syntax.  Accept both
 /// horizontal blank spellings that the formatter already accepts elsewhere and
 /// consume exactly one of them, leaving any additional authored indentation in
 /// the body.  Joined spellings such as `!$OMP` and `!$acc`, and bare `!$`, are
@@ -20,7 +23,11 @@ pub(crate) fn conditional_compilation_body_start(line: &[u8]) -> Option<usize> {
     {
         return None;
     }
-    matches!(line.get(start + 2), Some(b' ' | b'\t')).then_some(start + 3)
+    match line.get(start + 2) {
+        Some(b' ' | b'\t') => Some(start + 3),
+        Some(b'&') => Some(start + 2),
+        _ => None,
+    }
 }
 
 /// Number of leading tokens occupied by a declaration type head.
@@ -125,11 +132,14 @@ mod tests {
     use crate::source::tokens::tokens;
 
     #[test]
-    fn conditional_compilation_requires_a_horizontal_blank() {
+    fn conditional_compilation_recognizes_initial_and_continued_sentinels() {
         for (line, expected) in [
             (b"!$ x".as_slice(), Some(3)),
             (b"  !$\tx", Some(5)),
             (b"!$  x", Some(3)),
+            (b"!$& index", Some(2)),
+            (b"  !$&index", Some(4)),
+            (b"!$ & index", Some(3)),
             (b"!$", None),
             (b"!$OMP parallel", None),
             (b"!$acc parallel", None),
