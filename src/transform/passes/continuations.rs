@@ -180,10 +180,14 @@ fn fortran_code_start(line: &[u8]) -> usize {
     let Some(start) = line.iter().position(|byte| !byte.is_ascii_whitespace()) else {
         return 0;
     };
-    line.get(start..)
+    if line
+        .get(start..)
         .is_some_and(|rest| rest.starts_with(b"!$ "))
-        .then_some(start + 3)
-        .unwrap_or(0)
+    {
+        start + 3
+    } else {
+        0
+    }
 }
 
 /// For every line, the nearest line above and below it that carries part of the
