@@ -205,6 +205,45 @@ fn a_stepped_over_line_never_disturbs_the_literal_it_sits_inside() {
 }
 
 #[test]
+fn each_sentinel_stream_carries_its_own_literal_state() {
+    // A statement continues only within its own sentinel stream. Consecutive
+    // `!$ ` lines splice with each other, and an ordinary literal spans an
+    // intervening `!$ ` line — that line is a comment under the only reading
+    // of the source that compiles. The line rules used to hand every `!$ `
+    // line a fresh lexical state and reset the ordinary one, so both readings
+    // lost the literal and `&def!ghi'` came back as code plus a comment.
+    //
+    // `!$ s = 'abc &` / `!$ &def!ghi'` is ordinary OpenMP code: it compiles and
+    // prints `abc def!ghi` under -fopenmp.
+    let cases = [
+        "s = 'abc &\n!$ y = 2\n&def!ghi'\n",
+        "!$ s = 'abc &\ny = 2\n!$ &def!ghi'\n",
+        "!$ s = 'abc &\n!$ y = 2\n!$ &def!ghi'\n",
+        "!$ s = 'abc &\n!$ &def!ghi'\n",
+    ];
+    for body in cases {
+        let source = format!(
+            "program p\ncharacter(len=40) :: s\ninteger :: y\ny = 0\n{body}end program p\n"
+        );
+        for config in [
+            FormatConfig {
+                mode: FormatMode::Full,
+                ..FormatConfig::default()
+            },
+            FormatConfig {
+                mode: FormatMode::Full,
+                align_comments: true,
+                ..FormatConfig::default()
+            },
+        ] {
+            let out = format_source(source.as_bytes(), &config).unwrap().bytes;
+            let text = String::from_utf8(out).unwrap();
+            assert!(text.contains("def!ghi"), "{body:?} corrupted:\n{text}");
+        }
+    }
+}
+
+#[test]
 fn post_layout_alignment_never_writes_into_a_continued_literal() {
     // `::` and `!` on the second physical line of a continued character
     // literal are literal text.  The alignment passes measured each line from

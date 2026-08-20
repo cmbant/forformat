@@ -246,7 +246,10 @@ fn column_info(
     cpp_lines: &[bool],
     mut info: impl FnMut(&[u8], &mut LexState) -> Option<(usize, usize, usize)>,
 ) -> Vec<Option<(usize, usize, usize)>> {
-    let mut lex = LexState::default();
+    // One state per sentinel stream: a statement continues only within its own,
+    // so consecutive `!$ ` lines splice with each other while an ordinary
+    // literal spans an intervening one.
+    let mut lex = [LexState::default(), LexState::default()];
     lines
         .iter()
         .zip(cpp_lines)
@@ -256,7 +259,8 @@ fn column_info(
                 // between the halves of a continued literal without ending it.
                 None
             } else {
-                info(line, &mut lex)
+                let stream = usize::from(line.trim_ascii_start().starts_with(b"!$ "));
+                info(line, &mut lex[stream])
             }
         })
         .collect()
