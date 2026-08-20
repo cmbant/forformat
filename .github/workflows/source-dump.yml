@@ -1,0 +1,16 @@
+name: Temporary source materialization
+
+on:
+  push:
+    branches:
+      - fix/conditional-continuation-state
+
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/upload-artifact@v7
+        with:
+          name: full-source
+          path: src/format/full.rs
