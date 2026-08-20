@@ -2,9 +2,7 @@
 
 use crate::{
     error::FormatError,
-    source::{
-        regions, regions::LexState, syntax::conditional_compilation_body_start, RegionKind,
-    },
+    source::{regions, regions::LexState, syntax::conditional_compilation_body_start, RegionKind},
     transform::{
         document::Document,
         pipeline::{Changed, PassContext},
@@ -179,9 +177,7 @@ fn fortran_code_start(line: &[u8]) -> usize {
 fn statement_neighbours(lines: &[Vec<u8>]) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
     let carries_statement: Vec<bool> = lines
         .iter()
-        .map(|line| {
-            conditional_stream(line) || !regions::stepped_over_by_continuation(line)
-        })
+        .map(|line| conditional_stream(line) || !regions::stepped_over_by_continuation(line))
         .collect();
     // One cursor per stream, so a neighbour is always of the line's own class.
     let stream: Vec<usize> = lines
