@@ -67,6 +67,14 @@ struct LineContext<'a> {
 #[derive(Default)]
 struct LineState {
     lex: LexState,
+    /// The conditional-compilation stream's own lexical state.
+    ///
+    /// A statement continues only within its own sentinel stream, so the two
+    /// carry literal and Hollerith state independently: consecutive `!$ ` lines
+    /// splice with each other, and an ordinary literal spans an intervening
+    /// `!$ ` line because that line is a comment under the only reading of the
+    /// source that compiles.
+    omp_lex: LexState,
     continued_statement: bool,
     continued_infix: bool,
     continued_openmp_infix: bool,
@@ -116,6 +124,8 @@ impl LineState {
 
     fn reset_statement(&mut self) {
         self.lex = LexState::default();
+        // `omp_lex` is deliberately untouched: it belongs to the other stream,
+        // which an ordinary statement boundary does not end.
         self.continued_statement = false;
         self.continued_infix = false;
         self.continued_named_parameter = false;
@@ -172,7 +182,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 cx,
                 &declared_names,
                 index,
-                &mut LexState::default(),
+                &mut state.omp_lex,
                 RuleMode::Physical(context),
             );
             let mut rebuilt = document.lines[index][..body_start].to_vec();
@@ -182,7 +192,11 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 changed = changed.or(Changed::Text);
             }
             state.continued_openmp_infix = trailing_continuation_operand(&body);
+            // The ordinary stream steps over this line, so its lexical state
+            // survives; only the ordinary statement context ends here.
+            let lex = state.lex;
             state.reset_statement();
+            state.lex = lex;
             continue;
         }
 

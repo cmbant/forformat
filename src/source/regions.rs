@@ -308,9 +308,25 @@ fn line_scan<F: FnMut(Region)>(state: &mut LexState, line: &[u8], push: F) {
 ///
 /// The OpenMP sentinel is deliberately not in the set: `!$ ` introduces
 /// conditionally compiled *code*, which a group absorbs like any other line.
+/// Which of the two streams a line belongs to matters as well, and that part is
+/// the caller's: see `continuations::conditional_stream`.
+///
+/// A `!findentfix:` line *is* in the set, and this is the one place the set is
+/// deliberately wider than [`LogicalGroup::visit`]'s, which treats
+/// [`PhysicalLineKind::FindentFix`] as a group boundary rather than a skipped
+/// line.  The two answer different questions.  To gfortran a findentfix
+/// directive is an ordinary comment, so lexically the literal around it stays
+/// open; ending it here would reopen the exact bug this function exists to
+/// prevent, rewriting `&def!ghi')` as code plus a comment.  The cost of the
+/// asymmetry is bounded and visible: a directive between the halves of a
+/// continued statement truncates the *statement*, so a construct head split
+/// that way is not recognized and its body is under-indented against findent.
+/// Content is preserved either way; do not "align" the two sets by dropping
+/// findentfix from this one.
 ///
 /// [`LogicalGroup::visit`]: crate::source::LogicalGroup::visit
-fn stepped_over_by_continuation(line: &[u8]) -> bool {
+/// [`PhysicalLineKind::FindentFix`]: crate::source::PhysicalLineKind::FindentFix
+pub fn stepped_over_by_continuation(line: &[u8]) -> bool {
     let line = line.trim_ascii_start();
     line.is_empty()
         || line.starts_with(b"#")
@@ -504,6 +520,30 @@ mod tests {
             );
             assert!(!state.in_literal());
         }
+    }
+
+    #[test]
+    fn a_findentfix_directive_does_not_close_the_literal_around_it() {
+        // gfortran reads a findentfix directive as an ordinary comment, so the
+        // literal spans it. `LogicalGroup::visit` still breaks the *statement*
+        // there, which is a deliberate asymmetry: it costs indentation on a
+        // split construct head, while lexing the directive would corrupt the
+        // literal's bytes.
+        let mut state = LexState::default();
+        assert_eq!(
+            super::line_comment_start(&mut state, b"if (s == 'abc &"),
+            None
+        );
+        assert!(state.in_literal());
+        assert_eq!(
+            super::line_comment_start(&mut state, b"!findentfix: free"),
+            None
+        );
+        assert!(state.in_literal());
+        assert_eq!(
+            super::line_comment_start(&mut state, b"&def!ghi') then"),
+            None
+        );
     }
 
     #[test]

@@ -628,12 +628,13 @@ fn detach_final_inline_comment(
     // (`...invalid!')` on the second line of `'... &`) is literal text, and
     // detaching it as a comment would emit it twice — once above the statement
     // and once inside the body the wrapper rebuilds from the joined text.
-    let mut lex = crate::source::LexState::default();
+    // One lexical state per sentinel stream; see `regions::line_scan`.
+    let mut lex = [crate::source::LexState::default(); 2];
     let mut comments = Vec::new();
     for index in group.lines.clone() {
-        if let Some(start) =
-            crate::source::regions::line_comment_start(&mut lex, &document.lines[index])
-        {
+        let line = &document.lines[index];
+        let stream = usize::from(line.trim_ascii_start().starts_with(b"!$ "));
+        if let Some(start) = crate::source::regions::line_comment_start(&mut lex[stream], line) {
             comments.push((index, start));
         }
     }
@@ -936,12 +937,13 @@ fn copy_group_without_final_comment(
     lines: &mut Vec<Vec<u8>>,
 ) {
     let final_line = group.lines.end.saturating_sub(1);
-    let mut lex = crate::source::LexState::default();
+    let mut lex = [crate::source::LexState::default(); 2];
     for index in group.lines.clone() {
         let Some(line) = document.lines.get(index) else {
             continue;
         };
-        let comment = crate::source::regions::line_comment_start(&mut lex, line);
+        let stream = usize::from(line.trim_ascii_start().starts_with(b"!$ "));
+        let comment = crate::source::regions::line_comment_start(&mut lex[stream], line);
         if index == final_line {
             if let Some(comment) = comment {
                 lines.push(line[..comment].trim_ascii_end().to_vec());

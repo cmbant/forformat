@@ -3,6 +3,7 @@ use crate::{
     config::{KeywordCase, StyleConfig},
     source::{
         regions::{LexState, RegionKind},
+        syntax::declaration_type_head_len,
         tokens::{tokenize, TokenKind},
         PhysicalLineKind,
     },
@@ -155,21 +156,12 @@ pub(super) fn is_declaration_statement(tokens: &[crate::source::Token<'_>]) -> b
     if first.kind != TokenKind::Name {
         return false;
     }
-    if first.is_name(b"double") {
-        return tokens
-            .get(index + 1)
-            .is_some_and(|token| token.is_name(b"precision"));
+    if declaration_type_head_len(tokens, index).is_some() {
+        return true;
     }
     matches!(
         first.text.to_ascii_lowercase().as_slice(),
-        b"integer"
-            | b"real"
-            | b"complex"
-            | b"logical"
-            | b"character"
-            | b"type"
-            | b"class"
-            | b"procedure"
+        b"procedure"
             | b"dimension"
             | b"allocatable"
             | b"pointer"
@@ -290,28 +282,8 @@ fn is_old_style_declaration_entity(tokens: &[crate::source::Token<'_>], index: u
         return false;
     }
     let first = first_statement_index(tokens);
-    let Some(type_token) = tokens.get(first) else {
-        return false;
-    };
-    let mut entity_start = first + 1;
-    if type_token.is_name(b"double")
-        && tokens
-            .get(entity_start)
-            .is_some_and(|token| token.is_name(b"precision"))
-    {
-        entity_start += 1;
-    } else if matches!(
-        type_token.text.to_ascii_lowercase().as_slice(),
-        b"type" | b"class"
-    ) && tokens
-        .get(entity_start)
-        .is_some_and(|token| token.kind == TokenKind::LParen)
-    {
-        let Some(close) = matching_close(tokens, entity_start) else {
-            return false;
-        };
-        entity_start = close + 1;
-    } else if tokens
+    let mut entity_start = first + declaration_type_head_len(tokens, first).unwrap_or(1);
+    if tokens
         .get(entity_start)
         .is_some_and(|token| token.text == b"*")
     {
@@ -711,4 +683,24 @@ pub fn is_protected(line: &[u8], offset: usize) -> bool {
         }
     });
     protected
+}
+
+#[cfg(test)]
+mod declaration_head_tests {
+    use super::is_declaration_statement;
+    use crate::source::tokens::tokens;
+
+    #[test]
+    fn continued_declarations_share_type_head_recognition() {
+        for source in [
+            b"INTEGER*1 i".as_slice(),
+            b"DOUBLE PRECISION x",
+            b"DOUBLEPRECISION x",
+            b"TYPEOF(x) y",
+            b"CLASSOF(x) y",
+            b"DOUBLE COMPLEX z",
+        ] {
+            assert!(is_declaration_statement(&tokens(source)), "{source:?}");
+        }
+    }
 }
