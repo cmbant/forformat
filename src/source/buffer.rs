@@ -178,10 +178,8 @@ mod tests {
 
     #[test]
     fn conditional_compilation_accepts_initial_and_compact_continuation_sentinels() {
-        let buffer = SourceBuffer::new(
-            b"!$ x = 1\n!$\ty = 2 ! note\n!$ call f( &\n!$& arg = 1)\n",
-        )
-        .unwrap();
+        let buffer =
+            SourceBuffer::new(b"!$ x = 1\n!$\ty = 2 ! note\n!$ call f( &\n!$& arg = 1)\n").unwrap();
         for line in &buffer.lines {
             assert!(line.omp);
         }
