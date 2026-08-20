@@ -2,7 +2,9 @@
 
 use crate::{
     error::FormatError,
-    source::{regions, regions::LexState, RegionKind},
+    source::{
+        regions, regions::LexState, syntax::conditional_compilation_body_start, RegionKind,
+    },
     transform::{
         document::Document,
         pipeline::{Changed, PassContext},
@@ -29,8 +31,9 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
 /// there leaves `sub routine`, which is a different program — and one gfortran
 /// rejects. Both neighbours are found by skipping physical lines the logical
 /// statement also steps over: comments, blanks and preprocessor directives.
-/// A conditional `!$ ` line is different: it is Fortran code with a sentinel
-/// prefix, so its body participates in continuation and lexical-token state.
+/// A conditional `!$` line followed by a horizontal blank is different: it is
+/// Fortran code with a sentinel prefix, so its body participates in continuation
+/// and lexical-token state.
 ///
 /// Port target: `normalize_continuations`.
 pub fn normalize_continuations(
@@ -46,7 +49,7 @@ pub fn normalize_continuations(
     let mut open_stream: Option<bool> = None;
     for (index, original_line) in original.iter().enumerate() {
         let conditional = conditional_stream(original_line);
-        let passed_over = regions::stepped_over_by_continuation(original_line)
+        let passed_over = (regions::stepped_over_by_continuation(original_line) && !conditional)
             || open_stream.is_some_and(|open| open != conditional);
         let incoming_protected = state.in_literal() || state.in_hollerith();
         let mut line = original_line.clone();
@@ -109,8 +112,8 @@ pub fn normalize_openmp_continuation_sentinels(
             continuation = false;
             continue;
         };
-        // `!$ ` conditional-compilation lines are ordinary Fortran code with
-        // a sentinel prefix. Step 12 owns their continuation markers, including
+        // Conditional-compilation lines are ordinary Fortran code with a
+        // sentinel prefix. Step 12 owns their continuation markers, including
         // the lexical-token exception; this pass only normalizes `!$OMP`.
         if !omp_style {
             continuation = false;
@@ -156,25 +159,15 @@ fn is_lexical_token_continuation(first: &[u8], second: &[u8]) -> bool {
 
 /// Slice away the conditional-compilation sentinel from a physical line.
 ///
-/// `SourceBuffer` classifies exactly `!$ ` (after indentation) as Fortran code
-/// and scans the bytes after that three-byte sentinel. Continuation syntax must
-/// use the same view or `!` is mistaken for a comment marker.
+/// `SourceBuffer` and this pass share one recognizer for `!$` followed by a
+/// horizontal blank, so continuation syntax never mistakes a valid sentinel
+/// for a comment marker.
 fn fortran_code(line: &[u8]) -> &[u8] {
     &line[fortran_code_start(line)..]
 }
 
 fn fortran_code_start(line: &[u8]) -> usize {
-    let Some(start) = line.iter().position(|byte| !byte.is_ascii_whitespace()) else {
-        return 0;
-    };
-    if line
-        .get(start..)
-        .is_some_and(|rest| rest.starts_with(b"!$ "))
-    {
-        start + 3
-    } else {
-        0
-    }
+    conditional_compilation_body_start(line).unwrap_or(0)
 }
 
 /// For every line, the nearest line above and below it that carries part of the
@@ -186,7 +179,9 @@ fn fortran_code_start(line: &[u8]) -> usize {
 fn statement_neighbours(lines: &[Vec<u8>]) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
     let carries_statement: Vec<bool> = lines
         .iter()
-        .map(|line| !regions::stepped_over_by_continuation(line))
+        .map(|line| {
+            conditional_stream(line) || !regions::stepped_over_by_continuation(line)
+        })
         .collect();
     // One cursor per stream, so a neighbour is always of the line's own class.
     let stream: Vec<usize> = lines
@@ -214,16 +209,14 @@ fn statement_neighbours(lines: &[Vec<u8>]) -> (Vec<Option<usize>>, Vec<Option<us
 
 /// Which continuation stream a physical line belongs to.
 ///
-/// `!$ ` conditional-compilation lines form their own stream, and a statement
-/// only ever continues within one stream. `!$ x&` splices with `!$ &y` under
-/// both readings of the sentinel, so those two are neighbours. An ordinary
-/// `code&` splices with `&more` across an intervening `!$ ` line only when
-/// OpenMP is *off* — with OpenMP on, that source does not compile at all — so
-/// the `!$ ` line is stepped over rather than allowed to break the token.
-/// findent agrees in both directions, and un-gluing `call my&` there turns a
-/// program that compiles and runs into `call my sub(...)`, which does not.
+/// Conditional-compilation lines form their own stream, and a statement only
+/// ever continues within one stream. `!$ x&` splices with `!$ &y` under both
+/// readings of the sentinel, so those two are neighbours. An ordinary `code&`
+/// splices with `&more` across an intervening conditional line only when OpenMP
+/// is off — with OpenMP on, that source does not compile at all — so the
+/// conditional line is stepped over rather than allowed to break the token.
 fn conditional_stream(line: &[u8]) -> bool {
-    line.trim_ascii_start().starts_with(b"!$ ")
+    conditional_compilation_body_start(line).is_some()
 }
 
 fn lexical_prefix_end(line: &[u8]) -> Option<usize> {
@@ -626,27 +619,22 @@ mod tests {
 
     #[test]
     fn conditional_compilation_lines_participate_in_continuation_state() {
-        let mut document =
-            Document::from_bytes(b"!$ sub&\n!$ &routine sub\n!$ x = a &\n!$   & b\n");
-        let local = FileFacts::default();
-        let project = ProjectContext::empty();
-        run(&mut document, &cx(&local, &project)).unwrap();
+        for source in [
+            b"!$ sub&\n!$ &routine sub\n!$ x = a &\n!$   & b\n".as_slice(),
+            b"!$\tsub&\n!$\t&routine sub\n!$\tx = a &\n!$\t  & b\n",
+        ] {
+            let mut document = Document::from_bytes(source);
+            let local = FileFacts::default();
+            let project = ProjectContext::empty();
+            run(&mut document, &cx(&local, &project)).unwrap();
 
-        assert_eq!(document.lines[0], b"!$ sub&".to_vec());
-        assert_eq!(document.lines[1], b"!$ &routine sub".to_vec());
-        assert_eq!(document.lines[2], b"!$ x = a &".to_vec());
-        assert_eq!(document.lines[3], b"!$   b".to_vec());
+            assert!(document.lines[0].ends_with(b"sub&"));
+            assert!(document.lines[1].ends_with(b"&routine sub"));
+            assert!(document.lines[2].ends_with(b"x = a &"));
+            assert!(document.lines[3].ends_with(b"  b"));
+        }
     }
 
-    /// A statement continues only within its own sentinel stream, so an
-    /// ordinary split token is glued across an intervening `!$ ` line rather
-    /// than broken by it.
-    ///
-    /// Un-gluing it is not a cosmetic choice. `call my&` / `!$ y = 2` /
-    /// `&sub(y)` compiles and runs without OpenMP, printing 42; rewriting the
-    /// marker to `call my &` makes it `call my sub(y)`, which does not compile.
-    /// With OpenMP on, that source does not compile either way, so breaking the
-    /// token protects nothing. findent keeps `call my&` here too.
     #[test]
     fn a_split_token_is_glued_across_the_other_sentinel_stream() {
         let mut document = Document::from_bytes(b"sub&\n!$ x = 1\n&routine sub\n");
@@ -658,8 +646,6 @@ mod tests {
         assert_eq!(document.lines[2], b"&routine sub".to_vec());
     }
 
-    /// The converse: an ordinary line between two `!$ ` halves is likewise not
-    /// a neighbour of either, so the conditional split token stays glued.
     #[test]
     fn the_conditional_stream_keeps_its_own_neighbours() {
         let mut document = Document::from_bytes(b"!$ sub&\nx = 1\n!$ &routine sub\n");
@@ -671,9 +657,6 @@ mod tests {
         assert_eq!(document.lines[2], b"!$ &routine sub".to_vec());
     }
 
-    /// A literal opened on an ordinary line is not closed by a `!$ ` line
-    /// sitting inside it: without OpenMP that line is a comment, and with
-    /// OpenMP the source does not compile.
     #[test]
     fn a_literal_survives_a_line_from_the_other_stream() {
         for (open, sep) in [("x = 'ab &", "!$ y = 2"), ("!$ x = 'ab &", "y = 2")] {
