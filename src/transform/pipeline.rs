@@ -111,9 +111,22 @@ pub fn normalize(
         },
     )?);
 
-    // Step 11 consumes statement/scope data, so rebuild after the lexical and
-    // parenthesis edits above. Steps 12-13 read only config/project fields from
-    // PassContext; they intentionally share this snapshot after line rules.
+    // Redundant statement separators are syntax normalization rather than a
+    // wrapping policy. Run them after structural lexical cleanup, and rebuild
+    // the statement view afterwards because deleting separators changes source
+    // offsets even though it does not change the non-empty statements.
+    changed = changed.or(with_context(
+        document,
+        project,
+        local,
+        config,
+        passes::semicolons::run,
+    )?);
+
+    // Step 11 consumes statement/scope data, so rebuild after the lexical,
+    // parenthesis, and separator edits above. Steps 12-13 read only
+    // config/project fields from PassContext; they intentionally share this
+    // snapshot after line rules.
     changed = changed.or(with_context(
         document,
         project,
