@@ -89,7 +89,10 @@ fn conditional_multiple_subscripts_survive_continuation_and_forced_wrapping() {
         })
         .filter(|character| !character.is_whitespace() && *character != '&')
         .collect();
-    assert!(logical.contains("@lo:hi:step"), "triplet state lost:\n{text}");
+    assert!(
+        logical.contains("@lo:hi:step"),
+        "triplet state lost:\n{text}"
+    );
     assert!(
         logical.contains("@base::stride"),
         "continued multiple-subscript :: was reinterpreted:\n{text}"
