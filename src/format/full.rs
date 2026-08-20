@@ -422,9 +422,11 @@ fn reflow_with_context_inner(
                 return (out, None);
             }
             let index = group.lines.start;
-            let conditional = analysis.buffer.lines.get(index).is_some_and(|line| {
-                line.is_conditional_compilation() && config.openmp
-            });
+            let conditional = analysis
+                .buffer
+                .lines
+                .get(index)
+                .is_some_and(|line| line.is_conditional_compilation() && config.openmp);
             let sentinel_width = if conditional { 3 } else { 0 };
             let emitted_target = first_indent.saturating_sub(sentinel_width);
             let continuation = sentinel_width
@@ -559,12 +561,7 @@ fn reflow_with_context_inner(
                         }
                     }
                     Some(None) if group.lines.len() > 1 => {
-                        emit_joined_body(
-                            &mut out,
-                            &with_label(body),
-                            first_indent,
-                            conditional,
-                        );
+                        emit_joined_body(&mut out, &with_label(body), first_indent, conditional);
                     }
                     _ => copy_group(document, group, &mut out),
                 }
@@ -698,12 +695,7 @@ fn detach_final_inline_comment(
     Some(Some(vec![comment]))
 }
 
-fn emit_joined_body(
-    lines: &mut Vec<Vec<u8>>,
-    body: &[u8],
-    first_indent: usize,
-    conditional: bool,
-) {
+fn emit_joined_body(lines: &mut Vec<Vec<u8>>, body: &[u8], first_indent: usize, conditional: bool) {
     let mut line = vec![b' '; first_indent];
     line.extend_from_slice(body);
     lines.push(restore_conditional_prefix(line, conditional));
@@ -717,7 +709,10 @@ fn restore_conditional_prefix(line: Vec<u8>, conditional: bool) -> Vec<u8> {
     if !conditional {
         return line;
     }
-    let leading = line.iter().take_while(|byte| byte.is_ascii_whitespace()).count();
+    let leading = line
+        .iter()
+        .take_while(|byte| byte.is_ascii_whitespace())
+        .count();
     let mut restored = Vec::with_capacity(line.len() + 3);
     restored.extend_from_slice(b"!$ ");
     restored.extend(std::iter::repeat_n(b' ', leading.saturating_sub(3)));
@@ -798,11 +793,11 @@ fn is_openmp_line(line: &[u8]) -> bool {
         return false;
     };
     let rest = &line[start..];
-    rest.get(..5).is_some_and(|prefix| {
-        prefix[..2] == *b"!$" && prefix[2..].eq_ignore_ascii_case(b"omp")
-    }) && rest
-        .get(5)
-        .is_none_or(|byte| byte.is_ascii_whitespace() || *byte == b'&')
+    rest.get(..5)
+        .is_some_and(|prefix| prefix[..2] == *b"!$" && prefix[2..].eq_ignore_ascii_case(b"omp"))
+        && rest
+            .get(5)
+            .is_none_or(|byte| byte.is_ascii_whitespace() || *byte == b'&')
 }
 
 fn wrap_openmp_directive(line: &[u8], line_length: usize) -> Result<Vec<Vec<u8>>, Decline> {
@@ -1121,13 +1116,6 @@ mod tests {
 
     #[test]
     fn a_nested_type_spec_colon_is_a_stable_wrap_point() {
-        // `allocate`'s type-spec `::` sits inside the call's parens, not at
-        // statement depth 0, so it is a different code path from an ordinary
-        // declaration's head. Deep indent plus a compact `::` (no authored
-        // space on either side) pushes the line past the budget only once
-        // step 17 pads the separator — the first pass has to reserve that
-        // budget and still find a break, or it declines and leaves an
-        // over-long line for the second pass to wrap differently (I1).
         let source = b"subroutine s\nif (a) then\nif (b) then\nif (c) then\nallocate(TMetropolisSampler::this%SamplingAlgorithm)\nend if\nend if\nend if\nend subroutine s\n";
         let setup = |config: &mut FormatConfig| {
             config.indent = 8;
@@ -1199,7 +1187,6 @@ end module m
 
     #[test]
     fn full_output_is_a_findent_fixed_point() {
-        // I2: running indent-only over full output must change nothing.
         let source =
             b"PROGRAM Main\nIF (X > 1) THEN\nCALL DoThing(Value)\nEND IF\nEND PROGRAM Main\n";
         let once = full(|_| {}, source);
@@ -1224,7 +1211,6 @@ end module m
 
     #[test]
     fn full_formatting_reaches_its_fixed_point_in_one_pass() {
-        // I1.
         for source in [
             b"PROGRAM p\nX = 1\nEND PROGRAM p\n".as_slice(),
             b"module m\ncontains\nSUBROUTINE s()\nEND SUBROUTINE s\nend module m\n".as_slice(),
@@ -1269,31 +1255,18 @@ end module m
             assert!(line.len() <= 40, "overlong line {line:?} in\n{text}");
         }
         assert!(text.contains(" &\n"), "no continuation produced:\n{text}");
-        // The wrapped result is still a findent fixed point.
         let again = format_source(&wrapped, &FormatConfig::default())
             .unwrap()
             .bytes;
         assert_eq!(String::from_utf8_lossy(&again), text);
     }
 
-    /// The four ways step 16 used to need a second run to settle. They share
-    /// one shape: something the
-    /// pipeline does *after* the wrapper measured the text — normalization
-    /// widening it, the layout engine moving it, step 17 padding a `::` —
-    /// pushed a line past the budget that the next run then rewrapped.
     #[test]
     fn statements_settle_on_the_first_run_when_later_passes_widen_them() {
         let cases: [&[u8]; 4] = [
-            // Normalization adds the spaces around `//` that tip the joined
-            // statement over the budget (`source/EstCovmat.f90`).
             b"module m\ncontains\nsubroutine s\n    if (Feedback >1 ) write(*,*) &\n     ' Parameter '//trim(BaseParams%UsedParamNameOrNumber(i))//' is weakly constrained, neglect correlations'\nend subroutine s\nend module m\n",
-            // The layout engine moves the directive right, and the sentinel has
-            // to be repeated on the wrapped line.
             b"module m\ncontains\nsubroutine s\ndo i = 1, n\ndo j = 1, n\n!$OMP PARALLEL DO DEFAULT(SHARED), SCHEDULE(STATIC), PRIVATE(zpeak, sigma_z, zpeakstart, zpeakend, nu_i, Win)\ndo k = 1, n\nx = 1\nend do\nend do\nend do\nend subroutine s\nend module m\n",
-            // Step 17 gives `::` the space the wrapper had not paid for
-            // because step 17 gives `::` its owed space.
             b"module m\ncontains\nsubroutine s\nreal (dl):: dif_old,dif,max,min,dlm,binz,m_min,m_max,mp,yp,zp,thp,xk1,xk2,xk3,yk1,yk2,yk3,fact,qmin,qmax,dlogy\nend subroutine s\nend module m\n",
-            // A detached trailing comment above a dedented `else if`.
             b"module m\ncontains\nsubroutine s\nif (fb == zero) then\nxzero = b\nelseif (fa*(fb/abs(fb))<zero) then  ! check that f(ax) and f(bx) have different signs\nc = a\nend if\nend subroutine s\nend module m\n",
         ];
         for source in cases {
@@ -1311,11 +1284,6 @@ end module m
 
     #[test]
     fn project_case_does_not_make_wrapped_intrinsics_non_idempotent() {
-        // The unrelated project declaration supplies project-wide `Size` evidence. The
-        // target declaration uses the intrinsic twice in a dimension bound;
-        // at a narrow budget the second occurrence becomes a continuation
-        // fragment, which must retain the intrinsic's canonical lowercase
-        // spelling across both runs.
         let target = b"module target\n\
 implicit none\n\
 contains\n\
@@ -1353,9 +1321,6 @@ end module project_names\n";
         assert!(output.contains("size(x%element(i, j)%x))"), "{output}");
     }
 
-    /// An unwrappable statement keeps every physical line it came with.  The
-    /// decline path used to emit the first line alone, which silently deleted
-    /// the rest of the statement.
     #[test]
     fn a_declined_wrap_keeps_the_whole_statement() {
         let mut source = b"module m\ncontains\nsubroutine s\ncall f(a, '".to_vec();
@@ -1368,9 +1333,6 @@ end module project_names\n";
         assert_eq!(text, String::from_utf8_lossy(&twice));
     }
 
-    /// `/)` closes a FORMAT statement's edit-descriptor list; only an array
-    /// constructor's `/)` becomes `]`.  On a continuation line there is no
-    /// `format` keyword to see, so the statement-level fact has to be carried.
     #[test]
     fn a_continued_format_statement_keeps_its_slash_before_the_paren() {
         let source = b"module m\ncontains\nsubroutine s\n9060 format ('    NXD =', i5, ',  NYD =', i5, ',  NXI =', i5, &\n    ',  NYI =', i5 /)\nend subroutine s\nend module m\n";
