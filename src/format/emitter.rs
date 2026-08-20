@@ -2,9 +2,7 @@ use super::continuation::leading_ampersand;
 use crate::{
     config::{FormatConfig, FormatMode},
     error::FormatError,
-    source::{
-        syntax::conditional_compilation_prefix, Newline, PhysicalLineKind, SourceBuffer,
-    },
+    source::{syntax::conditional_compilation_prefix, Newline, PhysicalLineKind, SourceBuffer},
 };
 use std::io::Write;
 
@@ -217,7 +215,11 @@ pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
         } else if config.indent_continuation && previous_cont {
             target = target.saturating_add(config.continuation_indent);
         } else if !config.indent_continuation && previous_cont {
-            target = if conditional { 0 } else { leading_len(original) };
+            target = if conditional {
+                0
+            } else {
+                leading_len(original)
+            };
         }
     }
     if conditional && config.max_indent != 0 {
