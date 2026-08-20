@@ -15,8 +15,24 @@ pub(crate) fn normalize_delimiter_spacing_with_state(
     incoming: LexState,
     continued_statement: bool,
 ) -> Vec<u8> {
+    normalize_delimiter_spacing_with_context(line, cx, incoming, continued_statement, 0, &[])
+}
+
+pub(in crate::transform::passes::line_rules) fn normalize_delimiter_spacing_with_context(
+    line: &[u8],
+    cx: &PassContext,
+    incoming: LexState,
+    continued_statement: bool,
+    open_depth: usize,
+    continued_multiple_subscripts: &[usize],
+) -> Vec<u8> {
     if !cx.config.style.delimiter_spacing {
-        return compact_multiple_subscript_spacing(line, incoming);
+        return compact_multiple_subscript_spacing(
+            line,
+            incoming,
+            open_depth,
+            continued_multiple_subscripts,
+        );
     }
     let mut text = line.to_vec();
     let mut token_state = incoming;
@@ -47,7 +63,12 @@ pub(crate) fn normalize_delimiter_spacing_with_state(
             result.extend_from_slice(&text[region.range.clone()]);
         }
     }
-    compact_multiple_subscript_spacing(&result, compact_state)
+    compact_multiple_subscript_spacing(
+        &result,
+        compact_state,
+        open_depth,
+        continued_multiple_subscripts,
+    )
 }
 
 fn reorder_optional_attribute(line: &[u8], separator: usize, incoming: LexState) -> Vec<u8> {
@@ -203,24 +224,93 @@ fn normalize_delimiters_in_code(code: &[u8], out: &mut Vec<u8>, following_conten
     }
 }
 
+#[derive(Default)]
+struct MultipleSubscriptScan {
+    prefixes: Vec<usize>,
+    triplet_colons: Vec<usize>,
+    active_depths: Vec<usize>,
+}
+
+/// Scan one physical line while carrying the absolute delimiter depths of any
+/// `@` multiple-subscript items opened on earlier continuation lines.
+///
+/// Tracking absolute depth rather than token-local `depth` is important when a
+/// continuation line closes groups that were opened on an earlier physical
+/// line. A comma at an active depth ends that subscript item; closing a group
+/// drops deeper active items. Nested calls/sections therefore do not leak their
+/// ordinary colons into the outer `@` triplet formatting policy.
+fn scan_multiple_subscripts(
+    tokens: &[crate::source::Token<'_>],
+    open_depth: usize,
+    continued_multiple_subscripts: &[usize],
+) -> MultipleSubscriptScan {
+    let mut scan = MultipleSubscriptScan {
+        active_depths: continued_multiple_subscripts.to_vec(),
+        ..MultipleSubscriptScan::default()
+    };
+    let mut depth = open_depth;
+
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TokenKind::LParen | TokenKind::LBracket => {
+                depth += 1;
+            }
+            TokenKind::RParen | TokenKind::RBracket => {
+                depth = depth.saturating_sub(1);
+                scan.active_depths.retain(|active| *active <= depth);
+            }
+            TokenKind::Comma => {
+                scan.active_depths.retain(|active| *active < depth);
+            }
+            TokenKind::Operator if token.text == b"@" => {
+                scan.active_depths.retain(|active| *active != depth);
+                scan.active_depths.push(depth);
+                scan.prefixes.push(index);
+            }
+            TokenKind::Operator
+                if matches!(token.text, b":" | b"::")
+                    && scan.active_depths.contains(&depth) =>
+            {
+                scan.triplet_colons.push(index);
+            }
+            _ => {}
+        }
+    }
+
+    scan
+}
+
+pub(in crate::transform::passes::line_rules) fn advance_multiple_subscript_depths(
+    line: &[u8],
+    open_depth: usize,
+    active_depths: &mut Vec<usize>,
+) {
+    let tokens = tokenize(line, &mut LexState::default());
+    *active_depths = scan_multiple_subscripts(&tokens, open_depth, active_depths).active_depths;
+}
+
 /// Fortran 2023 multiple subscripts use `@` as a prefix and their optional
 /// triplet colons are part of that same compact designator: `@V`, `@[1, 3]`,
 /// `@lo:hi:step`, and `@::step`. Keep only those punctuation seams compact;
-/// ordinary section-subscript colons in sibling items retain their authored
-/// spacing. Tokenization keeps strings and comments out of this rewrite.
+/// ordinary section-subscript colons in sibling or nested items retain their
+/// authored spacing. The active `@` item is carried across authored physical-
+/// line continuations, so both triplet colons receive the same policy.
 ///
 /// This compaction is syntax-safety normalization rather than optional comma/
 /// delimiter styling: the wrapper's whitespace fallback must never be given a
 /// candidate between `@` and the multiple-subscript it prefixes.
-fn compact_multiple_subscript_spacing(line: &[u8], mut state: LexState) -> Vec<u8> {
+fn compact_multiple_subscript_spacing(
+    line: &[u8],
+    mut state: LexState,
+    open_depth: usize,
+    continued_multiple_subscripts: &[usize],
+) -> Vec<u8> {
     let tokens = tokenize(line, &mut state);
+    let scan = scan_multiple_subscripts(&tokens, open_depth, continued_multiple_subscripts);
     let mut compact_gaps: Vec<std::ops::Range<usize>> = Vec::new();
 
-    for (index, at) in tokens.iter().enumerate() {
-        if at.kind != TokenKind::Operator || at.text != b"@" {
-            continue;
-        }
-
+    for index in scan.prefixes {
+        let at = &tokens[index];
         if let Some(previous) = index.checked_sub(1).and_then(|i| tokens.get(i)) {
             if matches!(previous.kind, TokenKind::LParen | TokenKind::LBracket)
                 && horizontal_gap(line, previous.span.end, at.span.start)
@@ -238,35 +328,24 @@ fn compact_multiple_subscript_spacing(line: &[u8], mut state: LexState) -> Vec<u
                 compact_gaps.push(at.span.end..next.span.start);
             }
         }
+    }
 
-        for (offset, punctuation) in tokens.iter().enumerate().skip(index + 1) {
-            if punctuation.kind == TokenKind::Comment || punctuation.depth < at.depth {
-                break;
-            }
-            if punctuation.depth == at.depth && punctuation.kind == TokenKind::Comma {
-                break;
-            }
-            if punctuation.depth != at.depth
-                || punctuation.kind != TokenKind::Operator
-                || !matches!(punctuation.text, b":" | b"::")
+    for index in scan.triplet_colons {
+        let punctuation = &tokens[index];
+        if let Some(previous) = index.checked_sub(1).and_then(|i| tokens.get(i)) {
+            if previous.kind != TokenKind::Ampersand
+                && horizontal_gap(line, previous.span.end, punctuation.span.start)
+                && previous.span.end < punctuation.span.start
             {
-                continue;
+                compact_gaps.push(previous.span.end..punctuation.span.start);
             }
-
-            if let Some(previous) = offset.checked_sub(1).and_then(|i| tokens.get(i)) {
-                if horizontal_gap(line, previous.span.end, punctuation.span.start)
-                    && previous.span.end < punctuation.span.start
-                {
-                    compact_gaps.push(previous.span.end..punctuation.span.start);
-                }
-            }
-            if let Some(next) = tokens.get(offset + 1) {
-                if !matches!(next.kind, TokenKind::Ampersand | TokenKind::Comment)
-                    && horizontal_gap(line, punctuation.span.end, next.span.start)
-                    && punctuation.span.end < next.span.start
-                {
-                    compact_gaps.push(punctuation.span.end..next.span.start);
-                }
+        }
+        if let Some(next) = tokens.get(index + 1) {
+            if !matches!(next.kind, TokenKind::Ampersand | TokenKind::Comment)
+                && horizontal_gap(line, punctuation.span.end, next.span.start)
+                && punctuation.span.end < next.span.start
+            {
+                compact_gaps.push(punctuation.span.end..next.span.start);
             }
         }
     }
