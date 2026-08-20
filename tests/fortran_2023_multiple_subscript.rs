@@ -92,3 +92,26 @@ fn wrapping_cannot_split_after_at_when_delimiter_spacing_is_disabled() {
     assert!(output.contains("&\n"));
     assert!(!output.lines().any(|line| line.trim_end().ends_with("@ &")));
 }
+
+#[test]
+fn wrapping_keeps_multiple_subscript_double_colons_compact() {
+    let mut config = FormatConfig {
+        apply_indent: false,
+        ..FormatConfig::default()
+    };
+    config.wrap.line_length = 46;
+
+    for source in [
+        b"x = some_really_long_array_name(@::stride, another_argument)\n".as_slice(),
+        b"x = some_really_long_array_name(@lo::stride, another_argument)\n".as_slice(),
+    ] {
+        let output = String::from_utf8(format_source(source, &config).unwrap().bytes).unwrap();
+        assert!(output.contains("&\n"), "expected wrapping: {output:?}");
+        assert!(
+            !output
+                .lines()
+                .any(|line| line.trim_end().ends_with(":: &")),
+            "multiple-subscript :: became a wrap seam: {output:?}"
+        );
+    }
+}
