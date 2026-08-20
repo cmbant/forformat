@@ -268,8 +268,7 @@ fn scan_multiple_subscripts(
                 scan.prefixes.push(index);
             }
             TokenKind::Operator
-                if matches!(token.text, b":" | b"::")
-                    && scan.active_depths.contains(&depth) =>
+                if matches!(token.text, b":" | b"::") && scan.active_depths.contains(&depth) =>
             {
                 scan.triplet_colons.push(index);
             }
