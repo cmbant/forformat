@@ -20,20 +20,28 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Document {
     pub lines: Vec<Vec<u8>>,
-    /// The dominant input line ending, restored on every output line.
+    /// The dominant input line ending, restored on every normal full/normalize
+    /// output line.
     pub newline: Newline,
     /// Whether the input ended with a line terminator.
     pub trailing_newline: bool,
+    /// Exact authored terminators, parallel to `lines`. Kept separately from
+    /// the dominant policy so canonicalization-only can promise that a token
+    /// rewrite does not silently normalize mixed line endings.
+    line_endings: Vec<Newline>,
+    preserve_line_endings: bool,
 }
 
 impl Document {
-    /// Split `source` into lines, recording the dominant terminator.
+    /// Split `source` into lines, recording the dominant terminator and the
+    /// exact terminator of every physical line.
     ///
-    /// Mixed terminators are normalized to the dominant one in full mode; this
-    /// is the Python contract.  Indent-only mode never builds a `Document`
-    /// and keeps per-line terminators untouched.
+    /// Mixed terminators are normalized to the dominant one in ordinary full
+    /// and normalize-only modes; canonicalization-only opts into exact
+    /// restoration with [`Self::preserve_original_line_endings`].
     pub fn from_bytes(source: &[u8]) -> Self {
         let mut lines = Vec::new();
+        let mut line_endings = Vec::new();
         let mut crlf = 0usize;
         let mut lf = 0usize;
         let mut start = 0usize;
@@ -42,18 +50,22 @@ impl Document {
                 continue;
             }
             let is_crlf = i > start && source[i - 1] == b'\r';
-            if is_crlf {
+            let newline = if is_crlf {
                 crlf += 1;
+                Newline::CrLf
             } else {
                 lf += 1;
-            }
+                Newline::Lf
+            };
             let end = if is_crlf { i - 1 } else { i };
             lines.push(source[start..end].to_vec());
+            line_endings.push(newline);
             start = i + 1;
         }
         let trailing_newline = start == source.len() && !source.is_empty();
         if !trailing_newline {
             lines.push(source[start..].to_vec());
+            line_endings.push(Newline::None);
         }
         Self {
             lines,
@@ -63,16 +75,39 @@ impl Document {
                 Newline::Lf
             },
             trailing_newline,
+            line_endings,
+            preserve_line_endings: false,
         }
+    }
+
+    /// Keep each input physical line's exact terminator when rendering.
+    ///
+    /// This is only meaningful while the line count is unchanged. [`set_lines`]
+    /// automatically drops the request if a structural pass changes that count.
+    pub(crate) fn preserve_original_line_endings(&mut self) {
+        self.preserve_line_endings = true;
     }
 
     /// Render the document with its terminator policy applied.
     pub fn to_bytes(&self) -> Vec<u8> {
+        if self.preserve_line_endings && self.line_endings.len() == self.lines.len() {
+            let mut out = Vec::with_capacity(self.lines.iter().map(|line| line.len() + 2).sum());
+            for (line, newline) in self.lines.iter().zip(&self.line_endings) {
+                out.extend_from_slice(line);
+                match newline {
+                    Newline::Lf => out.push(b'\n'),
+                    Newline::CrLf => out.extend_from_slice(b"\r\n"),
+                    Newline::None => {}
+                }
+            }
+            return out;
+        }
+
         let terminator: &[u8] = match self.newline {
             Newline::CrLf => b"\r\n",
             _ => b"\n",
         };
-        let mut out = Vec::with_capacity(self.lines.iter().map(|l| l.len() + 2).sum());
+        let mut out = Vec::with_capacity(self.lines.iter().map(|line| line.len() + 2).sum());
         for (i, line) in self.lines.iter().enumerate() {
             out.extend_from_slice(line);
             if i + 1 < self.lines.len() || self.trailing_newline {
@@ -85,7 +120,7 @@ impl Document {
     /// Render with LF terminators, which is what the layout engine and the
     /// statement analyzer consume while passes are running.
     pub fn to_lf_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.lines.iter().map(|l| l.len() + 1).sum());
+        let mut out = Vec::with_capacity(self.lines.iter().map(|line| line.len() + 1).sum());
         for (i, line) in self.lines.iter().enumerate() {
             out.extend_from_slice(line);
             if i + 1 < self.lines.len() || self.trailing_newline {
@@ -95,8 +130,11 @@ impl Document {
         out
     }
 
-    /// Replace the line list, keeping the terminator policy.
+    /// Replace the line list, keeping the dominant terminator policy.
     pub fn set_lines(&mut self, lines: Vec<Vec<u8>>) {
+        if lines.len() != self.lines.len() {
+            self.preserve_line_endings = false;
+        }
         self.lines = lines;
     }
 
@@ -195,6 +233,15 @@ mod tests {
         let mostly_lf = Document::from_bytes(b"a\nb\nc\r\n");
         assert_eq!(mostly_lf.newline, Newline::Lf);
         assert_eq!(mostly_lf.to_bytes(), b"a\nb\nc\n");
+    }
+
+    #[test]
+    fn exact_mixed_terminators_can_be_preserved() {
+        let source = b"a\r\nb\nc\r\nlast";
+        let mut document = Document::from_bytes(source);
+        document.preserve_original_line_endings();
+        document.lines[1] = b"B".to_vec();
+        assert_eq!(document.to_bytes(), b"a\r\nB\nc\r\nlast");
     }
 
     #[test]

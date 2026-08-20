@@ -7,9 +7,10 @@ mapping, and interactions. Legacy findent spellings that are only compatibility 
 here.
 
 Options configure formatter **policy** rather than exposing every internal pass. Full and
-normalize-only mode always perform some safe normalization needed by the format contract, such as
-project/local declaration-driven casing and rejoining lexical tokens split by continuations. The
-switches below control the behaviours intended to be user choices.
+normalize-only mode perform the safe normalization required by their format contracts, including
+project/local declaration-driven casing and lexical continuation handling. Canonicalize-only keeps
+only token/spelling canonicalization and deliberately preserves authored presentation whitespace and
+physical layout. The switches below control the behaviours intended to be user choices.
 
 ## Quick examples
 
@@ -37,6 +38,18 @@ Uppercase recognized language words and wrap to a 100-column budget:
 forformat --keyword-case=upper --line-length=100 src/module.f90
 ```
 
+Canonicalize language spelling without reformatting authored whitespace:
+
+```sh
+forformat --canonicalize-only src/module.f90
+```
+
+Repack existing continuations against the current line-length policy:
+
+```sh
+forformat --rewrap --line-length=100 src/module.f90
+```
+
 Format an editor buffer from stdin while using the rest of the checkout for declaration context:
 
 ```sh
@@ -56,8 +69,16 @@ forformat --stdout src/module.f90 --context-path=src --context-path=modules
 | `--full` | `mode = "full"` | normalization, wrapping, and structural layout | yes |
 | `--indent-only` | `mode = "indent-only"` | findent-compatible layout; style controls are ignored | no |
 | `--normalize-only` | `mode = "normalize-only"` | normalization only; no layout or wrapping | no |
+| `--canonicalize-only` | `mode = "canonicalize-only"` | canonical token/spelling changes without whitespace or layout normalization | no |
 
 Mode switches are valueless on the command line. In TOML use the single `mode` key.
+
+Canonicalize-only preserves indentation, incidental horizontal whitespace, comments, blank-line
+structure, continuation layout, trailing whitespace, and each physical line's original LF/CRLF
+terminator. Canonical replacements may still contain whitespace that is intrinsic to the replacement
+spelling: for example `enddo` becomes `end do`, `endmodule` becomes `end module`, and `go to` may
+become `goto`. This is therefore a promise not to make **whitespace-only formatting edits**, not a
+promise that the byte count of every whitespace run can never change as part of a token rewrite.
 
 ## Selecting input and output
 
@@ -165,7 +186,9 @@ key is `indent_contains` and accepts either a non-negative integer or `"restart"
 
 ## Full/normalization style
 
-These controls affect `--full` and `--normalize-only`. `--indent-only` deliberately ignores them.
+These controls affect `--full` and `--normalize-only`. Canonicalize-only applies controls that change
+canonical token/spelling, but ignores presentation-only whitespace, blank-line, continuation-marker,
+and alignment effects. `--indent-only` deliberately ignores these style controls.
 
 | CLI / TOML key | Values | Default | Effect |
 | --- | --- | --- | --- |
@@ -186,7 +209,7 @@ These controls affect `--full` and `--normalize-only`. `--indent-only` deliberat
 | `--uppercase-single-l[=BOOL]` / `uppercase_single_l` | boolean | false | uppercase a lone identifier `l` |
 
 `--max-blank-lines=0` can remove separators inserted by `--program-unit-spacing=true`, because the
-blank-line cap runs afterward.
+blank-line cap runs afterward. Canonicalize-only does not perform either blank-line transformation.
 
 ### Whitespace and alignment
 
@@ -197,7 +220,8 @@ blank-line cap runs afterward.
 | `--align-comments=BOOL` | `align_comments = BOOL` | false | align/shrink trailing-comment runs |
 
 When declaration or comment alignment owns its corresponding gap, `--ws-remred` leaves that gap for
-the alignment pass instead of collapsing it first.
+the alignment pass instead of collapsing it first. Canonicalize-only bypasses structural layout and
+therefore does not run these whitespace/alignment effects.
 
 ### END completion
 
@@ -206,17 +230,30 @@ the alignment pass instead of collapsing it first.
 or disable the transformation. `--refactor-procedures` is an accepted compatibility alias; prefer
 `--refactor-end`. The configuration key is `refactor_end`.
 
+END completion is also available in canonicalize-only mode. In that mode the scope-aware END text is
+replaced in place while retaining the authored leading indentation, trailing horizontal whitespace,
+comment gap, and line terminator.
+
 ## Wrapping
 
 | CLI | Configuration | Default | Meaning |
 | --- | --- | --- | --- |
 | `--wrap[=BOOL]` | `wrap = BOOL` | true | enable statement reflow in full mode |
 | `--no-wrap[=BOOL]` | `no_wrap = BOOL` | false | negated compatibility spelling |
+| `--rewrap[=BOOL]` | `rewrap = BOOL` | false | repack eligible authored continuations through the normal wrapper |
 | `--line-length=N` | `line_length = N` | `120` | emitted line-length budget |
 
 The line length is a budget, not a guarantee. A statement with no safe break point is emitted long
 rather than split unsafely. Wrapping uses the active indentation and parenthesis-alignment plan when
 choosing continuation columns.
+
+`--rewrap` asks full mode to reconsider existing safe continuation breaks even when every authored
+physical line already fits. The statement is joined logically first and then handed to the same
+fixed-point wrapper used for ordinary over-budget statements: it may collapse to one line when the
+joined form fits, or receive a completely fresh set of breaks at the active line-length budget.
+Groups that the existing wrapper cannot safely reflow, including protected/comment-bearing shapes,
+retain their authored continuation layout. `--rewrap=false` restores the normal overflow-only policy;
+a later `--no-wrap` disables the wrapping stage entirely.
 
 ## Preprocessor definitions
 
@@ -285,7 +322,7 @@ keys: `all`, `all-files`, `check`, `config`, `diff`, `isolated`, `last-indent`, 
 ## Boolean syntax
 
 Boolean-valued options accept `true`/`false`, `yes`/`no`, or `1`/`0`. Optional boolean switches such
-as `--wrap`, `--indent-ampersand`, and `--no-submodules` use the bare spelling as `true`.
+as `--wrap`, `--rewrap`, `--indent-ampersand`, and `--no-submodules` use the bare spelling as `true`.
 
 Negated options apply the value to the *negated state*: `--no-wrap` disables wrapping, while
 `--no-wrap=false` explicitly leaves wrapping enabled.

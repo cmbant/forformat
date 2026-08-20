@@ -73,6 +73,10 @@ pub enum KeywordCase {
 /// Opinionated full-mode normalization choices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StyleConfig {
+    /// Whether presentation whitespace belongs to normalization. The
+    /// `--canonicalize-only` preset turns this off while keeping token/spelling
+    /// canonicalization active.
+    pub normalize_whitespace: bool,
     pub keyword_case: KeywordCase,
     pub relational_symbols: bool,
     pub array_brackets: bool,
@@ -92,6 +96,7 @@ pub struct StyleConfig {
 impl Default for StyleConfig {
     fn default() -> Self {
         Self {
+            normalize_whitespace: true,
             keyword_case: KeywordCase::Lower,
             relational_symbols: true,
             array_brackets: true,
@@ -224,6 +229,7 @@ fn read_config(
                 "full" => "--full",
                 "indent-only" | "indent_only" => "--indent-only",
                 "normalize-only" | "normalize_only" => "--normalize-only",
+                "canonicalize-only" | "canonicalize_only" => "--canonicalize-only",
                 other => {
                     return Err(crate::error::FormatError::InvalidOption(format!(
                         "configuration key `mode` in {} has unknown value `{other}`",
@@ -359,7 +365,7 @@ fn config_key_priority(key: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{config_args, config_key_priority, FormatConfig, KeywordCase};
+    use super::{config_args, config_key_priority, FormatConfig, FormatMode, KeywordCase};
     use crate::cli::{parse, Command};
     use std::fs;
 
@@ -448,6 +454,18 @@ mod tests {
     }
 
     #[test]
+    fn canonicalize_mode_and_rewrap_load_from_toml() {
+        let config = config_from_text(
+            "canonicalize-rewrap",
+            "mode = 'canonicalize-only'\nrewrap = true\n",
+        );
+        assert_eq!(config.mode, FormatMode::NormalizeOnly);
+        assert!(!config.style.normalize_whitespace);
+        assert!(config.rewrap);
+        assert!(config.wrap.enabled);
+    }
+
+    #[test]
     fn style_keys_load_from_the_standalone_toml_shape() {
         let config = config_from_text(
             "style-options",
@@ -503,11 +521,12 @@ mod tests {
     fn boolean_switches_keep_false_values_when_loaded_from_toml() {
         let config = config_from_text(
             "boolean-switches",
-            "uppercase_single_l = false\nrefactor_end = false\nno_wrap = false\n",
+            "uppercase_single_l = false\nrefactor_end = false\nno_wrap = false\nrewrap = false\n",
         );
 
         assert!(!config.uppercase_single_l);
         assert!(!config.refactor_end);
+        assert!(!config.rewrap);
         assert!(config.wrap.enabled);
     }
 }
@@ -556,6 +575,8 @@ pub struct FormatConfig {
     pub mode: FormatMode,
     /// Full-mode reflow policy.
     pub wrap: WrapConfig,
+    /// Repack already-continued eligible statements through the normal wrapper.
+    pub rewrap: bool,
     /// Command-line macro definitions, in the order given.
     pub defines: Vec<MacroDefine>,
     /// Full-mode lexical and structural style choices.
@@ -627,6 +648,7 @@ impl Default for FormatConfig {
         Self {
             mode: FormatMode::Full,
             wrap: WrapConfig::default(),
+            rewrap: false,
             defines: Vec::new(),
             style: StyleConfig::default(),
             uppercase_single_l: false,

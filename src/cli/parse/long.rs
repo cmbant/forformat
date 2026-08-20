@@ -198,14 +198,25 @@ where
         OptionId::IndentOnly => {
             reject_value(name, &value)?;
             draft.config.mode = FormatMode::IndentOnly;
+            draft.config.style.normalize_whitespace = true;
         }
         OptionId::Full => {
             reject_value(name, &value)?;
             draft.config.mode = FormatMode::Full;
+            draft.config.style.normalize_whitespace = true;
         }
         OptionId::NormalizeOnly => {
             reject_value(name, &value)?;
             draft.config.mode = FormatMode::NormalizeOnly;
+            draft.config.style.normalize_whitespace = true;
+        }
+        OptionId::CanonicalizeOnly => {
+            reject_value(name, &value)?;
+            // Canonicalization-only is a normalize-only preset: it takes the
+            // existing no-layout return path while line rules suppress
+            // whitespace-only edits.
+            draft.config.mode = FormatMode::NormalizeOnly;
+            draft.config.style.normalize_whitespace = false;
         }
         OptionId::Wrap => {
             draft.config.wrap.enabled = value
@@ -221,6 +232,20 @@ where
                 .transpose()?
                 .unwrap_or(true);
             draft.config.wrap.enabled = !disabled;
+        }
+        OptionId::Rewrap => {
+            let enabled = value
+                .as_deref()
+                .map(parse_bool)
+                .transpose()?
+                .unwrap_or(true);
+            draft.config.rewrap = enabled;
+            if enabled {
+                // Rewrapping extends the normal wrapping stage. A later
+                // --no-wrap can still disable the stage because scalar CLI
+                // options are applied in order.
+                draft.config.wrap.enabled = true;
+            }
         }
         OptionId::LineLength => {
             draft.config.wrap.line_length = parse_num(&cursor.required_long(&mut value)?)?
