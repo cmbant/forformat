@@ -14,9 +14,7 @@ fn conditional_lines(text: &str) -> Vec<&str> {
 #[test]
 fn conditional_continuation_spellings_converge_to_valid_exact_output() {
     for continuation in ["!$ & arg = 1)", "!$\t& arg = 1)", "!$& arg = 1)"] {
-        let source = format!(
-            "program p\n!$ call f( &\n{continuation}\nend program p\n"
-        );
+        let source = format!("program p\n!$ call f( &\n{continuation}\nend program p\n");
         let config = full();
         let output = format_source(source.as_bytes(), &config).unwrap().bytes;
         let text = String::from_utf8(output.clone()).unwrap();
