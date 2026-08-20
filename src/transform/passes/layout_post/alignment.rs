@@ -15,7 +15,7 @@ use crate::{
     error::FormatError,
     source::{
         regions::{comment_start, line_comment_start, stepped_over_by_continuation},
-        syntax::{conditional_compilation_prefix, is_directive_comment},
+        syntax::{conditional_compilation_prefix, is_directive_comment, SourceStream},
         tokens::{tokenize, TokenKind},
         LexState,
     },
@@ -220,11 +220,10 @@ struct DeclarationStreams {
 }
 
 impl DeclarationStreams {
-    fn select_mut(&mut self, conditional: bool) -> &mut DeclarationStreamState {
-        if conditional {
-            &mut self.conditional
-        } else {
-            &mut self.ordinary
+    fn select_mut(&mut self, stream: SourceStream) -> &mut DeclarationStreamState {
+        match stream {
+            SourceStream::Ordinary => &mut self.ordinary,
+            SourceStream::Conditional => &mut self.conditional,
         }
     }
 }
@@ -236,22 +235,28 @@ struct LexStreams {
 }
 
 impl LexStreams {
-    fn select_mut(&mut self, conditional: bool) -> &mut LexState {
-        if conditional {
-            &mut self.conditional
-        } else {
-            &mut self.ordinary
+    fn select_mut(&mut self, stream: SourceStream) -> &mut LexState {
+        match stream {
+            SourceStream::Ordinary => &mut self.ordinary,
+            SourceStream::Conditional => &mut self.conditional,
         }
     }
 }
 
-/// The `::` a standalone line offers for alignment, scanned from a clean state.
+/// The `::` a standalone physical line offers for alignment, scanned from a
+/// clean state. Conditional-compilation sentinels are source prefixes rather
+/// than Fortran body bytes, so strip them before tokenizing and translate the
+/// returned column back to the physical line.
 pub(crate) fn declaration_separator_info(line: &[u8]) -> Option<(usize, usize, usize)> {
+    let prefix = conditional_compilation_prefix(line);
+    let body_start = prefix.map_or(0, |prefix| prefix.body_start);
+    let body = &line[body_start..];
     declaration_separator_info_in(
-        line,
+        body,
         &mut LexState::default(),
         &mut MultipleSubscriptState::default(),
     )
+    .map(|(column, before, after)| (body_start + column, before, after))
 }
 
 /// The same, for one physical line while carrying any active multiple-subscript
@@ -379,7 +384,7 @@ fn declaration_separator_columns(
             let prefix = conditional_compilation_prefix(line);
             let body_start = prefix.map_or(0, |prefix| prefix.body_start);
             let body = &line[body_start..];
-            let stream = streams.select_mut(prefix.is_some());
+            let stream = streams.select_mut(SourceStream::from(prefix));
             // Preserve the same conservative editor-buffer behavior as
             // SourceBuffer: malformed/inactive code between the halves of a
             // protected literal is transparent unless it resumes with `&`.
@@ -428,7 +433,7 @@ fn column_info(
             let prefix = conditional_compilation_prefix(line);
             let body_start = prefix.map_or(0, |prefix| prefix.body_start);
             let body = &line[body_start..];
-            let lex = streams.select_mut(prefix.is_some());
+            let lex = streams.select_mut(SourceStream::from(prefix));
             if lex.in_literal() && !body.trim_ascii_start().starts_with(b"&") {
                 return None;
             }
