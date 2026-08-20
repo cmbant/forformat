@@ -226,10 +226,7 @@ fn declaration_separator_info_in(line: &[u8], lex: &mut LexState) -> Option<(usi
 /// `::` is also the adjacent-colon form of a Fortran 2023 multiple-subscript
 /// triplet. At one delimiter depth, a comma ends the current subscript item;
 /// deeper tokens belong to nested expressions and do not hide its leading `@`.
-fn is_multiple_subscript_double_colon(
-    tokens: &[crate::source::Token<'_>],
-    index: usize,
-) -> bool {
+fn is_multiple_subscript_double_colon(tokens: &[crate::source::Token<'_>], index: usize) -> bool {
     let depth = tokens[index].depth;
     for token in tokens[..index].iter().rev() {
         if token.depth > depth {
