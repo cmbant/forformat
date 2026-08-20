@@ -2,7 +2,9 @@ use super::continuation::leading_ampersand;
 use crate::{
     config::{FormatConfig, FormatMode},
     error::FormatError,
-    source::{Newline, PhysicalLineKind, SourceBuffer},
+    source::{
+        syntax::conditional_compilation_prefix, Newline, PhysicalLineKind, SourceBuffer,
+    },
 };
 use std::io::Write;
 
@@ -190,16 +192,19 @@ pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
     }
 
     let mut source = trim_start(original);
-    let omp = line.omp && config.openmp;
-    if omp {
-        // SourceBuffer only marks the exact free-form sentinel `!$ ` as
-        // OpenMP.  Near-misses remain ordinary comments and never arrive
-        // here.
-        source = trim_start(source.get(3..).unwrap_or_default());
+    let conditional = line.omp && config.openmp;
+    if conditional {
+        // The input prefix is not always three bytes: a valid continuation can
+        // use the compact `!$&` spelling. Parse the source-owned prefix and
+        // start at its Fortran body, then emit one canonical three-column
+        // `!$ ` prefix below.
+        let prefix = conditional_compilation_prefix(original)
+            .expect("conditional SourceBuffer line has a parsed sentinel prefix");
+        source = trim_start(&original[prefix.body_start..]);
     }
 
     let mut target = indent;
-    if omp {
+    if conditional {
         target = target.saturating_sub(3);
     }
     if !first {
@@ -212,10 +217,10 @@ pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
         } else if config.indent_continuation && previous_cont {
             target = target.saturating_add(config.continuation_indent);
         } else if !config.indent_continuation && previous_cont {
-            target = if omp { 0 } else { leading_len(original) };
+            target = if conditional { 0 } else { leading_len(original) };
         }
     }
-    if omp && config.max_indent != 0 {
+    if conditional && config.max_indent != 0 {
         target = target.min(config.max_indent.saturating_sub(3));
     }
     if (!first || previous_cont) && is_label_fragment(source) {
@@ -226,7 +231,7 @@ pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
         source = replacement;
     }
 
-    if omp {
+    if conditional {
         out.write_all(b"!$").map_err(FormatError::Write)?;
         if trim_end_horizontal(source).is_empty() {
             return write_newline(buf, index, out);
@@ -495,6 +500,12 @@ mod tests {
             b"!$    call x\n"
         );
 
+        let compact = SourceBuffer::new(b"!$& arg = 1)\n").unwrap();
+        assert_eq!(
+            emit_line(&compact, 0, first(0), &style, None),
+            b"!$ & arg = 1)\n"
+        );
+
         let empty_sentinels = SourceBuffer::new(b"!$\n!$ \n").unwrap();
         assert_eq!(
             emit_line(&empty_sentinels, 0, first(0), &style, None),
@@ -517,7 +528,6 @@ mod tests {
             emit_line(&labeled, 0, first(3), &EmitStyle::new(&label_right), None),
             b"   10 x=1\n"
         );
-
         let source = SourceBuffer::new(b"x = f(a, &\n  b)\n").unwrap();
         let config = FormatConfig::default();
         let style = EmitStyle::new(&config);
