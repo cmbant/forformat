@@ -2,7 +2,15 @@
 
 use crate::{
     error::FormatError,
-    source::{regions, regions::LexState, syntax::conditional_compilation_body_start, RegionKind},
+    source::{
+        regions,
+        regions::LexState,
+        syntax::{
+            conditional_compilation_body_start, conditional_compilation_prefix,
+            ConditionalPrefixKind,
+        },
+        RegionKind,
+    },
     transform::{
         document::Document,
         pipeline::{Changed, PassContext},
@@ -156,10 +164,6 @@ fn is_lexical_token_continuation(first: &[u8], second: &[u8]) -> bool {
 }
 
 /// Slice away the conditional-compilation sentinel from a physical line.
-///
-/// `SourceBuffer` and this pass share one recognizer for `!$` followed by a
-/// horizontal blank, so continuation syntax never mistakes a valid sentinel
-/// for a comment marker.
 fn fortran_code(line: &[u8]) -> &[u8] {
     &line[fortran_code_start(line)..]
 }
@@ -204,13 +208,6 @@ fn statement_neighbours(lines: &[Vec<u8>]) -> (Vec<Option<usize>>, Vec<Option<us
 }
 
 /// Which continuation stream a physical line belongs to.
-///
-/// Conditional-compilation lines form their own stream, and a statement only
-/// ever continues within one stream. `!$ x&` splices with `!$ &y` under both
-/// readings of the sentinel, so those two are neighbours. An ordinary `code&`
-/// splices with `&more` across an intervening conditional line only when OpenMP
-/// is off — with OpenMP on, that source does not compile at all — so the
-/// conditional line is stepped over rather than allowed to break the token.
 fn conditional_stream(line: &[u8]) -> bool {
     conditional_compilation_body_start(line).is_some()
 }
@@ -267,7 +264,8 @@ fn ends_with_continuation_before(line: &[u8], comment: Option<usize>) -> bool {
 }
 
 fn remove_leading_continuation(line: &[u8]) -> Vec<u8> {
-    let code_start = fortran_code_start(line);
+    let prefix = conditional_compilation_prefix(line);
+    let code_start = prefix.map_or(0, |prefix| prefix.body_start);
     let code = &line[code_start..];
     let mut start = 0;
     while start < code.len() && code[start].is_ascii_whitespace() {
@@ -281,6 +279,12 @@ fn remove_leading_continuation(line: &[u8]) -> Vec<u8> {
         next += 1;
     }
     let mut result = line[..code_start + start].to_vec();
+    if prefix.is_some_and(|prefix| prefix.kind == ConditionalPrefixKind::CompactContinuation) {
+        // Removing the `&` from `!$& foo` must leave a valid conditional
+        // sentinel. Without this separator the result would be the joined
+        // near-miss `!$foo`, which is an ordinary comment rather than code.
+        result.extend_from_slice(b" ");
+    }
     result.extend_from_slice(&code[next..]);
     result
 }
@@ -535,6 +539,29 @@ mod tests {
         assert_eq!(document.lines[1], b"  b".to_vec());
         assert_eq!(document.lines[2], b"y = 'a &".to_vec());
         assert_eq!(document.lines[3], b" &b'".to_vec());
+    }
+
+    #[test]
+    fn compact_conditional_marker_removal_keeps_a_valid_sentinel() {
+        let mut document = Document::from_bytes(b"!$ call f( &\n!$& arg = 1)\n");
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+        assert_eq!(
+            normalize_continuations(&mut document, &cx(&local, &project)).unwrap(),
+            Changed::Text
+        );
+        assert_eq!(document.lines[0], b"!$ call f( &".to_vec());
+        assert_eq!(document.lines[1], b"!$ arg = 1)".to_vec());
+    }
+
+    #[test]
+    fn compact_conditional_lexical_marker_is_not_removed() {
+        let mut document = Document::from_bytes(b"!$ sub&\n!$&routine sub\n");
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+        normalize_continuations(&mut document, &cx(&local, &project)).unwrap();
+        assert_eq!(document.lines[0], b"!$ sub&".to_vec());
+        assert_eq!(document.lines[1], b"!$&routine sub".to_vec());
     }
 
     /// A token split across a continuation keeps its `&` glued to the token
