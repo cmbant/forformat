@@ -14,8 +14,9 @@ use crate::{
     config::FormatConfig,
     error::FormatError,
     source::{
-        regions::{comment_start, line_code_spans, line_comment_start},
+        regions::{comment_start, line_comment_start},
         syntax::is_directive_comment,
+        tokens::{tokenize, TokenKind},
         LexState,
     },
     transform::{
@@ -201,15 +202,13 @@ pub(crate) fn declaration_separator_info(line: &[u8]) -> Option<(usize, usize, u
 
 /// The same, for one line of a group whose lexical state is already known.
 fn declaration_separator_info_in(line: &[u8], lex: &mut LexState) -> Option<(usize, usize, usize)> {
-    let mut found = None;
-    line_code_spans(lex, line, |start, span| {
-        if found.is_none() {
-            if let Some(at) = span.windows(2).position(|pair| pair == b"::") {
-                found = Some(start + at);
-            }
-        }
-    });
-    let index = found?;
+    let tokens = tokenize(line, lex);
+    let (_, separator) = tokens.iter().enumerate().find(|(index, token)| {
+        token.kind == TokenKind::Operator
+            && token.text == b"::"
+            && !is_multiple_subscript_double_colon(&tokens, *index)
+    })?;
+    let index = separator.span.start;
     let mut before = index;
     while before > 0 && matches!(line[before - 1], b' ' | b'\t') {
         before -= 1;
@@ -222,6 +221,28 @@ fn declaration_separator_info_in(line: &[u8], lex: &mut LexState) -> Option<(usi
         return None;
     }
     Some((index, index - before, after - index - 2))
+}
+
+/// `::` is also the adjacent-colon form of a Fortran 2023 multiple-subscript
+/// triplet. At one delimiter depth, a comma ends the current subscript item;
+/// deeper tokens belong to nested expressions and do not hide its leading `@`.
+fn is_multiple_subscript_double_colon(
+    tokens: &[crate::source::Token<'_>],
+    index: usize,
+) -> bool {
+    let depth = tokens[index].depth;
+    for token in tokens[..index].iter().rev() {
+        if token.depth > depth {
+            continue;
+        }
+        if token.depth < depth || token.kind == TokenKind::Comma {
+            return false;
+        }
+        if token.kind == TokenKind::Operator && token.text == b"@" {
+            return true;
+        }
+    }
+    false
 }
 
 fn preprocessor_lines(lines: &[Vec<u8>]) -> Vec<bool> {
