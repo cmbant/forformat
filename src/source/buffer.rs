@@ -96,8 +96,9 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         let code_offset = conditional_start.unwrap_or(first);
         let mut comment = None;
         if matches!(kind, PhysicalLineKind::Code | PhysicalLineKind::FindentFix) {
-            if let Some(i) = super::regions::line_comment_start(state, content) {
-                comment = Some((span.start + i) as u32..span.end as u32);
+            let code = &content[code_offset..];
+            if let Some(i) = super::regions::line_comment_start(state, code) {
+                comment = Some((span.start + code_offset + i) as u32..span.end as u32);
             }
         }
         // The other kinds deliberately leave `state` alone.  A continued
