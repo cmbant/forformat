@@ -97,8 +97,16 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         if matches!(kind, PhysicalLineKind::Code | PhysicalLineKind::FindentFix) {
             let code = &content[code_offset..];
             let state = &mut states[usize::from(omp)];
-            if let Some(i) = super::regions::line_comment_start(state, code) {
-                comment = Some((span.start + code_offset + i) as u32..span.end as u32);
+            // A free-form character literal can only resume on a physical line
+            // whose first nonblank body byte is `&`. If malformed or inactive
+            // source puts another code-looking line in between, step over it
+            // rather than letting it close/reset the protected context. This is
+            // the conservative byte-preservation rule used for editor buffers.
+            let can_scan = !state.in_literal() || code.trim_ascii_start().starts_with(b"&");
+            if can_scan {
+                if let Some(i) = super::regions::line_comment_start(state, code) {
+                    comment = Some((span.start + code_offset + i) as u32..span.end as u32);
+                }
             }
         }
         // Non-code lines leave both stream states alone. A continued statement
@@ -197,6 +205,13 @@ mod tests {
         let conditional = SourceBuffer::new(b"!$ x = 'ab &\ny = 2\n!$&cd!ef'\n").unwrap();
         assert!(conditional.lines[2].comment_span.is_none());
         assert_eq!(conditional.code_bytes(&conditional.lines[2]), b"&cd!ef'");
+    }
+
+    #[test]
+    fn open_literal_steps_over_non_continuation_code_in_its_stream() {
+        let buffer = SourceBuffer::new(b"!$ s = 'abc &\n!$ y = 2\n!$ &def!ghi'\n").unwrap();
+        assert!(buffer.lines[2].comment_span.is_none());
+        assert_eq!(buffer.code_bytes(&buffer.lines[2]), b"&def!ghi'");
     }
 
     #[test]
