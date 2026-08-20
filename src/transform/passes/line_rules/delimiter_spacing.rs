@@ -22,12 +22,13 @@ pub(crate) fn normalize_delimiter_spacing_with_state(
     let tokens = tokenize(&text, &mut incoming.clone());
     if !continued_statement && is_declaration_statement(&tokens) {
         if let Some(separator) = top_level_separator(&tokens) {
-            text = reorder_optional_attribute(&text, tokens[separator].span.start, incoming);
+            text = reorder_optional_attribute(&text, tokens[separator].span.start, incoming.clone());
         } else {
-            text = normalize_old_style_declaration(&text, incoming);
+            text = normalize_old_style_declaration(&text, incoming.clone());
         }
     }
 
+    let compact_state = incoming.clone();
     let mut state = incoming;
     let regions = state.regions(&text);
     let mut result = Vec::with_capacity(text.len());
@@ -45,7 +46,7 @@ pub(crate) fn normalize_delimiter_spacing_with_state(
             result.extend_from_slice(&text[region.range.clone()]);
         }
     }
-    result
+    compact_multiple_subscript_spacing(&result, compact_state)
 }
 
 fn reorder_optional_attribute(line: &[u8], separator: usize, incoming: LexState) -> Vec<u8> {
@@ -199,4 +200,81 @@ fn normalize_delimiters_in_code(code: &[u8], out: &mut Vec<u8>, following_conten
         out.push(code[index]);
         index += 1;
     }
+}
+
+/// Fortran 2023 multiple subscripts use `@` as a prefix and their optional
+/// triplet colons are part of that same compact designator: `@V`, `@[1, 3]`,
+/// `@lo:hi:step`, and `@::step`. Keep only those punctuation seams compact;
+/// ordinary section-subscript colons in sibling items retain their authored
+/// spacing. Tokenization keeps strings and comments out of this rewrite.
+fn compact_multiple_subscript_spacing(line: &[u8], mut state: LexState) -> Vec<u8> {
+    let tokens = tokenize(line, &mut state);
+    let mut compact_gaps: Vec<std::ops::Range<usize>> = Vec::new();
+
+    for (index, at) in tokens.iter().enumerate() {
+        if at.kind != TokenKind::Operator || at.text != b"@" {
+            continue;
+        }
+
+        if let Some(previous) = index.checked_sub(1).and_then(|i| tokens.get(i)) {
+            if matches!(previous.kind, TokenKind::LParen | TokenKind::LBracket)
+                && horizontal_gap(line, previous.span.end, at.span.start)
+                && previous.span.end < at.span.start
+            {
+                compact_gaps.push(previous.span.end..at.span.start);
+            }
+        }
+
+        if let Some(next) = tokens.get(index + 1) {
+            if !matches!(next.kind, TokenKind::Ampersand | TokenKind::Comment)
+                && horizontal_gap(line, at.span.end, next.span.start)
+                && at.span.end < next.span.start
+            {
+                compact_gaps.push(at.span.end..next.span.start);
+            }
+        }
+
+        for (offset, punctuation) in tokens.iter().enumerate().skip(index + 1) {
+            if punctuation.kind == TokenKind::Comment || punctuation.depth < at.depth {
+                break;
+            }
+            if punctuation.depth == at.depth && punctuation.kind == TokenKind::Comma {
+                break;
+            }
+            if punctuation.depth != at.depth
+                || punctuation.kind != TokenKind::Operator
+                || !matches!(punctuation.text, b":" | b"::")
+            {
+                continue;
+            }
+
+            if let Some(previous) = offset.checked_sub(1).and_then(|i| tokens.get(i)) {
+                if horizontal_gap(line, previous.span.end, punctuation.span.start)
+                    && previous.span.end < punctuation.span.start
+                {
+                    compact_gaps.push(previous.span.end..punctuation.span.start);
+                }
+            }
+            if let Some(next) = tokens.get(offset + 1) {
+                if !matches!(next.kind, TokenKind::Ampersand | TokenKind::Comment)
+                    && horizontal_gap(line, punctuation.span.end, next.span.start)
+                    && punctuation.span.end < next.span.start
+                {
+                    compact_gaps.push(punctuation.span.end..next.span.start);
+                }
+            }
+        }
+    }
+
+    if compact_gaps.is_empty() {
+        return line.to_vec();
+    }
+    compact_gaps.sort_by_key(|range| (range.start, range.end));
+    compact_gaps.dedup_by(|left, right| left.start == right.start && left.end == right.end);
+
+    let mut edits = EditBuffer::new(line);
+    for gap in compact_gaps {
+        edits.replace(gap, b"");
+    }
+    edits.finish()
 }
