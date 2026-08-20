@@ -138,7 +138,13 @@ impl LineState {
         self.entity_list = EntityListCursor::default();
     }
 
-    fn advance(&mut self, code: &[u8], cx: &PassContext, line_index: usize) {
+    fn advance(
+        &mut self,
+        code: &[u8],
+        incoming: LexState,
+        cx: &PassContext,
+        line_index: usize,
+    ) {
         self.continued_statement = trailing_ampersand(code);
         self.continued_infix = trailing_continuation_operand(code);
         self.continued_named_parameter = self.continued_statement && is_call_group(cx, line_index);
@@ -147,11 +153,13 @@ impl LineState {
             self.continued_statement && common::trailing_component_selector(code);
         common::delimiter_spacing::advance_multiple_subscript_depths(
             code,
+            incoming,
             self.open_groups.len(),
             &mut self.multiple_subscript_depths,
         );
-        self.entity_list.advance(code, self.open_groups.len());
-        fold_open_groups(code, &mut self.open_groups);
+        self.entity_list
+            .advance(code, self.open_groups.len(), incoming);
+        fold_open_groups(code, &mut self.open_groups, incoming);
         if !self.continued_statement {
             self.open_groups.clear();
             self.multiple_subscript_depths.clear();
@@ -237,6 +245,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
         // like literal text, and writing it back would let the apostrophe in
         // prose like `! don't` close the literal, so the `!` in `&def!ghi'` on
         // the resumed line would be rewritten as a comment marker.
+        let incoming_lex = state.lex;
         let mut scratch = LexState::default();
         let lex = if matches!(kind, PhysicalLineKind::Comment | PhysicalLineKind::Blank) {
             &mut scratch
@@ -257,7 +266,12 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 physical.kind,
                 PhysicalLineKind::Code | PhysicalLineKind::FindentFix
             ) {
-                state.advance(cx.analysis.buffer.code_bytes(physical), cx, index);
+                state.advance(
+                    cx.analysis.buffer.code_bytes(physical),
+                    incoming_lex,
+                    cx,
+                    index,
+                );
             }
         }
 
@@ -538,8 +552,8 @@ struct EntityListCursor {
 }
 
 impl EntityListCursor {
-    fn advance(&mut self, line: &[u8], depth: usize) {
-        let mut state = LexState::default();
+    fn advance(&mut self, line: &[u8], depth: usize, incoming: LexState) {
+        let mut state = incoming;
         let mut depth = depth;
         for token in tokenize(line, &mut state) {
             match token.kind {
@@ -559,8 +573,8 @@ impl EntityListCursor {
     }
 }
 
-fn fold_open_groups(line: &[u8], open: &mut Vec<bool>) {
-    let mut state = LexState::default();
+fn fold_open_groups(line: &[u8], open: &mut Vec<bool>, incoming: LexState) {
+    let mut state = incoming;
     for token in tokenize(line, &mut state) {
         match token.kind {
             TokenKind::LParen => open.push(true),
