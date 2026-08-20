@@ -607,8 +607,7 @@ mod tests {
 
     #[test]
     fn unterminated_literal_without_continuation_does_not_leak_state() {
-        let mut document =
-            Document::from_bytes(b"x = 'unterminated\ny = a &\n  & b\n");
+        let mut document = Document::from_bytes(b"x = 'unterminated\ny = a &\n  & b\n");
         let local = FileFacts::default();
         let project = ProjectContext::empty();
         normalize_continuations(&mut document, &cx(&local, &project)).unwrap();
@@ -617,9 +616,8 @@ mod tests {
 
     #[test]
     fn conditional_compilation_lines_participate_in_continuation_state() {
-        let mut document = Document::from_bytes(
-            b"!$ sub&\n!$ &routine sub\n!$ x = a &\n!$   & b\n",
-        );
+        let mut document =
+            Document::from_bytes(b"!$ sub&\n!$ &routine sub\n!$ x = a &\n!$   & b\n");
         let local = FileFacts::default();
         let project = ProjectContext::empty();
         run(&mut document, &cx(&local, &project)).unwrap();
@@ -632,8 +630,7 @@ mod tests {
 
     #[test]
     fn conditional_compilation_line_stops_neighbour_search() {
-        let mut document =
-            Document::from_bytes(b"sub&\n!$ x = 1\n&routine sub\n");
+        let mut document = Document::from_bytes(b"sub&\n!$ x = 1\n&routine sub\n");
         let local = FileFacts::default();
         let project = ProjectContext::empty();
         normalize_continuations(&mut document, &cx(&local, &project)).unwrap();
