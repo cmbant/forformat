@@ -338,8 +338,9 @@ fn break_tier(tokens: &[Token], index: usize) -> Option<BreakTier> {
             // type-spec separators are useful breaks, but Fortran 2023 also
             // uses `::` inside compact `@` multiple-subscript triplets, where
             // splitting would break the designator's punctuation policy.
-            b"::" => (!is_multiple_subscript_double_colon(tokens, index))
-                .then_some(BreakTier::TypeSpec),
+            b"::" => {
+                (!is_multiple_subscript_double_colon(tokens, index)).then_some(BreakTier::TypeSpec)
+            }
             b"==" | b"/=" | b"<=" | b">=" | b"<" | b">" => Some(BreakTier::Comparison),
             b"//" => Some(BreakTier::Concatenation),
             // A `+` or `-` is a break candidate only when it is spelled as a
@@ -640,7 +641,8 @@ mod tests {
                 || position
                     > body[literal_start + 1..]
                         .iter()
-                        .position(|b| *b == b'\'').unwrap()
+                        .position(|b| *b == b'\'')
+                        .unwrap()
                         + literal_start,
             "break at {position} falls inside the literal"
         );
