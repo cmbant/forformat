@@ -550,7 +550,10 @@ mod tests {
         );
         assert_eq!(document.lines[0], b"if ((flag ? a : b)) then".to_vec());
         assert_eq!(document.lines[1], b"if ((flag ? a : b)) then".to_vec());
-        assert_eq!(document.lines[2], b"if (flag .and. '?' == '?') then".to_vec());
+        assert_eq!(
+            document.lines[2],
+            b"if (flag .and. '?' == '?') then".to_vec()
+        );
 
         let (local, scopes, analysis) = context(&document);
         let cx = pipeline::PassContext {
