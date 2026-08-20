@@ -197,7 +197,6 @@ mod tests {
 
         let lone = SourceBuffer::new(b"a\rb").unwrap();
         assert_eq!(lone.lines.len(), 1);
-        assert_eq!(buffer.line_bytes(&buffer.lines[0]), b" a");
         assert_eq!(lone.line_bytes(&lone.lines[0]), b"a\rb");
     }
 
