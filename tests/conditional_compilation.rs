@@ -50,3 +50,56 @@ fn compact_conditional_literal_continuation_keeps_the_required_ampersand() {
         assert_eq!(format_source(&output, &config).unwrap().bytes, output);
     }
 }
+
+#[test]
+fn conditional_multiple_subscripts_survive_continuation_and_forced_wrapping() {
+    let source = b"program p\n!$ x = some_really_long_array_name(@ lo : &\n!$& hi : step, @ base &\n!$& :: stride, another_argument, second_argument, third_argument, fourth_argument)\nend program p\n";
+    let mut config = full();
+    config.wrap.line_length = 48;
+
+    let output = format_source(source, &config).unwrap().bytes;
+    let text = String::from_utf8(output.clone()).unwrap();
+    let conditional: Vec<_> = text
+        .lines()
+        .filter(|line| line.trim_start().starts_with("!$"))
+        .collect();
+
+    assert!(
+        conditional.len() > 3,
+        "expected forced wrapping to add a conditional line:\n{text}"
+    );
+    assert!(
+        conditional
+            .iter()
+            .all(|line| line.trim_start().starts_with("!$ ")),
+        "generated conditional line lost its sentinel:\n{text}"
+    );
+    assert!(
+        conditional.iter().all(|line| line.len() <= 48),
+        "conditional wrap exceeded its budget:\n{text}"
+    );
+
+    let logical: String = conditional
+        .iter()
+        .flat_map(|line| {
+            line.trim_start()
+                .strip_prefix("!$ ")
+                .expect("all conditional lines use the canonical sentinel")
+                .chars()
+        })
+        .filter(|character| !character.is_whitespace() && *character != '&')
+        .collect();
+    assert!(logical.contains("@lo:hi:step"), "triplet state lost:\n{text}");
+    assert!(
+        logical.contains("@base::stride"),
+        "continued multiple-subscript :: was reinterpreted:\n{text}"
+    );
+    assert!(
+        !conditional.iter().any(|line| line.contains(":: "))
+            && !conditional
+                .iter()
+                .any(|line| line.trim_end().ends_with(":: &")),
+        "multiple-subscript :: was treated as declaration/type-spec punctuation:\n{text}"
+    );
+    assert_eq!(format_source(&output, &config).unwrap().bytes, output);
+}
