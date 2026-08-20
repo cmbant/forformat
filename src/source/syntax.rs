@@ -5,6 +5,26 @@
 
 use super::{Token, TokenKind};
 
+/// Start of the Fortran body of a free-form conditional-compilation line.
+///
+/// OpenMP conditional compilation uses `!$` followed by a blank.  Accept both
+/// horizontal blank spellings that the formatter already accepts elsewhere and
+/// consume exactly one of them, leaving any additional authored indentation in
+/// the body.  Joined spellings such as `!$OMP` and `!$acc`, and bare `!$`, are
+/// not conditional-compilation code.
+pub(crate) fn conditional_compilation_body_start(line: &[u8]) -> Option<usize> {
+    let start = line
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t'))?;
+    if !line
+        .get(start..)
+        .is_some_and(|rest| rest.starts_with(b"!$"))
+    {
+        return None;
+    }
+    matches!(line.get(start + 2), Some(b' ' | b'\t')).then_some(start + 3)
+}
+
 /// Number of leading tokens occupied by a declaration type head.
 ///
 /// This is shared by declaration indexing and continuation-line formatting so
@@ -100,8 +120,26 @@ pub(crate) fn is_directive_comment(comment: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{declaration_type_head_len, is_directive_comment, is_end_construct_keyword};
+    use super::{
+        conditional_compilation_body_start, declaration_type_head_len, is_directive_comment,
+        is_end_construct_keyword,
+    };
     use crate::source::tokens::tokens;
+
+    #[test]
+    fn conditional_compilation_requires_a_horizontal_blank() {
+        for (line, expected) in [
+            (b"!$ x".as_slice(), Some(3)),
+            (b"  !$\tx", Some(5)),
+            (b"!$  x", Some(3)),
+            (b"!$", None),
+            (b"!$OMP parallel", None),
+            (b"!$acc parallel", None),
+            (b"! ordinary", None),
+        ] {
+            assert_eq!(conditional_compilation_body_start(line), expected, "{line:?}");
+        }
+    }
 
     #[test]
     fn declaration_type_heads_cover_standard_history_and_safe_extensions() {
