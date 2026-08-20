@@ -177,13 +177,19 @@ mod tests {
     }
 
     #[test]
-    fn conditional_compilation_accepts_space_or_tab_sentinels() {
-        let buffer = SourceBuffer::new(b"!$ x = 1\n!$\ty = 2 ! note\n").unwrap();
-        assert!(buffer.lines[0].omp);
-        assert!(buffer.lines[1].omp);
+    fn conditional_compilation_accepts_initial_and_compact_continuation_sentinels() {
+        let buffer = SourceBuffer::new(
+            b"!$ x = 1\n!$\ty = 2 ! note\n!$ call f( &\n!$& arg = 1)\n",
+        )
+        .unwrap();
+        for line in &buffer.lines {
+            assert!(line.omp);
+        }
         assert_eq!(buffer.code_bytes(&buffer.lines[0]), b"x = 1");
         assert_eq!(buffer.code_bytes(&buffer.lines[1]), b"y = 2 ");
         assert!(buffer.lines[1].comment_span.is_some());
+        assert_eq!(buffer.code_bytes(&buffer.lines[2]), b"call f( &");
+        assert_eq!(buffer.code_bytes(&buffer.lines[3]), b"& arg = 1)");
     }
 
     #[test]
@@ -197,6 +203,7 @@ mod tests {
 
         let lone = SourceBuffer::new(b"a\rb").unwrap();
         assert_eq!(lone.lines.len(), 1);
+        assert_eq!(buffer.line_bytes(&buffer.lines[0]), b" a");
         assert_eq!(lone.line_bytes(&lone.lines[0]), b"a\rb");
     }
 
