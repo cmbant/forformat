@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cat > /tmp/full.patch <<'PATCH'
+--- a/src/format/full.rs
++++ b/src/format/full.rs
+@@ -34,8 +34,11 @@
+     config::{FormatConfig, FormatMode},
+     error::FormatError,
+     source::{
+-        syntax::conditional_compilation_prefix, LexState, LogicalGroup, PhysicalLineKind,
+-        SourceBuffer,
++        syntax::{
++            conditional_compilation_prefix, openmp_directive_prefix, OpenMpDirectiveSentinel,
++            SourceStream,
++        },
++        LexState, LogicalGroup, PhysicalLineKind, SourceBuffer,
+     },
+     transform::{document::Document, pipeline},
+     FormatMeta, FormatResult,
+@@ -644,6 +647,13 @@
+ }
+ 
+ impl CommentLexStreams {
++    fn select_mut(&mut self, stream: SourceStream) -> &mut LexState {
++        match stream {
++            SourceStream::Ordinary => &mut self.ordinary,
++            SourceStream::Conditional => &mut self.conditional,
++        }
++    }
++
+     /// Find an inline comment in one physical line while keeping conditional
+     /// and ordinary protected regions independent. The returned offset is in
+     /// the original physical line, not the sentinel-stripped body.
+@@ -651,11 +661,7 @@
+         let prefix = conditional_compilation_prefix(line);
+         let body_start = prefix.map_or(0, |prefix| prefix.body_start);
+         let body = &line[body_start..];
+-        let lex = if prefix.is_some() {
+-            &mut self.conditional
+-        } else {
+-            &mut self.ordinary
+-        };
++        let lex = self.select_mut(SourceStream::from(prefix));
+         if lex.in_literal() && !body.trim_ascii_start().starts_with(b"&") {
+             return None;
+         }
+@@ -720,10 +726,37 @@
+     restored
+ }
+ 
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++enum ReflowSentinel {
++    Conditional,
++    OpenMp(OpenMpDirectiveSentinel),
++}
++
++impl ReflowSentinel {
++    fn canonical(self) -> &'static [u8] {
++        match self {
++            Self::Conditional => b"!$ ",
++            Self::OpenMp(sentinel) => sentinel.canonical(),
++        }
++    }
++}
++
++fn reflow_sentinel(line: &[u8]) -> Option<(usize, ReflowSentinel)> {
++    if let Some(prefix) = conditional_compilation_prefix(line) {
++        return Some((prefix.body_start, ReflowSentinel::Conditional));
++    }
++    openmp_directive_prefix(line).map(|prefix| {
++        (
++            prefix.body_start,
++            ReflowSentinel::OpenMp(prefix.sentinel),
++        )
++    })
++}
++
+ fn join_openmp_directive(document: &Document, group: &LogicalGroup) -> Option<Vec<u8>> {
+     // A continued OpenMP directive is already a sequence of physical
+-    // directives.  Joining it here would erase the repeated sentinel and one
+-    // physical line when the wrapper decides the joined text fits.  Wrapping
++    // directives. Joining it here would erase the repeated sentinel and one
++    // physical line when the wrapper decides the joined text fits. Wrapping
+     // remains available for a single overlong directive, even when the
+     // classifier grouped the following statement with the directive comment.
+     let mut indices: Vec<usize> = group.lines.clone().collect();
+@@ -735,69 +768,23 @@
+         }
+         indices.truncate(1);
+     }
+-    let mut parts = Vec::new();
+-    let mut omp_style = false;
+-    let mut indent = Vec::new();
+-    for (position, index) in indices.into_iter().enumerate() {
+-        let line = &document.lines[index];
+-        let start = line.iter().position(|byte| !byte.is_ascii_whitespace())?;
+-        if !openmp_candidate(line, start) {
+-            return None;
+-        }
+-        if position == 0 {
+-            indent.extend_from_slice(&line[..start]);
+-        }
+-        let mut body = line[start + 2..].trim_ascii_start();
+-        if body.len() >= 3 && body[..3].eq_ignore_ascii_case(b"omp") {
+-            omp_style = true;
+-            body = body[3..].trim_ascii_start();
+-        }
+-        if position > 0 && body.first() == Some(&b'&') {
+-            body = body[1..].trim_ascii_start();
+-        }
+-        if crate::source::regions::comment_start(body).is_some() {
+-            return None;
+-        }
+-        if position + 1 < group.lines.len() {
+-            let mut end = body.len();
+-            while end > 0 && body[end - 1].is_ascii_whitespace() {
+-                end -= 1;
+-            }
+-            if body.get(end - 1) != Some(&b'&') {
+-                return None;
+-            }
+-            body = body[..end - 1].trim_ascii_end();
+-        }
+-        parts.push(body);
+-    }
+-    let mut joined = indent;
+-    joined.extend_from_slice(if omp_style { b"!$OMP " } else { b"!$ " });
+-    for (index, part) in parts.into_iter().enumerate() {
+-        if index > 0 {
+-            joined.push(b' ');
+-        }
+-        joined.extend_from_slice(part);
++
++    let line = document.lines.get(*indices.first()?)?;
++    let indent_end = line.iter().position(|byte| !byte.is_ascii_whitespace())?;
++    let (body_start, sentinel) = reflow_sentinel(line)?;
++    let body = line.get(body_start..)?.trim_ascii_start();
++    if crate::source::regions::comment_start(body).is_some() {
++        return None;
+     }
+-    Some(joined)
+-}
+ 
+-/// Conditional-compilation source uses the shared parser. Actual `!$OMP`
+-/// directives are recognized separately because they are directive comments,
+-/// not conditional Fortran bodies.
+-fn openmp_candidate(line: &[u8], _start: usize) -> bool {
+-    conditional_compilation_prefix(line).is_some() || is_openmp_line(line)
++    let mut joined = line[..indent_end].to_vec();
++    joined.extend_from_slice(sentinel.canonical());
++    joined.extend_from_slice(body);
++    Some(joined)
+ }
+ 
+ fn is_openmp_line(line: &[u8]) -> bool {
+-    let Some(start) = line.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+-        return false;
+-    };
+-    let rest = &line[start..];
+-    rest.get(..5)
+-        .is_some_and(|prefix| prefix[..2] == *b"!$" && prefix[2..].eq_ignore_ascii_case(b"omp"))
+-        && rest
+-            .get(5)
+-            .is_none_or(|byte| byte.is_ascii_whitespace() || *byte == b'&')
++    openmp_directive_prefix(line).is_some()
+ }
+ 
+ fn wrap_openmp_directive(line: &[u8], line_length: usize) -> Result<Vec<Vec<u8>>, Decline> {
+@@ -806,20 +793,16 @@
+         .position(|byte| !byte.is_ascii_whitespace())
+         .unwrap_or(0);
+     let indent = &line[..indent_end];
+-    let prefix: Vec<u8> = if line
+-        .get(indent_end + 2..indent_end + 5)
+-        .is_some_and(|bytes| bytes.eq_ignore_ascii_case(b"omp"))
+-    {
+-        [indent, b"!$OMP "].concat()
+-    } else {
+-        [indent, b"!$ "].concat()
+-    };
++    let (body_start, sentinel) = reflow_sentinel(line).ok_or(Decline::NoSafeBreak)?;
++    let mut prefix = indent.to_vec();
++    prefix.extend_from_slice(sentinel.canonical());
+     if line.len() <= line_length {
+         return Ok(vec![line.to_vec()]);
+     }
+     let mut body = line
+-        .get(prefix.len()..)
++        .get(body_start..)
+         .ok_or(Decline::NoSafeBreak)?
++        .trim_ascii_start()
+         .to_vec();
+     let mut result = Vec::new();
+     while prefix.len() + body.len() > line_length {
+@@ -1427,36 +1410,56 @@
+     }
+ 
+     #[test]
+-    fn openmp_wrapping_repeats_the_sentinel_and_keeps_macro_case() {
+-        let source = b"!$OMP PARALLEL DO DEFAULT(SHARED), private(worker), SCHEDULE(STATIC), REDUCTION(+:total)\n";
+-        let mut project = ProjectContext::empty();
+-        project.define(&[crate::config::MacroDefine {
+-            name: "private".into(),
+-            value: None,
+-        }]);
+-        let config = FormatConfig {
+-            mode: FormatMode::Full,
+-            wrap: crate::config::WrapConfig {
+-                enabled: true,
+-                line_length: 42,
+-            },
+-            ..FormatConfig::default()
+-        };
+-        let output = format_with_context(source, &project, &config)
+-            .unwrap()
+-            .bytes;
+-        for line in output
+-            .split(|byte| *byte == b'\n')
+-            .filter(|line| !line.is_empty())
+-        {
+-            assert!(line.starts_with(b"!$OMP"), "invalid sentinel: {line:?}");
+-            assert!(line.len() <= 42, "overlong OpenMP line: {line:?}");
++    fn conditional_declaration_separator_is_visible_to_wrapper_measurement() {
++        assert_eq!(
++            crate::transform::passes::layout_post::declaration_separator_info(
++                b"!$ real    ::  x"
++            ),
++            Some((11, 4, 2))
++        );
++    }
++
++    #[test]
++    fn openmp_wrapping_repeats_reserved_sentinels_and_keeps_macro_case() {
++        for (sentinel, canonical) in [
++            ("!$OMP", b"!$OMP".as_slice()),
++            ("!$OMPX", b"!$OMPX".as_slice()),
++        ] {
++            let source = format!(
++                "{sentinel} PARALLEL DO DEFAULT(SHARED), private(worker), SCHEDULE(STATIC), REDUCTION(+:total)\n"
++            );
++            let mut project = ProjectContext::empty();
++            project.define(&[crate::config::MacroDefine {
++                name: "private".into(),
++                value: None,
++            }]);
++            let config = FormatConfig {
++                mode: FormatMode::Full,
++                wrap: crate::config::WrapConfig {
++                    enabled: true,
++                    line_length: 42,
++                },
++                ..FormatConfig::default()
++            };
++            let output = format_with_context(source.as_bytes(), &project, &config)
++                .unwrap()
++                .bytes;
++            for line in output
++                .split(|byte| *byte == b'\n')
++                .filter(|line| !line.is_empty())
++            {
++                assert!(
++                    line.starts_with(canonical),
++                    "invalid {sentinel} sentinel: {line:?}"
++                );
++                assert!(line.len() <= 42, "overlong OpenMP line: {line:?}");
++            }
++            assert!(output
++                .windows(b"PRIVATE".len())
++                .all(|window| window != b"PRIVATE"));
++            assert!(output
++                .windows(b"private".len())
++                .any(|window| window == b"private"));
+         }
+-        assert!(output
+-            .windows(b"PRIVATE".len())
+-            .all(|window| window != b"PRIVATE"));
+-        assert!(output
+-            .windows(b"private".len())
+-            .any(|window| window == b"private"));
+     }
+ }
+PATCH
+
+git apply /tmp/full.patch
+python - <<'PY'
+from pathlib import Path
+path = Path('src/source/syntax.rs')
+text = path.read_text().replace('*prefix == *b"!$"', 'prefix == b"!$"')
+path.write_text(text)
+PY
+cargo fmt --all
+rm -f .github/workflows/source-dump.yml .github/workflows/source-apply-pr.yml tools/apply-sentinel-patch.sh
+
+git config user.name "github-actions[bot]"
+git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+git add -- \
+  .github/workflows/source-dump.yml \
+  .github/workflows/source-apply-pr.yml \
+  tools/apply-sentinel-patch.sh \
+  src/format/full.rs \
+  src/source/syntax.rs \
+  src/source/regions.rs \
+  src/source/buffer.rs \
+  src/transform/passes/continuations.rs \
+  src/transform/passes/layout_post/alignment.rs
+git diff --cached --check
+git commit -m "Complete sentinel integration cleanup"
+git push origin HEAD:fix/conditional-continuation-state
