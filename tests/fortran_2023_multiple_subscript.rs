@@ -108,9 +108,7 @@ fn wrapping_keeps_multiple_subscript_double_colons_compact() {
         let output = String::from_utf8(format_source(source, &config).unwrap().bytes).unwrap();
         assert!(output.contains("&\n"), "expected wrapping: {output:?}");
         assert!(
-            !output
-                .lines()
-                .any(|line| line.trim_end().ends_with(":: &")),
+            !output.lines().any(|line| line.trim_end().ends_with(":: &")),
             "multiple-subscript :: became a wrap seam: {output:?}"
         );
     }
