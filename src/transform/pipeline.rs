@@ -170,7 +170,7 @@ pub fn normalize(
     // at the old continuation seam is normalized by the same rule chain as any
     // ordinary one-line statement.
     if config.mode == FormatMode::Full && config.wrap.enabled && config.rewrap {
-        let rejoined = passes::rewrap::prepare(document, config)?;
+        let rejoined = with_context(document, project, local, config, passes::rewrap::prepare)?;
         changed = changed.or(rejoined);
         if rejoined == Changed::Structure {
             changed = changed.or(with_context(

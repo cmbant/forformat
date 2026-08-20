@@ -8,18 +8,24 @@
 //! post-layout widths exactly as it already does.
 
 use crate::{
-    config::FormatConfig,
+    analysis::scoped_declared_names,
     error::FormatError,
     format::{
         planner::{PlanBody, Planner},
         wrapping::{self, ContinuationLayout, Decline},
     },
     source::PhysicalLineKind,
-    transform::{document::Document, pipeline::Changed},
+    transform::{
+        document::Document,
+        passes::line_rules,
+        pipeline::{Changed, PassContext},
+    },
 };
 
-pub fn prepare(document: &mut Document, config: &FormatConfig) -> Result<Changed, FormatError> {
-    let analysis = document.analyze()?;
+pub fn prepare(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
+    let config = cx.config;
+    let analysis = cx.analysis;
+    let declared_names = scoped_declared_names(analysis, cx.scopes);
     let mut planner = Planner::new(config);
     let plans = analysis
         .groups
@@ -60,6 +66,20 @@ pub fn prepare(document: &mut Document, config: &FormatConfig) -> Result<Changed
             continue;
         }
 
+        // The logical statement assembler preserves whitespace from both sides
+        // of an authored continuation seam. The full wrapper does not measure
+        // those raw bytes: it first applies the joined-statement rule subset.
+        // Probe the same spelling here so `--rewrap` cannot reject a join that
+        // the wrapper would accept (or accept one the wrapper would reject)
+        // merely because the removed seam temporarily contains extra spaces.
+        let measured_body = line_rules::respace_joined(
+            &body,
+            cx,
+            &declared_names,
+            group.lines.start,
+        );
+        let measured_body = measured_body.trim_ascii();
+
         let continuation = first_indent.saturating_add(if config.indent_continuation {
             config.continuation_indent
         } else {
@@ -70,7 +90,12 @@ pub fn prepare(document: &mut Document, config: &FormatConfig) -> Result<Changed
             continuation,
         };
         let safe = matches!(
-            wrapping::wrap_body_with_alignment(&body, layout, config.wrap.line_length, align),
+            wrapping::wrap_body_with_alignment(
+                measured_body,
+                layout,
+                config.wrap.line_length,
+                align,
+            ),
             Ok(_) | Err(Decline::Fits)
         );
         if !safe {
@@ -78,6 +103,9 @@ pub fn prepare(document: &mut Document, config: &FormatConfig) -> Result<Changed
             continue;
         }
 
+        // Keep this pass structural: the physical line-rule pass that follows
+        // owns the actual seam normalization. This also ensures there is still
+        // only one user-visible normalization path for newly joined lines.
         let first = &document.lines[group.lines.start];
         let indent_end = first
             .iter()
@@ -106,17 +134,40 @@ fn copy_group(document: &Document, range: std::ops::Range<usize>, output: &mut V
 #[cfg(test)]
 mod tests {
     use super::prepare;
-    use crate::{config::FormatConfig, transform::document::Document};
+    use crate::{
+        analysis::{analyze_file, ProjectContext, ScopeTree},
+        config::FormatConfig,
+        transform::{
+            document::Document,
+            pipeline::{Changed, PassContext},
+        },
+    };
+
+    fn run_prepare(document: &mut Document, config: &FormatConfig) -> Changed {
+        let project = ProjectContext::empty();
+        let source = document.to_lf_bytes();
+        let local = analyze_file(&source).unwrap();
+        let analysis = document.analyze().unwrap();
+        let scopes = ScopeTree::build(&analysis);
+        let context = PassContext {
+            config,
+            project: &project,
+            local: &local,
+            analysis: &analysis,
+            scopes: &scopes,
+        };
+        prepare(document, &context).unwrap()
+    }
 
     #[test]
     fn fitting_authored_continuation_is_joined_for_fresh_layout() {
         let mut document = Document::from_bytes(b"call work(alpha, &\n    beta)\n");
         let config = FormatConfig::default();
-        assert_eq!(
-            prepare(&mut document, &config).unwrap(),
-            crate::transform::pipeline::Changed::Structure
-        );
-        assert_eq!(document.lines, [b"call work(alpha, beta)".to_vec()]);
+        assert_eq!(run_prepare(&mut document, &config), Changed::Structure);
+        // Preparation removes the authored break but does not take ownership
+        // of the whitespace at the seam; the following physical line-rule pass
+        // normalizes that user-visible spelling.
+        assert_eq!(document.lines, [b"call work(alpha,  beta)".to_vec()]);
     }
 
     #[test]
@@ -124,10 +175,7 @@ mod tests {
         let mut document = Document::from_bytes(b"call work(alpha, & ! note\n    beta)\n");
         let original = document.clone();
         let config = FormatConfig::default();
-        assert_eq!(
-            prepare(&mut document, &config).unwrap(),
-            crate::transform::pipeline::Changed::No
-        );
+        assert_eq!(run_prepare(&mut document, &config), Changed::No);
         assert_eq!(document, original);
     }
 }
