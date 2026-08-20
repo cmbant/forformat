@@ -5,6 +5,24 @@
 
 use super::{Token, TokenKind};
 
+/// Which semantic Fortran source stream a physical line belongs to.
+///
+/// Conditional-compilation source is independent of ordinary source for
+/// continuation and protected-region state, even though both use the same
+/// Fortran syntax when active.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum SourceStream {
+    #[default]
+    Ordinary,
+    Conditional,
+}
+
+impl SourceStream {
+    pub(crate) fn is_conditional(self) -> bool {
+        matches!(self, Self::Conditional)
+    }
+}
+
 /// The two free-form conditional-compilation prefix shapes the formatter
 /// accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +43,16 @@ pub(crate) enum ConditionalPrefixKind {
 pub(crate) struct ConditionalPrefix {
     pub body_start: usize,
     pub kind: ConditionalPrefixKind,
+}
+
+impl From<Option<ConditionalPrefix>> for SourceStream {
+    fn from(prefix: Option<ConditionalPrefix>) -> Self {
+        if prefix.is_some() {
+            Self::Conditional
+        } else {
+            Self::Ordinary
+        }
+    }
 }
 
 /// Parse the free-form conditional-compilation sentinel at the start of a
@@ -61,6 +89,78 @@ pub(crate) fn conditional_compilation_prefix(line: &[u8]) -> Option<ConditionalP
 /// a blank-separated sentinel from the compact `!$&` continuation spelling.
 pub(crate) fn conditional_compilation_body_start(line: &[u8]) -> Option<usize> {
     conditional_compilation_prefix(line).map(|prefix| prefix.body_start)
+}
+
+/// Which reserved free-form OpenMP directive sentinel introduced a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenMpDirectiveSentinel {
+    Omp,
+    Ompx,
+}
+
+impl OpenMpDirectiveSentinel {
+    pub(crate) fn canonical(self) -> &'static [u8] {
+        match self {
+            Self::Omp => b"!$OMP ",
+            Self::Ompx => b"!$OMPX ",
+        }
+    }
+}
+
+/// Parsed free-form OpenMP directive prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct OpenMpDirectivePrefix {
+    /// First byte after the sentinel word itself.
+    pub sentinel_end: usize,
+    /// First nonblank byte of the directive body, or the line length.
+    pub body_start: usize,
+    pub sentinel: OpenMpDirectiveSentinel,
+}
+
+/// Parse either reserved free-form OpenMP directive sentinel, `!$omp` or
+/// `!$ompx`, after optional horizontal indentation.
+///
+/// Initial directive lines require whitespace after the sentinel; continued
+/// lines may put `&` directly after it. This recognizer therefore accepts a
+/// boundary of end-of-line, horizontal whitespace, or `&` and leaves the
+/// caller to decide whether a particular physical line is a valid initial or
+/// continuation directive in context.
+pub(crate) fn openmp_directive_prefix(line: &[u8]) -> Option<OpenMpDirectivePrefix> {
+    let start = line.iter().position(|byte| !matches!(byte, b' ' | b'\t'))?;
+    let rest = line.get(start..)?;
+    if !rest.get(..2).is_some_and(|prefix| *prefix == *b"!$") {
+        return None;
+    }
+
+    let (sentinel, sentinel_len) = if rest
+        .get(2..6)
+        .is_some_and(|bytes| bytes.eq_ignore_ascii_case(b"ompx"))
+    {
+        (OpenMpDirectiveSentinel::Ompx, 6)
+    } else if rest
+        .get(2..5)
+        .is_some_and(|bytes| bytes.eq_ignore_ascii_case(b"omp"))
+    {
+        (OpenMpDirectiveSentinel::Omp, 5)
+    } else {
+        return None;
+    };
+
+    let boundary = rest.get(sentinel_len);
+    if !boundary.is_none_or(|byte| matches!(byte, b' ' | b'\t' | b'&')) {
+        return None;
+    }
+
+    let sentinel_end = start + sentinel_len;
+    let mut body_start = sentinel_end;
+    while body_start < line.len() && matches!(line[body_start], b' ' | b'\t') {
+        body_start += 1;
+    }
+    Some(OpenMpDirectivePrefix {
+        sentinel_end,
+        body_start,
+        sentinel,
+    })
 }
 
 /// Number of leading tokens occupied by a declaration type head.
@@ -161,7 +261,8 @@ mod tests {
     use super::{
         conditional_compilation_body_start, conditional_compilation_prefix,
         declaration_type_head_len, is_directive_comment, is_end_construct_keyword,
-        ConditionalPrefix, ConditionalPrefixKind,
+        openmp_directive_prefix, ConditionalPrefix, ConditionalPrefixKind,
+        OpenMpDirectivePrefix, OpenMpDirectiveSentinel, SourceStream,
     };
     use crate::source::tokens::tokens;
 
@@ -205,6 +306,7 @@ mod tests {
             ),
             (b"!$", None),
             (b"!$OMP parallel", None),
+            (b"!$OMPX vendor", None),
             (b"!$acc parallel", None),
             (b"! ordinary", None),
         ] {
@@ -214,6 +316,54 @@ mod tests {
                 expected.map(|prefix| prefix.body_start),
                 "{line:?}"
             );
+            assert_eq!(
+                SourceStream::from(expected).is_conditional(),
+                expected.is_some(),
+                "{line:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn openmp_directive_prefixes_cover_omp_and_ompx() {
+        for (line, expected) in [
+            (
+                b"!$omp parallel".as_slice(),
+                Some(OpenMpDirectivePrefix {
+                    sentinel_end: 5,
+                    body_start: 6,
+                    sentinel: OpenMpDirectiveSentinel::Omp,
+                }),
+            ),
+            (
+                b"  !$OMP&do",
+                Some(OpenMpDirectivePrefix {
+                    sentinel_end: 7,
+                    body_start: 7,
+                    sentinel: OpenMpDirectiveSentinel::Omp,
+                }),
+            ),
+            (
+                b"!$ompx vendor",
+                Some(OpenMpDirectivePrefix {
+                    sentinel_end: 6,
+                    body_start: 7,
+                    sentinel: OpenMpDirectiveSentinel::Ompx,
+                }),
+            ),
+            (
+                b"\t!$OMPX&vendor",
+                Some(OpenMpDirectivePrefix {
+                    sentinel_end: 7,
+                    body_start: 7,
+                    sentinel: OpenMpDirectiveSentinel::Ompx,
+                }),
+            ),
+            (b"!$ompxx vendor", None),
+            (b"!$ompish vendor", None),
+            (b"!$ x", None),
+        ] {
+            assert_eq!(openmp_directive_prefix(line), expected, "{line:?}");
         }
     }
 
@@ -257,6 +407,7 @@ mod tests {
     fn directive_comment_recognition_covers_supported_sentinels() {
         for comment in [
             b"!$omp parallel".as_slice(),
+            b"!$ompx vendor",
             b"!DIR$ vector",
             b"!dec$ attrs",
             b"!GCC$ x",
