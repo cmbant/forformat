@@ -9,4 +9,5 @@ pub mod case_pass;
 pub mod continuations;
 pub mod layout_post;
 pub mod line_rules;
+pub mod semicolons;
 pub mod structure;
