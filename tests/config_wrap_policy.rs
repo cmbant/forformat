@@ -41,7 +41,11 @@ fn toml_rewrap_respects_both_wrap_disable_spellings() {
     let no_wrap = run_with_config("no-wrap", "rewrap = true\nno_wrap = true\n", source);
     let wrap_false = run_with_config("wrap-false", "rewrap = true\nwrap = false\n", source);
 
-    assert!(no_wrap.status.success(), "{}", String::from_utf8_lossy(&no_wrap.stderr));
+    assert!(
+        no_wrap.status.success(),
+        "{}",
+        String::from_utf8_lossy(&no_wrap.stderr)
+    );
     assert!(
         wrap_false.status.success(),
         "{}",
