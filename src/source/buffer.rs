@@ -1,6 +1,7 @@
 use super::{
-    regions::LexState, syntax::conditional_compilation_body_start, Newline, PhysicalLine,
-    PhysicalLineKind,
+    regions::LexState,
+    syntax::{conditional_compilation_prefix, SourceStream},
+    Newline, PhysicalLine, PhysicalLineKind,
 };
 use crate::error::FormatError;
 use std::ops::Range;
@@ -23,11 +24,10 @@ struct LexStreams {
 }
 
 impl LexStreams {
-    fn select_mut(&mut self, conditional: bool) -> &mut LexState {
-        if conditional {
-            &mut self.conditional
-        } else {
-            &mut self.ordinary
+    fn select_mut(&mut self, stream: SourceStream) -> &mut LexState {
+        match stream {
+            SourceStream::Ordinary => &mut self.ordinary,
+            SourceStream::Conditional => &mut self.conditional,
         }
     }
 }
@@ -90,12 +90,13 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         while first < content.len() && (content[first] == b' ' || content[first] == b'\t') {
             first += 1;
         }
-        let conditional_start = conditional_compilation_body_start(content);
-        let conditional = conditional_start.is_some();
+        let conditional_prefix = conditional_compilation_prefix(content);
+        let stream = SourceStream::from(conditional_prefix);
+        let conditional_start = conditional_prefix.map(|prefix| prefix.body_start);
         let trimmed = &content[first..];
         let kind = if trimmed.is_empty() {
             PhysicalLineKind::Blank
-        } else if conditional {
+        } else if stream.is_conditional() {
             PhysicalLineKind::Code
         } else if trimmed.starts_with(b"#") || trimmed.starts_with(b"??") {
             PhysicalLineKind::Preprocessor
@@ -112,7 +113,7 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         let mut comment = None;
         if matches!(kind, PhysicalLineKind::Code | PhysicalLineKind::FindentFix) {
             let code = &content[code_offset..];
-            let state = states.select_mut(conditional);
+            let state = states.select_mut(stream);
             // A free-form character literal can only resume on a physical line
             // whose first nonblank body byte is `&`. If malformed or inactive
             // source puts another code-looking line in between, step over it
@@ -137,7 +138,7 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
             kind,
             code_span: code_start as u32..code_end as u32,
             comment_span: comment,
-            omp: conditional,
+            omp: stream.is_conditional(),
         }
     }
 
