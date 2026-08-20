@@ -334,12 +334,13 @@ fn break_tier(tokens: &[Token], index: usize) -> Option<BreakTier> {
         TokenKind::Operator => match token.text {
             // The statement-level `::` (a declaration's attribute/entity
             // seam) is handled separately by `statement_head_end`, which
-            // runs before this search and is never revisited here. What
-            // reaches this arm is a `::` nested inside a call or
-            // constructor — `allocate(T :: obj)`, `[integer :: 1, 2]` — for
-            // which there is no head-boundary concept, only a candidate
-            // break among others.
-            b"::" => Some(BreakTier::TypeSpec),
+            // runs before this search and is never revisited here. Nested
+            // type-spec separators are useful breaks, but Fortran 2023 also
+            // uses `::` inside compact `@` multiple-subscript triplets, where
+            // splitting would break the designator's punctuation policy.
+            b"::" => {
+                (!is_multiple_subscript_double_colon(tokens, index)).then_some(BreakTier::TypeSpec)
+            }
             b"==" | b"/=" | b"<=" | b">=" | b"<" | b">" => Some(BreakTier::Comparison),
             b"//" => Some(BreakTier::Concatenation),
             // A `+` or `-` is a break candidate only when it is spelled as a
@@ -355,6 +356,25 @@ fn break_tier(tokens: &[Token], index: usize) -> Option<BreakTier> {
         },
         _ => None,
     }
+}
+
+/// True when `tokens[index]` is the two adjacent triplet colons of a Fortran
+/// 2023 multiple-subscript item. At one delimiter depth, a comma ends the
+/// current subscript item; tokens at deeper depths belong to nested expressions.
+fn is_multiple_subscript_double_colon(tokens: &[Token], index: usize) -> bool {
+    let depth = tokens[index].depth;
+    for token in tokens[..index].iter().rev() {
+        if token.depth > depth {
+            continue;
+        }
+        if token.depth < depth || token.kind == TokenKind::Comma {
+            return false;
+        }
+        if token.kind == TokenKind::Operator && token.text == b"@" {
+            return true;
+        }
+    }
+    false
 }
 
 fn next_is(tokens: &[Token], index: usize, text: &[u8]) -> bool {
@@ -506,6 +526,22 @@ mod tests {
     fn a_declaration_head_is_not_split() {
         let body = b"real(dl), allocatable, intent(inout) :: values(:), weights(:)";
         let position = wrap_position(body, 45).unwrap();
+        assert_eq!(&body[position - 2..position], b"::");
+    }
+
+    #[test]
+    fn multiple_subscript_double_colons_are_not_type_spec_breaks() {
+        for body in [
+            b"call f(@::stride, another_argument)".as_slice(),
+            b"call f(@lo::stride, another_argument)".as_slice(),
+        ] {
+            let position = wrap_position(body, body.len()).unwrap();
+            assert_eq!(&body[position - 1..position], b",");
+        }
+
+        // Keep the existing nested type-spec preference for real type specs.
+        let body = b"allocate(widget :: object, stat=i)";
+        let position = wrap_position(body, body.len()).unwrap();
         assert_eq!(&body[position - 2..position], b"::");
     }
 
