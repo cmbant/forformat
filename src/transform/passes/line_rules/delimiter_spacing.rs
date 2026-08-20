@@ -19,17 +19,17 @@ pub(crate) fn normalize_delimiter_spacing_with_state(
         return line.to_vec();
     }
     let mut text = line.to_vec();
-    let tokens = tokenize(&text, &mut incoming.clone());
+    let mut token_state = incoming;
+    let tokens = tokenize(&text, &mut token_state);
     if !continued_statement && is_declaration_statement(&tokens) {
         if let Some(separator) = top_level_separator(&tokens) {
-            text =
-                reorder_optional_attribute(&text, tokens[separator].span.start, incoming.clone());
+            text = reorder_optional_attribute(&text, tokens[separator].span.start, incoming);
         } else {
-            text = normalize_old_style_declaration(&text, incoming.clone());
+            text = normalize_old_style_declaration(&text, incoming);
         }
     }
 
-    let compact_state = incoming.clone();
+    let compact_state = incoming;
     let mut state = incoming;
     let regions = state.regions(&text);
     let mut result = Vec::with_capacity(text.len());
