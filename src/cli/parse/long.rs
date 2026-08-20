@@ -234,18 +234,11 @@ where
             draft.config.wrap.enabled = !disabled;
         }
         OptionId::Rewrap => {
-            let enabled = value
+            draft.config.rewrap = value
                 .as_deref()
                 .map(parse_bool)
                 .transpose()?
                 .unwrap_or(true);
-            draft.config.rewrap = enabled;
-            if enabled {
-                // Rewrapping extends the normal wrapping stage. A later
-                // --no-wrap can still disable the stage because scalar CLI
-                // options are applied in order.
-                draft.config.wrap.enabled = true;
-            }
         }
         OptionId::LineLength => {
             draft.config.wrap.line_length = parse_num(&cursor.required_long(&mut value)?)?
