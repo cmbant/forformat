@@ -16,7 +16,7 @@ pub(crate) fn normalize_delimiter_spacing_with_state(
     continued_statement: bool,
 ) -> Vec<u8> {
     if !cx.config.style.delimiter_spacing {
-        return line.to_vec();
+        return compact_multiple_subscript_spacing(line, incoming);
     }
     let mut text = line.to_vec();
     let mut token_state = incoming;
@@ -208,6 +208,10 @@ fn normalize_delimiters_in_code(code: &[u8], out: &mut Vec<u8>, following_conten
 /// `@lo:hi:step`, and `@::step`. Keep only those punctuation seams compact;
 /// ordinary section-subscript colons in sibling items retain their authored
 /// spacing. Tokenization keeps strings and comments out of this rewrite.
+///
+/// This compaction is syntax-safety normalization rather than optional comma/
+/// delimiter styling: the wrapper's whitespace fallback must never be given a
+/// candidate between `@` and the multiple-subscript it prefixes.
 fn compact_multiple_subscript_spacing(line: &[u8], mut state: LexState) -> Vec<u8> {
     let tokens = tokenize(line, &mut state);
     let mut compact_gaps: Vec<std::ops::Range<usize>> = Vec::new();
