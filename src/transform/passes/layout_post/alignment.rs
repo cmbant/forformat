@@ -386,12 +386,8 @@ fn declaration_separator_columns(
             if stream.lex.in_literal() && !body.trim_ascii_start().starts_with(b"&") {
                 return None;
             }
-            declaration_separator_info_in(
-                body,
-                &mut stream.lex,
-                &mut stream.multiple_subscript,
-            )
-            .map(|(column, before, after)| (body_start + column, before, after))
+            declaration_separator_info_in(body, &mut stream.lex, &mut stream.multiple_subscript)
+                .map(|(column, before, after)| (body_start + column, before, after))
         })
         .collect()
 }
