@@ -138,13 +138,7 @@ impl LineState {
         self.entity_list = EntityListCursor::default();
     }
 
-    fn advance(
-        &mut self,
-        code: &[u8],
-        incoming: LexState,
-        cx: &PassContext,
-        line_index: usize,
-    ) {
+    fn advance(&mut self, code: &[u8], incoming: LexState, cx: &PassContext, line_index: usize) {
         self.continued_statement = trailing_ampersand(code);
         self.continued_infix = trailing_continuation_operand(code);
         self.continued_named_parameter = self.continued_statement && is_call_group(cx, line_index);
