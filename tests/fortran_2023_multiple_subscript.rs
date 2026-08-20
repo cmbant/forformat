@@ -32,7 +32,40 @@ fn authored_continuation_after_multiple_subscript_prefix_is_preserved() {
     let output = String::from_utf8(once).unwrap();
 
     assert!(output.contains("@ &\n"));
-    assert!(output.contains("@lo: &\n"));
+    assert!(output.contains("@lo: &\n& hi:step)"));
+}
+
+#[test]
+fn triplet_state_survives_authored_continuations() {
+    for (source, expected) in [
+        (
+            b"x = c(@ lo : &\n& hi : step)\n".as_slice(),
+            "x = c(@lo: &\n& hi:step)\n",
+        ),
+        (
+            b"x = c(@ lo &\n& : hi : step)\n",
+            "x = c(@lo &\n& :hi:step)\n",
+        ),
+        (
+            b"x = c(@ lo : hi : &\n& step)\n",
+            "x = c(@lo:hi: &\n& step)\n",
+        ),
+    ] {
+        let once = normalize(source);
+        assert_eq!(normalize(&once), once);
+        assert_eq!(String::from_utf8(once).unwrap(), expected);
+    }
+}
+
+#[test]
+fn continued_triplet_depth_ignores_nested_and_sibling_section_colons() {
+    let source = b"x = c(@ f(i : &\n& j) : hi : step, @ lo : &\n& hi, j : k)\n";
+    let once = normalize(source);
+    assert_eq!(normalize(&once), once);
+    let output = String::from_utf8(once).unwrap();
+
+    assert!(output.contains("@f(i : &\n& j):hi:step"));
+    assert!(output.contains("@lo: &\n& hi, j : k)"));
 }
 
 #[test]
