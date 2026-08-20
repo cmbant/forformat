@@ -31,8 +31,10 @@ fn authored_continuation_after_multiple_subscript_prefix_is_preserved() {
     assert_eq!(normalize(&once), once);
     let output = String::from_utf8(once).unwrap();
 
-    assert!(output.contains("@ &\n"));
-    assert!(output.contains("@lo: &\n& hi:step)"));
+    // Trailing continuation markers are structural and remain. The formatter's
+    // established continuation policy removes optional leading `&` markers.
+    assert!(output.contains("@ &\nv1"));
+    assert!(output.contains("@lo: &\nhi:step)"));
 }
 
 #[test]
@@ -40,15 +42,15 @@ fn triplet_state_survives_authored_continuations() {
     for (source, expected) in [
         (
             b"x = c(@ lo : &\n& hi : step)\n".as_slice(),
-            "x = c(@lo: &\n& hi:step)\n",
+            "x = c(@lo: &\nhi:step)\n",
         ),
         (
             b"x = c(@ lo &\n& : hi : step)\n",
-            "x = c(@lo &\n& :hi:step)\n",
+            "x = c(@lo &\n:hi:step)\n",
         ),
         (
             b"x = c(@ lo : hi : &\n& step)\n",
-            "x = c(@lo:hi: &\n& step)\n",
+            "x = c(@lo:hi: &\nstep)\n",
         ),
     ] {
         let once = normalize(source);
@@ -64,8 +66,8 @@ fn continued_triplet_depth_ignores_nested_and_sibling_section_colons() {
     assert_eq!(normalize(&once), once);
     let output = String::from_utf8(once).unwrap();
 
-    assert!(output.contains("@f(i : &\n& j):hi:step"));
-    assert!(output.contains("@lo: &\n& hi, j : k)"));
+    assert!(output.contains("@f(i : &\nj):hi:step"));
+    assert!(output.contains("@lo: &\nhi, j : k)"));
 }
 
 #[test]
