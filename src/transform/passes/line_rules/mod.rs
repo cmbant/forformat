@@ -555,7 +555,9 @@ mod rejoined_tests {
 
             super::run(&mut document, &context).unwrap();
             assert!(
-                document.lines[1].windows(b"arg=1".len()).any(|w| w == b"arg=1"),
+                document.lines[1]
+                    .windows(b"arg=1".len())
+                    .any(|w| w == b"arg=1"),
                 "conditional continuation lost named-argument context: {:?}",
                 String::from_utf8_lossy(&document.lines[1])
             );
