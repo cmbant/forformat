@@ -376,9 +376,10 @@ fn aligned_members(
     // one would collapse the alignment of every commented declaration.
     let width_at = |(line_index, (column, _, after)): &BlockMember, target: usize| {
         let line = &original[*line_index];
-        let code = code_context(line);
-        let body_start = line.len() - code.len();
-        let code_end = body_start + code.trim_ascii_end().len();
+        let body_start = conditional_compilation_prefix(line).map_or(0, |prefix| prefix.body_start);
+        let body = &line[body_start..];
+        let code_end = body_start
+            + comment_start(body).map_or(body.len(), |at| body[..at].trim_ascii_end().len());
         target + 3 + code_end.saturating_sub(column + 2 + after)
     };
     let mut members: Vec<&BlockMember> = block
