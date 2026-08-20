@@ -5,17 +5,36 @@
 
 use super::{Token, TokenKind};
 
-/// Start of the Fortran body of a free-form conditional-compilation line.
+/// The two free-form conditional-compilation prefix shapes the formatter
+/// accepts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConditionalPrefixKind {
+    /// An initial (or non-compact continued) line: `!$ ` / `!$\t`.
+    InitialBlank,
+    /// A continued line whose continuation marker immediately follows the
+    /// sentinel: `!$&...`.
+    CompactContinuation,
+}
+
+/// Parsed free-form conditional-compilation prefix.
+///
+/// `body_start` always points at the first byte that belongs to the Fortran
+/// body. For a compact continuation that byte is the `&` itself, because it is
+/// real Fortran continuation syntax rather than part of the sentinel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ConditionalPrefix {
+    pub body_start: usize,
+    pub kind: ConditionalPrefixKind,
+}
+
+/// Parse the free-form conditional-compilation sentinel at the start of a
+/// physical line (after optional horizontal indentation).
 ///
 /// An initial OpenMP conditional-compilation line uses `!$` followed by a
-/// blank.  A continued line may instead put the continuation marker directly
-/// after the sentinel, as in `!$& index`; in that form the returned body starts
-/// at the `&`, because it is still Fortran continuation syntax.  Accept both
-/// horizontal blank spellings that the formatter already accepts elsewhere and
-/// consume exactly one of them, leaving any additional authored indentation in
-/// the body.  Joined spellings such as `!$OMP` and `!$acc`, and bare `!$`, are
-/// not conditional-compilation code.
-pub(crate) fn conditional_compilation_body_start(line: &[u8]) -> Option<usize> {
+/// blank. A continued line may instead put the continuation marker directly
+/// after the sentinel, as in `!$& index`. Joined spellings such as `!$OMP` and
+/// `!$acc`, and bare `!$`, are not conditional-compilation code.
+pub(crate) fn conditional_compilation_prefix(line: &[u8]) -> Option<ConditionalPrefix> {
     let start = line.iter().position(|byte| !matches!(byte, b' ' | b'\t'))?;
     if !line
         .get(start..)
@@ -24,10 +43,24 @@ pub(crate) fn conditional_compilation_body_start(line: &[u8]) -> Option<usize> {
         return None;
     }
     match line.get(start + 2) {
-        Some(b' ' | b'\t') => Some(start + 3),
-        Some(b'&') => Some(start + 2),
+        Some(b' ' | b'\t') => Some(ConditionalPrefix {
+            body_start: start + 3,
+            kind: ConditionalPrefixKind::InitialBlank,
+        }),
+        Some(b'&') => Some(ConditionalPrefix {
+            body_start: start + 2,
+            kind: ConditionalPrefixKind::CompactContinuation,
+        }),
         _ => None,
     }
+}
+
+/// Start of the Fortran body of a free-form conditional-compilation line.
+///
+/// Use [`conditional_compilation_prefix`] when the caller needs to distinguish
+/// an ordinary sentinel blank from the compact `!$&` continuation spelling.
+pub(crate) fn conditional_compilation_body_start(line: &[u8]) -> Option<usize> {
+    conditional_compilation_prefix(line).map(|prefix| prefix.body_start)
 }
 
 /// Number of leading tokens occupied by a declaration type head.
@@ -126,28 +159,59 @@ pub(crate) fn is_directive_comment(comment: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        conditional_compilation_body_start, declaration_type_head_len, is_directive_comment,
-        is_end_construct_keyword,
+        conditional_compilation_body_start, conditional_compilation_prefix,
+        declaration_type_head_len, is_directive_comment, is_end_construct_keyword,
+        ConditionalPrefix, ConditionalPrefixKind,
     };
     use crate::source::tokens::tokens;
 
     #[test]
-    fn conditional_compilation_recognizes_initial_and_continued_sentinels() {
+    fn conditional_compilation_parses_initial_and_compact_prefixes() {
         for (line, expected) in [
-            (b"!$ x".as_slice(), Some(3)),
-            (b"  !$\tx", Some(5)),
-            (b"!$  x", Some(3)),
-            (b"!$& index", Some(2)),
-            (b"  !$&index", Some(4)),
-            (b"!$ & index", Some(3)),
+            (
+                b"!$ x".as_slice(),
+                Some(ConditionalPrefix {
+                    body_start: 3,
+                    kind: ConditionalPrefixKind::InitialBlank,
+                }),
+            ),
+            (
+                b"  !$\tx",
+                Some(ConditionalPrefix {
+                    body_start: 5,
+                    kind: ConditionalPrefixKind::InitialBlank,
+                }),
+            ),
+            (
+                b"!$  x",
+                Some(ConditionalPrefix {
+                    body_start: 3,
+                    kind: ConditionalPrefixKind::InitialBlank,
+                }),
+            ),
+            (
+                b"!$& x",
+                Some(ConditionalPrefix {
+                    body_start: 2,
+                    kind: ConditionalPrefixKind::CompactContinuation,
+                }),
+            ),
+            (
+                b"  !$&x",
+                Some(ConditionalPrefix {
+                    body_start: 4,
+                    kind: ConditionalPrefixKind::CompactContinuation,
+                }),
+            ),
             (b"!$", None),
             (b"!$OMP parallel", None),
             (b"!$acc parallel", None),
             (b"! ordinary", None),
         ] {
+            assert_eq!(conditional_compilation_prefix(line), expected, "{line:?}");
             assert_eq!(
                 conditional_compilation_body_start(line),
-                expected,
+                expected.map(|prefix| prefix.body_start),
                 "{line:?}"
             );
         }
