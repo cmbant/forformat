@@ -16,6 +16,22 @@ pub struct SourceBuffer<B = Vec<u8>> {
     pub lines: Vec<PhysicalLine>,
 }
 
+#[derive(Default)]
+struct LexStreams {
+    ordinary: LexState,
+    conditional: LexState,
+}
+
+impl LexStreams {
+    fn select_mut(&mut self, conditional: bool) -> &mut LexState {
+        if conditional {
+            &mut self.conditional
+        } else {
+            &mut self.ordinary
+        }
+    }
+}
+
 impl SourceBuffer<Vec<u8>> {
     /// Build a zero-copy source view over borrowed input.
     pub fn new<'a>(bytes: &'a [u8]) -> Result<SourceBuffer<&'a [u8]>, FormatError> {
@@ -39,7 +55,7 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         // Ordinary and conditional-compilation code carry independent lexical
         // state. A literal continued in one stream steps over a physical line
         // from the other stream, so that line must not close or reset it.
-        let mut states = [LexState::default(), LexState::default()];
+        let mut states = LexStreams::default();
         for (i, b) in source.iter().enumerate() {
             if *b == b'\n' {
                 let is_crlf = i > start && source[i - 1] == b'\r';
@@ -68,18 +84,18 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         content: &[u8],
         span: Range<usize>,
         newline: Newline,
-        states: &mut [LexState; 2],
+        states: &mut LexStreams,
     ) -> PhysicalLine {
         let mut first = 0;
         while first < content.len() && (content[first] == b' ' || content[first] == b'\t') {
             first += 1;
         }
         let conditional_start = conditional_compilation_body_start(content);
-        let omp = conditional_start.is_some();
+        let conditional = conditional_start.is_some();
         let trimmed = &content[first..];
         let kind = if trimmed.is_empty() {
             PhysicalLineKind::Blank
-        } else if omp {
+        } else if conditional {
             PhysicalLineKind::Code
         } else if trimmed.starts_with(b"#") || trimmed.starts_with(b"??") {
             PhysicalLineKind::Preprocessor
@@ -96,7 +112,7 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         let mut comment = None;
         if matches!(kind, PhysicalLineKind::Code | PhysicalLineKind::FindentFix) {
             let code = &content[code_offset..];
-            let state = &mut states[usize::from(omp)];
+            let state = states.select_mut(conditional);
             // A free-form character literal can only resume on a physical line
             // whose first nonblank body byte is `&`. If malformed or inactive
             // source puts another code-looking line in between, step over it
@@ -121,7 +137,7 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
             kind,
             code_span: code_start as u32..code_end as u32,
             comment_span: comment,
-            omp,
+            omp: conditional,
         }
     }
 
@@ -187,7 +203,7 @@ mod tests {
         let buffer =
             SourceBuffer::new(b"!$ x = 1\n!$\ty = 2 ! note\n!$ call f( &\n!$& arg = 1)\n").unwrap();
         for line in &buffer.lines {
-            assert!(line.omp);
+            assert!(line.is_conditional_compilation());
         }
         assert_eq!(buffer.code_bytes(&buffer.lines[0]), b"x = 1");
         assert_eq!(buffer.code_bytes(&buffer.lines[1]), b"y = 2 ");
