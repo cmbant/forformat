@@ -22,7 +22,8 @@ pub(crate) fn normalize_delimiter_spacing_with_state(
     let tokens = tokenize(&text, &mut incoming.clone());
     if !continued_statement && is_declaration_statement(&tokens) {
         if let Some(separator) = top_level_separator(&tokens) {
-            text = reorder_optional_attribute(&text, tokens[separator].span.start, incoming.clone());
+            text =
+                reorder_optional_attribute(&text, tokens[separator].span.start, incoming.clone());
         } else {
             text = normalize_old_style_declaration(&text, incoming.clone());
         }
