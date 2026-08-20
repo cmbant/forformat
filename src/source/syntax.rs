@@ -5,6 +5,40 @@
 
 use super::{Token, TokenKind};
 
+/// Number of leading tokens occupied by a declaration type head.
+///
+/// This is shared by declaration indexing and continuation-line formatting so
+/// additions cannot drift between the two paths. It covers standard type heads
+/// from older Fortran through Fortran 2023, the standard optional-blank
+/// `DOUBLEPRECISION` spelling, and the widely supported `DOUBLE COMPLEX`
+/// extension. Old-style kind forms such as `INTEGER*1` and `REAL*16` are
+/// covered by their ordinary one-token type heads.
+pub(crate) fn declaration_type_head_len(tokens: &[Token<'_>], first: usize) -> Option<usize> {
+    let head = tokens.get(first)?;
+    if head.kind != TokenKind::Name {
+        return None;
+    }
+    if head.is_name(b"double") {
+        return tokens.get(first + 1).and_then(|next| {
+            (next.is_name(b"precision") || next.is_name(b"complex")).then_some(2)
+        });
+    }
+    matches!(
+        head.text.to_ascii_lowercase().as_slice(),
+        b"integer"
+            | b"real"
+            | b"complex"
+            | b"logical"
+            | b"character"
+            | b"type"
+            | b"class"
+            | b"typeof"
+            | b"classof"
+            | b"doubleprecision"
+    )
+    .then_some(1)
+}
+
 /// Whether `tokens[index]` is the leading `END` of a block-end statement.
 pub(crate) fn is_end_construct_keyword(tokens: &[Token<'_>], index: usize) -> bool {
     if !tokens[index].is_name(b"end") {
@@ -66,8 +100,32 @@ pub(crate) fn is_directive_comment(comment: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_directive_comment, is_end_construct_keyword};
+    use super::{declaration_type_head_len, is_directive_comment, is_end_construct_keyword};
     use crate::source::tokens::tokens;
+
+    #[test]
+    fn declaration_type_heads_cover_standard_history_and_safe_extensions() {
+        for (source, expected) in [
+            (b"INTEGER*1 i".as_slice(), 1),
+            (b"REAL*16 x", 1),
+            (b"COMPLEX*16 z", 1),
+            (b"LOGICAL*1 flag", 1),
+            (b"CHARACTER*20 text", 1),
+            (b"DOUBLE PRECISION x", 2),
+            (b"DOUBLEPRECISION x", 1),
+            (b"TYPEOF(x) y", 1),
+            (b"CLASSOF(x) y", 1),
+            (b"DOUBLE COMPLEX z", 2),
+        ] {
+            let tokens = tokens(source);
+            assert_eq!(declaration_type_head_len(&tokens, 0), Some(expected));
+        }
+
+        // BYTE is a common extension too, but it is also an ordinary and
+        // plausible identifier; keep the shape recognizer conservative.
+        let byte_assignment = tokens(b"BYTE = value");
+        assert_eq!(declaration_type_head_len(&byte_assignment, 0), None);
+    }
 
     #[test]
     fn end_construct_recognition_is_shape_only() {
