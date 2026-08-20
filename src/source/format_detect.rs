@@ -240,9 +240,29 @@ fn fixed_continuation_signature(line: &[u8], previous_code: Option<&[u8]>) -> bo
         if line[6].is_ascii_whitespace() {
             return previous_code.is_some_and(line_requires_continuation);
         }
+        // A multi-digit free-form label may legitimately occupy column 6 and
+        // extend into column 7. That is ambiguous with fixed continuation
+        // layout unless the preceding line is lexically incomplete.
+        if free_statement_label_extends_past_column_six(line) {
+            return previous_code.is_some_and(line_requires_continuation);
+        }
         return true;
     }
     false
+}
+
+fn free_statement_label_extends_past_column_six(line: &[u8]) -> bool {
+    let label = trim_left(line);
+    let leading = line.len() - label.len();
+    let digits = label
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    (1..=5).contains(&digits)
+        && leading <= 5
+        && leading + digits > 6
+        && label.get(digits).is_some_and(u8::is_ascii_whitespace)
+        && !trim_left(&label[digits..]).is_empty()
 }
 
 fn line_requires_continuation(line: &[u8]) -> bool {
@@ -536,6 +556,13 @@ mod tests {
             ),
             SourceForm::Fixed
         );
+        assert_eq!(
+            detect_path(
+                Path::new("legacy.f90"),
+                b"      x = 1 +\n     12 * y\n      END\n"
+            ),
+            SourceForm::Fixed
+        );
     }
 
     #[test]
@@ -559,6 +586,20 @@ mod tests {
             detect_path(Path::new("modern.F90"), b"     1 continue\nend\n"),
             SourceForm::Free
         );
+    }
+
+    #[test]
+    fn confirmation_accepts_free_labels_that_cross_column_six() {
+        for source in [
+            b"program p\n    111  call foo()\nend program p\n".as_slice(),
+            b"program p\n   1011  format(i0)\nend program p\n".as_slice(),
+            b"program p\n  98765  continue\nend program p\n".as_slice(),
+        ] {
+            assert_eq!(
+                detect_path(Path::new("labeled.f90"), source),
+                SourceForm::Free
+            );
+        }
     }
 
     #[test]
