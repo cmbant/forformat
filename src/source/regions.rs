@@ -15,6 +15,7 @@
 //! state across physical lines so a character literal continued with `&` is a
 //! single protected region rather than two unterminated ones.
 
+use super::syntax::conditional_compilation_prefix;
 use std::ops::Range;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,10 +307,10 @@ fn line_scan<F: FnMut(Region)>(state: &mut LexState, line: &[u8], push: F) {
 /// close it -- the apostrophe in prose like `! don't stop here` is not a
 /// delimiter, and the literal resumes at the `&` on the next code line.
 ///
-/// The OpenMP sentinel is deliberately not in the set: `!$ ` introduces
-/// conditionally compiled *code*, which a group absorbs like any other line.
-/// Which of the two streams a line belongs to matters as well, and that part is
-/// the caller's: see `continuations::conditional_stream`.
+/// Conditional-compilation sentinels are deliberately not in the set: both
+/// blank-separated `!$ ` / `!$\t` and compact `!$&` introduce conditionally
+/// compiled *code*, which a group absorbs like any other line. Which of the two
+/// streams a line belongs to matters as well, and that part is the caller's.
 ///
 /// A `!findentfix:` line *is* in the set, and this is the one place the set is
 /// deliberately wider than [`LogicalGroup::visit`]'s, which treats
@@ -327,11 +328,11 @@ fn line_scan<F: FnMut(Region)>(state: &mut LexState, line: &[u8], push: F) {
 /// [`LogicalGroup::visit`]: crate::source::LogicalGroup::visit
 /// [`PhysicalLineKind::FindentFix`]: crate::source::PhysicalLineKind::FindentFix
 pub fn stepped_over_by_continuation(line: &[u8]) -> bool {
-    let line = line.trim_ascii_start();
-    line.is_empty()
-        || line.starts_with(b"#")
-        || line.starts_with(b"??")
-        || (line.starts_with(b"!") && !line.starts_with(b"!$ "))
+    let trimmed = line.trim_ascii_start();
+    trimmed.is_empty()
+        || trimmed.starts_with(b"#")
+        || trimmed.starts_with(b"??")
+        || (trimmed.starts_with(b"!") && conditional_compilation_prefix(line).is_none())
 }
 
 /// Visit every code region of `s` as `(start offset, bytes)`, skipping string
@@ -547,11 +548,17 @@ mod tests {
     }
 
     #[test]
-    fn an_openmp_sentinel_is_code_not_a_skipped_line() {
-        // `!$ ` introduces conditionally compiled code, so a group absorbs it
-        // like any other line rather than stepping over it.
-        assert!(!super::stepped_over_by_continuation(b"!$ x = 1"));
+    fn conditional_sentinels_are_code_not_skipped_lines() {
+        for line in [
+            b"!$ x = 1".as_slice(),
+            b"!$\tx = 1",
+            b"!$& x = 1",
+            b"  !$&x = 1",
+        ] {
+            assert!(!super::stepped_over_by_continuation(line), "{line:?}");
+        }
         assert!(super::stepped_over_by_continuation(b"!$OMP parallel"));
+        assert!(super::stepped_over_by_continuation(b"!$OMPX vendor"));
     }
 
     #[test]
