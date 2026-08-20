@@ -260,9 +260,8 @@ fn column_info(
             let prefix = conditional_compilation_prefix(line);
             let stream = usize::from(prefix.is_some());
             let body_start = prefix.map_or(0, |prefix| prefix.body_start);
-            info(&line[body_start..], &mut lex[stream]).map(|(column, before, after)| {
-                (body_start + column, before, after)
-            })
+            info(&line[body_start..], &mut lex[stream])
+                .map(|(column, before, after)| (body_start + column, before, after))
         })
         .collect()
 }
