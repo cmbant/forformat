@@ -72,12 +72,8 @@ pub fn prepare(document: &mut Document, cx: &PassContext) -> Result<Changed, For
         // Probe the same spelling here so `--rewrap` cannot reject a join that
         // the wrapper would accept (or accept one the wrapper would reject)
         // merely because the removed seam temporarily contains extra spaces.
-        let measured_body = line_rules::respace_joined(
-            &body,
-            cx,
-            &declared_names,
-            group.lines.start,
-        );
+        let measured_body =
+            line_rules::respace_joined(&body, cx, &declared_names, group.lines.start);
         let measured_body = measured_body.trim_ascii();
 
         let continuation = first_indent.saturating_add(if config.indent_continuation {
