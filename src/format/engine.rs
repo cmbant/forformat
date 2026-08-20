@@ -218,7 +218,7 @@ pub fn emit_group<B: AsRef<[u8]>, W: Write>(
 ///
 /// The tracker models columns of the *output*, so the scan has to start at the
 /// column the emitter actually used, which is not always the configured
-/// indentation: labels and OpenMP sentinels shift the body.
+/// indentation: labels and conditional-compilation sentinels shift the body.
 #[allow(clippy::too_many_arguments)]
 fn advance_alignment<B: AsRef<[u8]>>(
     buf: &SourceBuffer<B>,
@@ -242,15 +242,12 @@ fn advance_alignment<B: AsRef<[u8]>>(
     } else {
         first_indent
     };
-    if line.omp && config.openmp {
+    if line.is_conditional_compilation() && config.openmp {
         scan_target = scan_target.saturating_sub(3);
     }
-    let scan_line = paren_scan_line(
-        buf.code_bytes(line),
-        first,
-        line.omp && config.openmp,
-        config.label_left,
-    );
+    // `code_bytes` already starts at the Fortran body for conditional source;
+    // sentinel recognition belongs to SourceBuffer, not this output-column scan.
+    let scan_line = paren_scan_line(buf.code_bytes(line), first, config.label_left);
     if first {
         let raw_line = buf.line_bytes(line);
         let code_line = buf.code_bytes(line);
@@ -303,16 +300,13 @@ fn advance_alignment<B: AsRef<[u8]>>(
     paren_state.scan(scan_line, scan_target);
 }
 
-fn paren_scan_line(line: &[u8], first: bool, omp: bool, label_left: bool) -> &[u8] {
+fn paren_scan_line(line: &[u8], first: bool, label_left: bool) -> &[u8] {
     let mut s = line;
     while s
         .first()
         .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
     {
         s = &s[1..];
-    }
-    if omp && s.starts_with(b"!$ ") {
-        s = &s[3..];
     }
     if first && label_left {
         let mut digits = 0;
