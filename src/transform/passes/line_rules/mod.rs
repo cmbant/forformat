@@ -27,6 +27,7 @@ use crate::{
     error::FormatError,
     source::{
         regions::LexState,
+        syntax::conditional_compilation_body_start,
         tokens::{tokenize, TokenKind},
         PhysicalLineKind,
     },
@@ -61,21 +62,12 @@ struct LineContext<'a> {
     continued_component: bool,
 }
 
-/// State carried from one physical line to the next while step 11 runs.
+/// Continuation state for one physical source stream.
 #[derive(Default)]
-struct LineState {
+struct StatementState {
     lex: LexState,
-    /// The conditional-compilation stream's own lexical state.
-    ///
-    /// A statement continues only within its own sentinel stream, so the two
-    /// carry literal and Hollerith state independently: consecutive `!$ ` lines
-    /// splice with each other, and an ordinary literal spans an intervening
-    /// `!$ ` line because that line is a comment under the only reading of the
-    /// source that compiles.
-    omp_lex: LexState,
     continued_statement: bool,
     continued_infix: bool,
-    continued_openmp_infix: bool,
     continued_named_parameter: bool,
     continued_bind_parameter: bool,
     continued_component: bool,
@@ -83,7 +75,7 @@ struct LineState {
     entity_list: EntityListCursor,
 }
 
-impl LineState {
+impl StatementState {
     fn context<'a>(
         &self,
         open_groups: &'a [bool],
@@ -120,17 +112,13 @@ impl LineState {
         }
     }
 
-    fn reset_statement(&mut self) {
-        self.lex = LexState::default();
-        // `omp_lex` is deliberately untouched: it belongs to the other stream,
-        // which an ordinary statement boundary does not end.
-        self.continued_statement = false;
-        self.continued_infix = false;
-        self.continued_named_parameter = false;
-        self.continued_bind_parameter = false;
-        self.continued_component = false;
-        self.open_groups.clear();
-        self.entity_list = EntityListCursor::default();
+    /// End structural continuation context while preserving an open protected
+    /// region. This keeps the preprocessor behavior unchanged: a directive is
+    /// not part of either statement stream, but it must not close a literal.
+    fn reset_context_preserving_lex(&mut self) {
+        let lex = self.lex;
+        *self = Self::default();
+        self.lex = lex;
     }
 
     fn advance(&mut self, code: &[u8], cx: &PassContext, line_index: usize) {
@@ -147,6 +135,19 @@ impl LineState {
             self.entity_list = EntityListCursor::default();
         }
     }
+}
+
+/// State carried from one physical line to the next while step 11 runs.
+///
+/// Conditional-compilation code has the same Fortran continuation semantics as
+/// ordinary code when active, but its state must be independent because the two
+/// streams can be interleaved in source that is valid in only one compilation
+/// mode.  Keeping two complete states avoids giving `!$` lines a reduced set of
+/// formatting rules.
+#[derive(Default)]
+struct LineState {
+    ordinary: StatementState,
+    conditional: StatementState,
 }
 
 #[derive(Clone, Copy)]
@@ -170,17 +171,15 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             .map(|line| line.kind)
             .unwrap_or(PhysicalLineKind::Code);
 
-        if let Some(body_start) = openmp_clause_body_start(&document.lines[index]) {
-            let context = LineContext {
-                continued_infix: state.continued_openmp_infix,
-                ..LineContext::default()
-            };
+        if let Some(body_start) = conditional_compilation_body_start(&document.lines[index]) {
+            let stream = &mut state.conditional;
+            let context = stream.context(&stream.open_groups, document, index, cx);
             let body = apply_rules(
                 &document.lines[index][body_start..],
                 cx,
                 &declared_names,
                 index,
-                &mut state.omp_lex,
+                &mut stream.lex,
                 RuleMode::Physical(context),
             );
             let mut rebuilt = document.lines[index][..body_start].to_vec();
@@ -189,30 +188,25 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 document.lines[index] = rebuilt;
                 changed = changed.or(Changed::Text);
             }
-            state.continued_openmp_infix = trailing_continuation_operand(&body);
-            // The ordinary stream steps over this line, so its lexical state
-            // survives; only the ordinary statement context ends here.
-            let lex = state.lex;
-            state.reset_statement();
-            state.lex = lex;
+            if let Some(physical) = cx.analysis.buffer.lines.get(index) {
+                if physical.kind == PhysicalLineKind::Code {
+                    stream.advance(cx.analysis.buffer.code_bytes(physical), cx, index);
+                }
+            }
             continue;
         }
 
-        // A normal physical line cannot continue an expression through a
-        // conditional-compilation sentinel; only adjacent `!$` body lines
-        // share this state.
-        state.continued_openmp_infix = false;
         if kind == PhysicalLineKind::Preprocessor {
-            // A directive is stepped over by a continued statement, so it
-            // cannot close a character literal the previous line left open;
-            // only the statement context goes.
-            let lex = state.lex;
-            state.reset_statement();
-            state.lex = lex;
+            // Directives are stepped over by both streams. Preserve protected
+            // lexical state, but retain the existing conservative choice not to
+            // carry structural formatting context through a preprocessing event.
+            state.ordinary.reset_context_preserving_lex();
+            state.conditional.reset_context_preserving_lex();
             continue;
         }
 
-        let context = state.context(&state.open_groups, document, index, cx);
+        let stream = &mut state.ordinary;
+        let context = stream.context(&stream.open_groups, document, index, cx);
         // A comment or blank line is stepped over too. It is still normalized
         // on its own terms, but through a scratch state: reading the group's
         // state would make the `!` of a comment inside an open literal look
@@ -223,7 +217,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
         let lex = if matches!(kind, PhysicalLineKind::Comment | PhysicalLineKind::Blank) {
             &mut scratch
         } else {
-            &mut state.lex
+            &mut stream.lex
         };
         let line = apply_rules(
             &document.lines[index],
@@ -239,7 +233,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 physical.kind,
                 PhysicalLineKind::Code | PhysicalLineKind::FindentFix
             ) {
-                state.advance(cx.analysis.buffer.code_bytes(physical), cx, index);
+                stream.advance(cx.analysis.buffer.code_bytes(physical), cx, index);
             }
         }
 
@@ -487,30 +481,6 @@ fn ends_with_dotted_operator(code: &[u8]) -> bool {
     !word.eq_ignore_ascii_case(b".true.") && !word.eq_ignore_ascii_case(b".false.")
 }
 
-fn openmp_clause_body_start(line: &[u8]) -> Option<usize> {
-    let start = line.iter().position(|byte| !matches!(byte, b' ' | b'\t'))?;
-    if !line[start..].starts_with(b"!$") {
-        return None;
-    }
-    let body_start = start + 2;
-    if line
-        .get(body_start)
-        .is_some_and(|byte| !matches!(byte, b' ' | b'\t'))
-    {
-        return None;
-    }
-    let body = line.get(body_start..)?.trim_ascii_start();
-    if body.len() >= 3
-        && body[..3].eq_ignore_ascii_case(b"omp")
-        && body
-            .get(3)
-            .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
-    {
-        return None;
-    }
-    Some(body_start)
-}
-
 #[derive(Clone, Copy, Default)]
 struct EntityListCursor {
     separator: bool,
@@ -562,6 +532,35 @@ mod rejoined_tests {
         config::FormatConfig,
         transform::{document::Document, pipeline::PassContext},
     };
+
+    #[test]
+    fn conditional_continuations_carry_full_statement_context() {
+        for source in [
+            b"!$ call f( &\n!$ & arg = 1)\n".as_slice(),
+            b"!$\tcall f( &\n!$\t& arg = 1)\n",
+        ] {
+            let mut document = Document::from_bytes(source);
+            let project = ProjectContext::empty();
+            let local = analyze_file(source).unwrap();
+            let config = FormatConfig::default();
+            let analysis = document.analyze().unwrap();
+            let scopes = ScopeTree::build(&analysis);
+            let context = PassContext {
+                config: &config,
+                project: &project,
+                local: &local,
+                analysis: &analysis,
+                scopes: &scopes,
+            };
+
+            super::run(&mut document, &context).unwrap();
+            assert!(
+                document.lines[1].windows(b"arg=1".len()).any(|w| w == b"arg=1"),
+                "conditional continuation lost named-argument context: {:?}",
+                String::from_utf8_lossy(&document.lines[1])
+            );
+        }
+    }
 
     #[test]
     fn rejoined_component_names_keep_authored_case() {
