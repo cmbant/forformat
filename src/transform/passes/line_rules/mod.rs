@@ -50,6 +50,7 @@ struct LineContext<'a> {
     continued_named_parameter: bool,
     continued_bind_parameter: bool,
     open_groups: &'a [bool],
+    multiple_subscript_depths: &'a [usize],
     continued_format: bool,
     continued_initializer: bool,
     /// The statement so far carried a top-level `::`, so this line continues
@@ -80,6 +81,7 @@ struct LineState {
     continued_bind_parameter: bool,
     continued_component: bool,
     open_groups: Vec<bool>,
+    multiple_subscript_depths: Vec<usize>,
     entity_list: EntityListCursor,
 }
 
@@ -87,6 +89,7 @@ impl LineState {
     fn context<'a>(
         &self,
         open_groups: &'a [bool],
+        multiple_subscript_depths: &'a [usize],
         document: &Document,
         index: usize,
         cx: &PassContext,
@@ -113,6 +116,7 @@ impl LineState {
             continued_named_parameter: self.continued_named_parameter,
             continued_bind_parameter: self.continued_bind_parameter,
             open_groups,
+            multiple_subscript_depths,
             continued_format,
             continued_initializer: self.entity_list.initializer,
             continued_separator: self.continued_statement && self.entity_list.separator,
@@ -130,20 +134,29 @@ impl LineState {
         self.continued_bind_parameter = false;
         self.continued_component = false;
         self.open_groups.clear();
+        self.multiple_subscript_depths.clear();
         self.entity_list = EntityListCursor::default();
     }
 
-    fn advance(&mut self, code: &[u8], cx: &PassContext, line_index: usize) {
+    fn advance(&mut self, code: &[u8], incoming: LexState, cx: &PassContext, line_index: usize) {
         self.continued_statement = trailing_ampersand(code);
         self.continued_infix = trailing_continuation_operand(code);
         self.continued_named_parameter = self.continued_statement && is_call_group(cx, line_index);
         self.continued_bind_parameter = self.continued_statement && is_bind_group(cx, line_index);
         self.continued_component =
             self.continued_statement && common::trailing_component_selector(code);
-        self.entity_list.advance(code, self.open_groups.len());
-        fold_open_groups(code, &mut self.open_groups);
+        common::delimiter_spacing::advance_multiple_subscript_depths(
+            code,
+            incoming,
+            self.open_groups.len(),
+            &mut self.multiple_subscript_depths,
+        );
+        self.entity_list
+            .advance(code, self.open_groups.len(), incoming);
+        fold_open_groups(code, &mut self.open_groups, incoming);
         if !self.continued_statement {
             self.open_groups.clear();
+            self.multiple_subscript_depths.clear();
             self.entity_list = EntityListCursor::default();
         }
     }
@@ -212,13 +225,21 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             continue;
         }
 
-        let context = state.context(&state.open_groups, document, index, cx);
+        let multiple_subscript_depths = state.multiple_subscript_depths.clone();
+        let context = state.context(
+            &state.open_groups,
+            &multiple_subscript_depths,
+            document,
+            index,
+            cx,
+        );
         // A comment or blank line is stepped over too. It is still normalized
         // on its own terms, but through a scratch state: reading the group's
         // state would make the `!` of a comment inside an open literal look
         // like literal text, and writing it back would let the apostrophe in
         // prose like `! don't` close the literal, so the `!` in `&def!ghi'` on
         // the resumed line would be rewritten as a comment marker.
+        let incoming_lex = state.lex;
         let mut scratch = LexState::default();
         let lex = if matches!(kind, PhysicalLineKind::Comment | PhysicalLineKind::Blank) {
             &mut scratch
@@ -239,7 +260,12 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 physical.kind,
                 PhysicalLineKind::Code | PhysicalLineKind::FindentFix
             ) {
-                state.advance(cx.analysis.buffer.code_bytes(physical), cx, index);
+                state.advance(
+                    cx.analysis.buffer.code_bytes(physical),
+                    incoming_lex,
+                    cx,
+                    index,
+                );
             }
         }
 
@@ -352,11 +378,13 @@ fn apply_rules(
             common::write_spacing::normalize_write_output_spacing_with_state(&text, cx, incoming);
     }
     // 4. Delimiter spacing.
-    text = common::delimiter_spacing::normalize_delimiter_spacing_with_state(
+    text = common::delimiter_spacing::normalize_delimiter_spacing_with_context(
         &text,
         cx,
         incoming,
         context.continued_statement,
+        context.open_groups.len(),
+        context.multiple_subscript_depths,
     );
     // 5. Comment spacing (physical lines only).
     if physical {
@@ -518,8 +546,8 @@ struct EntityListCursor {
 }
 
 impl EntityListCursor {
-    fn advance(&mut self, line: &[u8], depth: usize) {
-        let mut state = LexState::default();
+    fn advance(&mut self, line: &[u8], depth: usize, incoming: LexState) {
+        let mut state = incoming;
         let mut depth = depth;
         for token in tokenize(line, &mut state) {
             match token.kind {
@@ -539,8 +567,8 @@ impl EntityListCursor {
     }
 }
 
-fn fold_open_groups(line: &[u8], open: &mut Vec<bool>) {
-    let mut state = LexState::default();
+fn fold_open_groups(line: &[u8], open: &mut Vec<bool>, incoming: LexState) {
+    let mut state = incoming;
     for token in tokenize(line, &mut state) {
         match token.kind {
             TokenKind::LParen => open.push(true),

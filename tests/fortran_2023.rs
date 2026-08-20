@@ -237,3 +237,48 @@ fn intrinsic_procedure_names_do_not_reclassify_defined_dotted_operators() {
     assert!(output.contains("x = a .SUM. b"));
     assert!(output.contains("y = .nil."));
 }
+
+#[test]
+fn multiple_subscripts_normalize_as_compact_prefix_designators() {
+    let source = b"program p\n\
+x = a( @ [3,5])\n\
+x = a(6,@ [3,5],1)\n\
+x = a(@ : [4,6] : 2, :, 1)\n\
+x = c(@ v1, :, @ :: v3)\n\
+x = d(@ lo : hi : step, i : j)\n\
+print *, '@ [3,5] :: v' ! @ [3,5] :: v\n\
+end program p\n";
+
+    let once = normalize(source);
+    assert_eq!(normalize(&once), once);
+    let output = String::from_utf8(once).unwrap();
+
+    assert!(output.contains("x = a(@[3, 5])"));
+    assert!(output.contains("x = a(6, @[3, 5], 1)"));
+    assert!(output.contains("x = a(@:[4, 6]:2, :, 1)"));
+    assert!(output.contains("x = c(@v1, :, @::v3)"));
+    assert!(output.contains("x = d(@lo:hi:step, i : j)"));
+    assert!(output.contains("'@ [3,5] :: v' ! @ [3,5] :: v"));
+}
+
+#[test]
+fn multiple_subscript_prefix_is_not_a_wrap_break() {
+    let mut config = FormatConfig {
+        apply_indent: false,
+        ..FormatConfig::default()
+    };
+    config.wrap.line_length = 44;
+    let output = String::from_utf8(
+        format_source(
+            b"x = some_really_long_array_name(@ [1,2,3,4,5,6,7,8], another_argument)\n",
+            &config,
+        )
+        .unwrap()
+        .bytes,
+    )
+    .unwrap();
+
+    assert!(output.contains("@[1, 2"));
+    assert!(output.contains("&\n"));
+    assert!(!output.lines().any(|line| line.trim_end().ends_with("@ &")));
+}
