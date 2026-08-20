@@ -645,7 +645,8 @@ mod tests {
 
     #[test]
     fn openmp_sentinels_repeat_and_macros_keep_their_case() {
-        let mut document = Document::from_bytes(b"!$ parallel do private=foo\n!$ & map(to:X)\n");
+        let mut document =
+            Document::from_bytes(b"!$omp parallel do private=foo &\n!$omp & map(to:X)\n");
         let local = FileFacts::default();
         let mut project = ProjectContext::empty();
         project.define(&[crate::config::MacroDefine {
