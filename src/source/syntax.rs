@@ -128,7 +128,7 @@ pub(crate) struct OpenMpDirectivePrefix {
 pub(crate) fn openmp_directive_prefix(line: &[u8]) -> Option<OpenMpDirectivePrefix> {
     let start = line.iter().position(|byte| !matches!(byte, b' ' | b'\t'))?;
     let rest = line.get(start..)?;
-    if !rest.get(..2).is_some_and(|prefix| *prefix == *b"!$") {
+    if !rest.get(..2).is_some_and(|prefix| prefix == b"!$") {
         return None;
     }
 
@@ -261,8 +261,8 @@ mod tests {
     use super::{
         conditional_compilation_body_start, conditional_compilation_prefix,
         declaration_type_head_len, is_directive_comment, is_end_construct_keyword,
-        openmp_directive_prefix, ConditionalPrefix, ConditionalPrefixKind,
-        OpenMpDirectivePrefix, OpenMpDirectiveSentinel, SourceStream,
+        openmp_directive_prefix, ConditionalPrefix, ConditionalPrefixKind, OpenMpDirectivePrefix,
+        OpenMpDirectiveSentinel, SourceStream,
     };
     use crate::source::tokens::tokens;
 

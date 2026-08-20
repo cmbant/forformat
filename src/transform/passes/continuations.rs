@@ -685,9 +685,7 @@ mod tests {
     #[test]
     fn openmp_sentinels_repeat_and_macros_keep_their_case() {
         for sentinel in ["!$omp", "!$ompx"] {
-            let source = format!(
-                "{sentinel} parallel do private=foo &\n{sentinel} & map(to:X)\n"
-            );
+            let source = format!("{sentinel} parallel do private=foo &\n{sentinel} & map(to:X)\n");
             let mut document = Document::from_bytes(source.as_bytes());
             let local = FileFacts::default();
             let mut project = ProjectContext::empty();
