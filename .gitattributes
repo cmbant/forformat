@@ -1,9 +1,7 @@
-# Git for Windows defaults to core.autocrlf=true, which would check these out
-# with CRLF endings. bash then rejects the `#!/usr/bin/env bash\r` shebang, and
-# a pre-commit hook that cannot start aborts every commit.
-#
-# Deliberately narrow: a blanket `* text=auto` would also rewrite the golden
-# outputs under tests/expected/, which are compared byte-for-byte against
-# LF-emitting formatter output.
+# Keep recognized text files LF regardless of the contributor's Git settings.
+# Binary files are unaffected by `text=auto`.
+* text=auto eol=lf
+
+
 .githooks/** text eol=lf
 *.sh text eol=lf
