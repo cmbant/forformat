@@ -1,9 +1,7 @@
 name: Temporary source materialization
 
 on:
-  push:
-    branches:
-      - fix/conditional-continuation-state
+  pull_request:
 
 jobs:
   source:
