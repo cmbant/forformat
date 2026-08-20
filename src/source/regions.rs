@@ -4,7 +4,7 @@
 //! string literal / comment / Hollerith payload?" asks this module.  Before it
 //! existed the same quote state machine was reimplemented in `comment_start`,
 //! `split_statements`, `is_assignment`, `paren_alignment` and `reduce_line_into`;
-//! each copy was a place where doubled quotes or a Hollerith count could be
+//! each copy was a place where doubled delimiters or a Hollerith count could be
 //! handled slightly differently.  The classifier's copies were the last to go,
 //! and they had both failure modes: `is_assignment` left `'a''b'` half-open, and
 //! `single_line_after_paren` forgot to advance its cursor inside a literal, so
@@ -15,6 +15,7 @@
 //! state across physical lines so a character literal continued with `&` is a
 //! single protected region rather than two unterminated ones.
 
+use super::syntax::conditional_compilation_body_start;
 use std::ops::Range;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,6 +259,9 @@ pub fn is_code_offset(s: &[u8], offset: usize) -> bool {
 /// The comment offset of one physical line of a continuation group, carrying
 /// `state` on to the next line.
 ///
+/// Conditional-compilation sentinels are physical prefixes, not Fortran code.
+/// This scanner removes the prefix before lexing and translates the result back
+/// to a physical-line offset so every caller sees the same body semantics.
 /// A `!` only starts a comment when the scan reaches it outside a protected
 /// region, and a character literal continued with `&` keeps that region open
 /// across the line break — so the group has to be walked in order with one
@@ -265,10 +269,12 @@ pub fn is_code_offset(s: &[u8], offset: usize) -> bool {
 /// it the literal is merely unterminated, and leaking its state forward would
 /// swallow every later line's comment.
 pub fn line_comment_start(state: &mut LexState, line: &[u8]) -> Option<usize> {
+    let code_start = conditional_compilation_body_start(line).unwrap_or(0);
+    let code = &line[code_start..];
     let mut found = None;
-    line_scan(state, line, |region| {
+    line_scan(state, code, |region| {
         if found.is_none() && region.kind == RegionKind::Comment {
-            found = Some(region.range.start);
+            found = Some(code_start + region.range.start);
         }
     });
     found
@@ -278,9 +284,11 @@ pub fn line_comment_start(state: &mut LexState, line: &[u8]) -> Option<usize> {
 /// than the comment offset: the code spans of one physical line of a
 /// continuation group, with `state` carried on to the next line.
 pub fn line_code_spans<F: FnMut(usize, &[u8])>(state: &mut LexState, line: &[u8], mut f: F) {
-    line_scan(state, line, |region| {
+    let code_start = conditional_compilation_body_start(line).unwrap_or(0);
+    let code = &line[code_start..];
+    line_scan(state, code, |region| {
         if region.kind == RegionKind::Code {
-            f(region.range.start, &line[region.range]);
+            f(code_start + region.range.start, &code[region.range]);
         }
     });
 }
@@ -306,10 +314,10 @@ fn line_scan<F: FnMut(Region)>(state: &mut LexState, line: &[u8], push: F) {
 /// close it -- the apostrophe in prose like `! don't stop here` is not a
 /// delimiter, and the literal resumes at the `&` on the next code line.
 ///
-/// The OpenMP sentinel is deliberately not in the set: `!$ ` introduces
-/// conditionally compiled *code*, which a group absorbs like any other line.
-/// Which of the two streams a line belongs to matters as well, and that part is
-/// the caller's: see `continuations::conditional_stream`.
+/// A free-form conditional-compilation sentinel is deliberately not in the set:
+/// `!$` followed by a horizontal blank introduces conditionally compiled code,
+/// which a group absorbs like any other line. Which of the two streams a line
+/// belongs to matters as well, and that part is the caller's.
 ///
 /// A `!findentfix:` line *is* in the set, and this is the one place the set is
 /// deliberately wider than [`LogicalGroup::visit`]'s, which treats
@@ -327,11 +335,12 @@ fn line_scan<F: FnMut(Region)>(state: &mut LexState, line: &[u8], push: F) {
 /// [`LogicalGroup::visit`]: crate::source::LogicalGroup::visit
 /// [`PhysicalLineKind::FindentFix`]: crate::source::PhysicalLineKind::FindentFix
 pub fn stepped_over_by_continuation(line: &[u8]) -> bool {
+    let conditional = conditional_compilation_body_start(line).is_some();
     let line = line.trim_ascii_start();
     line.is_empty()
         || line.starts_with(b"#")
         || line.starts_with(b"??")
-        || (line.starts_with(b"!") && !line.starts_with(b"!$ "))
+        || (line.starts_with(b"!") && !conditional)
 }
 
 /// Visit every code region of `s` as `(start offset, bytes)`, skipping string
@@ -547,10 +556,34 @@ mod tests {
     }
 
     #[test]
+    fn conditional_sentinel_body_is_scanned_as_fortran() {
+        let mut state = LexState::default();
+        assert_eq!(
+            super::line_comment_start(&mut state, b"!$\ts = 'abc &"),
+            None
+        );
+        assert!(state.in_literal());
+        assert_eq!(
+            super::line_comment_start(&mut state, b"!$\t&def!ghi' ! tail"),
+            Some(13)
+        );
+        assert!(!state.in_literal());
+
+        let mut state = LexState::default();
+        let mut spans = Vec::new();
+        super::line_code_spans(&mut state, b"!$\tinteger :: x ! note", |start, span| {
+            spans.push((start, span.to_vec()));
+        });
+        assert_eq!(spans, [(3, b"integer :: x ".to_vec())]);
+    }
+
+    #[test]
     fn an_openmp_sentinel_is_code_not_a_skipped_line() {
-        // `!$ ` introduces conditionally compiled code, so a group absorbs it
-        // like any other line rather than stepping over it.
+        // Conditional compilation introduces Fortran code, so a group absorbs
+        // either supported horizontal-blank spelling rather than stepping over
+        // it. Joined directive spellings remain comments to this predicate.
         assert!(!super::stepped_over_by_continuation(b"!$ x = 1"));
+        assert!(!super::stepped_over_by_continuation(b"!$\tx = 1"));
         assert!(super::stepped_over_by_continuation(b"!$OMP parallel"));
     }
 
