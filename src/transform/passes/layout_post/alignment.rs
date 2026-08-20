@@ -14,7 +14,7 @@ use crate::{
     config::FormatConfig,
     error::FormatError,
     source::{
-        regions::{comment_start, line_comment_start},
+        regions::{comment_start, line_comment_start, stepped_over_by_continuation},
         syntax::is_directive_comment,
         tokens::{tokenize, TokenKind},
         LexState,
@@ -223,6 +223,13 @@ fn declaration_separator_info_in(
     lex: &mut LexState,
     multiple_subscript: &mut MultipleSubscriptState,
 ) -> Option<(usize, usize, usize)> {
+    let carrying_statement = *lex != LexState::default()
+        || multiple_subscript.open_depth > 0
+        || !multiple_subscript.active_depths.is_empty();
+    if carrying_statement && stepped_over_by_continuation(line) {
+        return None;
+    }
+
     let tokens = tokenize(line, lex);
     let scan = scan_multiple_subscripts(
         &tokens,
@@ -240,17 +247,20 @@ fn declaration_separator_info_in(
         .map(|(_, token)| token.span.start);
 
     let has_code = tokens.iter().any(|token| token.kind != TokenKind::Comment);
-    let continued = has_code
-        && tokens
-            .iter()
-            .rev()
-            .find(|token| token.kind != TokenKind::Comment)
-            .is_some_and(|token| token.kind == TokenKind::Ampersand);
+    let trailing_token_marker = tokens
+        .iter()
+        .rev()
+        .find(|token| token.kind != TokenKind::Comment)
+        .is_some_and(|token| token.kind == TokenKind::Ampersand);
+    let protected_trailing_marker = (lex.in_literal() || lex.in_hollerith())
+        && line.trim_ascii_end().last() == Some(&b'&');
+    let continued = has_code && (trailing_token_marker || protected_trailing_marker);
     if has_code {
         if continued {
             multiple_subscript.open_depth = scan.end_depth;
             multiple_subscript.active_depths = scan.active_depths;
         } else {
+            *lex = LexState::default();
             *multiple_subscript = MultipleSubscriptState::default();
         }
     }
