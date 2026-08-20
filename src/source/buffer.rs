@@ -1,4 +1,7 @@
-use super::{regions::LexState, Newline, PhysicalLine, PhysicalLineKind};
+use super::{
+    regions::LexState, syntax::conditional_compilation_body_start, Newline, PhysicalLine,
+    PhysicalLineKind,
+};
 use crate::error::FormatError;
 use std::ops::Range;
 
@@ -72,7 +75,8 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         while first < content.len() && (content[first] == b' ' || content[first] == b'\t') {
             first += 1;
         }
-        let omp = content.get(first..).is_some_and(|s| s.starts_with(b"!$ "));
+        let conditional_start = conditional_compilation_body_start(content);
+        let omp = conditional_start.is_some();
         let trimmed = &content[first..];
         let kind = if trimmed.is_empty() {
             PhysicalLineKind::Blank
@@ -89,13 +93,12 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         } else {
             PhysicalLineKind::Code
         };
+        let code_offset = conditional_start.unwrap_or(first);
         let mut comment = None;
         if matches!(kind, PhysicalLineKind::Code | PhysicalLineKind::FindentFix) {
-            let code = if omp { &trimmed[3..] } else { trimmed };
+            let code = &content[code_offset..];
             if let Some(i) = super::regions::line_comment_start(state, code) {
-                comment = Some(
-                    (span.start + first + if omp { 3 } else { 0 } + i) as u32..span.end as u32,
-                );
+                comment = Some((span.start + code_offset + i) as u32..span.end as u32);
             }
         }
         // The other kinds deliberately leave `state` alone.  A continued
@@ -105,7 +108,7 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         // Outside such a context the scan above already left `state` default,
         // so there is nothing to reset either way.
         let code_end = comment.as_ref().map_or(span.end, |r| r.start as usize);
-        let code_start = span.start + first + if omp { 3 } else { 0 };
+        let code_start = span.start + code_offset;
         PhysicalLine {
             span: span.start as u32..span.end as u32,
             newline,
@@ -174,6 +177,16 @@ mod tests {
     }
 
     #[test]
+    fn conditional_compilation_accepts_space_or_tab_sentinels() {
+        let buffer = SourceBuffer::new(b"!$ x = 1\n!$\ty = 2 ! note\n").unwrap();
+        assert!(buffer.lines[0].omp);
+        assert!(buffer.lines[1].omp);
+        assert_eq!(buffer.code_bytes(&buffer.lines[0]), b"x = 1");
+        assert_eq!(buffer.code_bytes(&buffer.lines[1]), b"y = 2 ");
+        assert!(buffer.lines[1].comment_span.is_some());
+    }
+
+    #[test]
     fn source_spans_preserve_mixed_newlines_and_lone_carriage_returns() {
         let buffer = SourceBuffer::new(b" a\r\nb\nc\r\n").unwrap();
         assert_eq!(buffer.lines.len(), 3);
@@ -184,6 +197,7 @@ mod tests {
 
         let lone = SourceBuffer::new(b"a\rb").unwrap();
         assert_eq!(lone.lines.len(), 1);
+        assert_eq!(buffer.line_bytes(&buffer.lines[0]), b" a");
         assert_eq!(lone.line_bytes(&lone.lines[0]), b"a\rb");
     }
 
