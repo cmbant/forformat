@@ -27,8 +27,10 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
 /// cosmetic: `sub&` / `&routine` is one `subroutine` token only while the `&`
 /// immediately follows the token's characters. Writing the marker out as ` &`
 /// there leaves `sub routine`, which is a different program — and one gfortran
-/// rejects. Both neighbours are found by skipping the comment, blank and CPP
-/// lines a continuation passes over, because a split token may straddle them.
+/// rejects. Both neighbours are found by skipping physical lines the logical
+/// statement also steps over: comments, blanks and preprocessor directives.
+/// A conditional `!$ ` line is different: it is Fortran code with a sentinel
+/// prefix, so its body participates in continuation and lexical-token state.
 ///
 /// Port target: `normalize_continuations`.
 pub fn normalize_continuations(
@@ -42,22 +44,36 @@ pub fn normalize_continuations(
     let mut continuation = false;
     let mut state = LexState::default();
     for (index, original_line) in original.iter().enumerate() {
-        let incoming_literal = state.in_literal();
+        let passed_over = passed_over_by_a_continuation(original_line);
+        let incoming_protected = state.in_literal() || state.in_hollerith();
         let mut line = original_line.clone();
-        state.scan(original_line, |_| {});
-        let in_literal = incoming_literal || state.in_literal();
+        let code = fortran_code(original_line);
+        let mut comment = None;
+        if !passed_over {
+            state.scan(code, |region| {
+                if comment.is_none() && region.kind == RegionKind::Comment {
+                    comment = Some(region.range.start);
+                }
+            });
+        }
+        let protected = incoming_protected || state.in_literal() || state.in_hollerith();
         let lexical_prefix = previous_statement_line[index]
             .is_some_and(|at| is_lexical_token_continuation(&original[at], original_line));
         let lexical_suffix = next_statement_line[index]
             .is_some_and(|at| is_lexical_token_continuation(original_line, &original[at]));
-        if continuation && !in_literal && !lexical_prefix {
+        if continuation && !protected && !lexical_prefix {
             line = remove_leading_continuation(&line);
         }
-        if !in_literal && !lexical_suffix {
+        if !protected && !lexical_suffix {
             line = normalize_continuation_marker(&line);
         }
         normalized.push(line);
-        continuation = ends_with_continuation(original_line);
+        if !passed_over {
+            continuation = ends_with_continuation_before(code, comment);
+            if code.trim_ascii_end().last() != Some(&b'&') {
+                state = LexState::default();
+            }
+        }
     }
     if normalized == original {
         return Ok(Changed::No);
@@ -84,40 +100,15 @@ pub fn normalize_openmp_continuation_sentinels(
     let mut updated = document.lines.clone();
     for line in &mut updated {
         let mut current = line.clone();
-        let Some((sentinel_end, body_start, omp_style)) = openmp_prefix(&current) else {
+        let Some((_, body_start, omp_style)) = openmp_prefix(&current) else {
             continuation = false;
             continue;
         };
-        // `!$` conditional-compilation lines and `!$OMP` directives share a
-        // lexical prefix but not a formatting language.  The former keeps its
-        // authored body bytes; only the latter gets directive normalization.
+        // `!$ ` conditional-compilation lines are ordinary Fortran code with
+        // a sentinel prefix. Step 12 owns their continuation markers, including
+        // the lexical-token exception; this pass only normalizes `!$OMP`.
         if !omp_style {
-            let body = &current[body_start..];
-            let leading_ampersand = body
-                .iter()
-                .position(|byte| !byte.is_ascii_whitespace())
-                .is_some_and(|start| body[start] == b'&');
-            if leading_ampersand || continuation {
-                let mut start = body_start;
-                while start < current.len() && current[start].is_ascii_whitespace() {
-                    start += 1;
-                }
-                if current.get(start) == Some(&b'&') {
-                    start += 1;
-                    while start < current.len() && current[start].is_ascii_whitespace() {
-                        start += 1;
-                    }
-                    let mut rebuilt = current[..sentinel_end].to_vec();
-                    rebuilt.push(b' ');
-                    rebuilt.extend_from_slice(&current[start..]);
-                    if rebuilt != current {
-                        current = rebuilt;
-                        changed = changed.or(Changed::Text);
-                    }
-                }
-            }
-            continuation = openmp_body(&current).is_some_and(ends_with_continuation);
-            *line = current;
+            continuation = false;
             continue;
         }
         let body = &current[body_start..];
@@ -158,20 +149,41 @@ fn is_lexical_token_continuation(first: &[u8], second: &[u8]) -> bool {
     lexical_prefix_end(first).is_some() && leading_lexical_suffix_start(second).is_some()
 }
 
-/// A physical line a continued statement passes over rather than resumes on:
-/// a comment, a blank, or a CPP directive.  These are the lines
-/// `LogicalGroup::visit` steps across while joining a statement, so they are
-/// also the lines a split lexical token may straddle.
+/// A physical line a continued statement passes over rather than resumes on.
 ///
-/// Testing the bytes is enough because the only caller's answer is consulted
-/// solely on lines outside a literal: a `!` that opens no comment because it
-/// sits inside a continued string is on a line where `in_literal` already
-/// suppresses both rewrites.
+/// Keep this byte-level predicate in lock-step with `SourceBuffer`'s physical
+/// line classification: blanks, comments, `#`/`??` preprocessing lines and
+/// OpenMP directives are skipped by a surrounding Fortran continuation, while
+/// `!$ ` conditional-compilation lines are Fortran code and must participate.
+///
+/// The explicit `!$ ` exception is important for both neighbour selection and
+/// state: treating it as a comment can make a lexical token spuriously jump
+/// across executable code.
 fn passed_over_by_a_continuation(line: &[u8]) -> bool {
-    match line.iter().find(|byte| !byte.is_ascii_whitespace()) {
-        None => true,
-        Some(byte) => matches!(byte, b'!' | b'#'),
-    }
+    let line = line.trim_ascii_start();
+    line.is_empty()
+        || line.starts_with(b"#")
+        || line.starts_with(b"??")
+        || (line.starts_with(b"!") && !line.starts_with(b"!$ "))
+}
+
+/// Slice away the conditional-compilation sentinel from a physical line.
+///
+/// `SourceBuffer` classifies exactly `!$ ` (after indentation) as Fortran code
+/// and scans the bytes after that three-byte sentinel. Continuation syntax must
+/// use the same view or `!` is mistaken for a comment marker.
+fn fortran_code(line: &[u8]) -> &[u8] {
+    &line[fortran_code_start(line)..]
+}
+
+fn fortran_code_start(line: &[u8]) -> usize {
+    let Some(start) = line.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return 0;
+    };
+    line.get(start..)
+        .is_some_and(|rest| rest.starts_with(b"!$ "))
+        .then_some(start + 3)
+        .unwrap_or(0)
 }
 
 /// For every line, the nearest line above and below it that carries part of the
@@ -205,12 +217,13 @@ fn statement_neighbours(lines: &[Vec<u8>]) -> (Vec<Option<usize>>, Vec<Option<us
 }
 
 fn lexical_prefix_end(line: &[u8]) -> Option<usize> {
+    let line = fortran_code(line);
     if crate::source::regions::comment_start(line).is_some() {
         return None;
     }
     let mut state = LexState::default();
     state.scan(line, |_| {});
-    if state.in_literal() {
+    if state.in_literal() || state.in_hollerith() {
         return None;
     }
     let mut end = line.len();
@@ -226,6 +239,7 @@ fn lexical_prefix_end(line: &[u8]) -> Option<usize> {
 }
 
 fn leading_lexical_suffix_start(line: &[u8]) -> Option<usize> {
+    let line = fortran_code(line);
     let mut start = 0;
     while start < line.len() && line[start].is_ascii_whitespace() {
         start += 1;
@@ -241,8 +255,12 @@ fn leading_lexical_suffix_start(line: &[u8]) -> Option<usize> {
 }
 
 fn ends_with_continuation(line: &[u8]) -> bool {
-    let end = crate::source::regions::comment_start(line).unwrap_or(line.len());
-    let mut end = end;
+    let line = fortran_code(line);
+    ends_with_continuation_before(line, crate::source::regions::comment_start(line))
+}
+
+fn ends_with_continuation_before(line: &[u8], comment: Option<usize>) -> bool {
+    let mut end = comment.unwrap_or(line.len());
     while end > 0 && line[end - 1].is_ascii_whitespace() {
         end -= 1;
     }
@@ -250,39 +268,43 @@ fn ends_with_continuation(line: &[u8]) -> bool {
 }
 
 fn remove_leading_continuation(line: &[u8]) -> Vec<u8> {
+    let code_start = fortran_code_start(line);
+    let code = &line[code_start..];
     let mut start = 0;
-    while start < line.len() && line[start].is_ascii_whitespace() {
+    while start < code.len() && code[start].is_ascii_whitespace() {
         start += 1;
     }
-    if line.get(start) != Some(&b'&') {
+    if code.get(start) != Some(&b'&') {
         return line.to_vec();
     }
     let mut next = start + 1;
-    while next < line.len() && line[next].is_ascii_whitespace() {
+    while next < code.len() && code[next].is_ascii_whitespace() {
         next += 1;
     }
-    let mut result = line[..start].to_vec();
-    result.extend_from_slice(&line[next..]);
+    let mut result = line[..code_start + start].to_vec();
+    result.extend_from_slice(&code[next..]);
     result
 }
 
 fn normalize_continuation_marker(line: &[u8]) -> Vec<u8> {
-    let comment = crate::source::regions::comment_start(line).unwrap_or(line.len());
+    let code_start = fortran_code_start(line);
+    let code = &line[code_start..];
+    let comment = crate::source::regions::comment_start(code).unwrap_or(code.len());
     let mut end = comment;
-    while end > 0 && line[end - 1].is_ascii_whitespace() {
+    while end > 0 && code[end - 1].is_ascii_whitespace() {
         end -= 1;
     }
-    if end == 0 || line.get(end - 1) != Some(&b'&') {
+    if end == 0 || code.get(end - 1) != Some(&b'&') {
         return line.to_vec();
     }
     let mut code_end = end - 1;
-    while code_end > 0 && line[code_end - 1].is_ascii_whitespace() {
+    while code_end > 0 && code[code_end - 1].is_ascii_whitespace() {
         code_end -= 1;
     }
-    let mut result = line[..code_end].to_vec();
+    let mut result = line[..code_start + code_end].to_vec();
     result.extend_from_slice(b" &");
-    result.extend_from_slice(&line[end..comment]);
-    result.extend_from_slice(&line[comment..]);
+    result.extend_from_slice(&code[end..comment]);
+    result.extend_from_slice(&code[comment..]);
     result
 }
 
@@ -477,7 +499,7 @@ fn normalize_openmp_clause_separators(body: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_continuations, normalize_openmp_continuation_sentinels};
+    use super::{normalize_continuations, normalize_openmp_continuation_sentinels, run};
     use crate::{
         analysis::{FileFacts, ProjectContext, ScopeTree},
         config::{FormatConfig, FormatMode},
@@ -517,13 +539,21 @@ mod tests {
     }
 
     /// A token split across a continuation keeps its `&` glued to the token
-    /// even when a comment, a blank or a CPP directive sits between the halves.
+    /// even when a comment, a blank or a preprocessor directive sits between
+    /// the halves.
     /// Normalizing the marker to ` &` there un-splits the token: `sub&` /
     /// `&routine` stops being `subroutine` and becomes `sub routine`, which is
     /// not the program that was authored and does not compile.
     #[test]
     fn a_split_token_survives_a_separator_between_its_halves() {
-        for separator in ["!comment", "", "   ", "#ifdef X", "! don't stop here"] {
+        for separator in [
+            "!comment",
+            "",
+            "   ",
+            "#ifdef X",
+            "?? if X",
+            "! don't stop here",
+        ] {
             let source = format!("sub&\n{separator}\n&routine sub\nx = 1\nend subroutine sub\n");
             let mut document = Document::from_bytes(source.as_bytes());
             let local = FileFacts::default();
@@ -540,6 +570,76 @@ mod tests {
                 "leading marker lost across {separator:?}"
             );
         }
+    }
+
+    #[test]
+    fn ordinary_continuation_state_survives_passed_over_lines() {
+        for separator in ["!comment", "", "   ", "#ifdef X", "?? if X"] {
+            let source = format!("x = a &\n{separator}\n  & b\n");
+            let mut document = Document::from_bytes(source.as_bytes());
+            let local = FileFacts::default();
+            let project = ProjectContext::empty();
+            normalize_continuations(&mut document, &cx(&local, &project)).unwrap();
+            assert_eq!(
+                document.lines[2],
+                b"  b".to_vec(),
+                "continuation state stopped at {separator:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn continued_literal_state_survives_passed_over_lines() {
+        for separator in ["! don't close this", "", "#ifdef X", "?? if X"] {
+            let source = format!("x = 'ab &\n{separator}\n&cd'\n");
+            let mut document = Document::from_bytes(source.as_bytes());
+            let original = document.lines.clone();
+            let local = FileFacts::default();
+            let project = ProjectContext::empty();
+            assert_eq!(
+                normalize_continuations(&mut document, &cx(&local, &project)).unwrap(),
+                Changed::No,
+                "literal state was lost at {separator:?}"
+            );
+            assert_eq!(document.lines, original);
+        }
+    }
+
+    #[test]
+    fn unterminated_literal_without_continuation_does_not_leak_state() {
+        let mut document =
+            Document::from_bytes(b"x = 'unterminated\ny = a &\n  & b\n");
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+        normalize_continuations(&mut document, &cx(&local, &project)).unwrap();
+        assert_eq!(document.lines[2], b"  b".to_vec());
+    }
+
+    #[test]
+    fn conditional_compilation_lines_participate_in_continuation_state() {
+        let mut document = Document::from_bytes(
+            b"!$ sub&\n!$ &routine sub\n!$ x = a &\n!$   & b\n",
+        );
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+        run(&mut document, &cx(&local, &project)).unwrap();
+
+        assert_eq!(document.lines[0], b"!$ sub&".to_vec());
+        assert_eq!(document.lines[1], b"!$ &routine sub".to_vec());
+        assert_eq!(document.lines[2], b"!$ x = a &".to_vec());
+        assert_eq!(document.lines[3], b"!$   b".to_vec());
+    }
+
+    #[test]
+    fn conditional_compilation_line_stops_neighbour_search() {
+        let mut document =
+            Document::from_bytes(b"sub&\n!$ x = 1\n&routine sub\n");
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+        normalize_continuations(&mut document, &cx(&local, &project)).unwrap();
+
+        assert_eq!(document.lines[0], b"sub &".to_vec());
+        assert_eq!(document.lines[2], b"&routine sub".to_vec());
     }
 
     #[test]
