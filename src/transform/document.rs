@@ -38,7 +38,7 @@ impl Document {
     ///
     /// Mixed terminators are normalized to the dominant one in ordinary full
     /// and normalize-only modes; canonicalization-only opts into exact
-    /// restoration with [`Self::preserve_original_line_endings`].
+    /// restoration through the internal `preserve_original_line_endings` policy.
     pub fn from_bytes(source: &[u8]) -> Self {
         let mut lines = Vec::new();
         let mut line_endings = Vec::new();
