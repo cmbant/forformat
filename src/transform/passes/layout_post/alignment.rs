@@ -15,7 +15,7 @@ use crate::{
     error::FormatError,
     source::{
         regions::{comment_start, line_code_spans, line_comment_start},
-        syntax::is_directive_comment,
+        syntax::{conditional_compilation_prefix, is_directive_comment},
         LexState,
     },
     transform::{
@@ -239,16 +239,14 @@ fn preprocessor_lines(lines: &[Vec<u8>]) -> Vec<bool> {
 ///
 /// The lexical state is threaded through the walk because a `!` or a `::` on
 /// the second physical line of a continued character literal is literal text:
-/// padding it to a column would write bytes into the literal.  A directive line
-/// carries no column and ends any state a malformed buffer left open.
+/// padding it to a column would write bytes into the literal. Conditional
+/// sentinels are source prefixes, not Fortran body bytes, so they are removed
+/// before scanning and their width is added back to any returned column.
 fn column_info(
     lines: &[Vec<u8>],
     cpp_lines: &[bool],
     mut info: impl FnMut(&[u8], &mut LexState) -> Option<(usize, usize, usize)>,
 ) -> Vec<Option<(usize, usize, usize)>> {
-    // One state per sentinel stream: a statement continues only within its own,
-    // so consecutive `!$ ` lines splice with each other while an ordinary
-    // literal spans an intervening one.
     let mut lex = [LexState::default(), LexState::default()];
     lines
         .iter()
@@ -257,11 +255,14 @@ fn column_info(
             if *cpp {
                 // A directive line is stepped over, not lexed: it can sit
                 // between the halves of a continued literal without ending it.
-                None
-            } else {
-                let stream = usize::from(line.trim_ascii_start().starts_with(b"!$ "));
-                info(line, &mut lex[stream])
+                return None;
             }
+            let prefix = conditional_compilation_prefix(line);
+            let stream = usize::from(prefix.is_some());
+            let body_start = prefix.map_or(0, |prefix| prefix.body_start);
+            info(&line[body_start..], &mut lex[stream]).map(|(column, before, after)| {
+                (body_start + column, before, after)
+            })
         })
         .collect()
 }
@@ -368,8 +369,9 @@ fn aligned_members(
     // one would collapse the alignment of every commented declaration.
     let width_at = |(line_index, (column, _, after)): &BlockMember, target: usize| {
         let line = &original[*line_index];
-        let code_end =
-            comment_start(line).map_or(line.len(), |at| line[..at].trim_ascii_end().len());
+        let code = code_context(line);
+        let body_start = line.len() - code.len();
+        let code_end = body_start + code.trim_ascii_end().len();
         target + 3 + code_end.saturating_sub(column + 2 + after)
     };
     let mut members: Vec<&BlockMember> = block
@@ -468,7 +470,9 @@ fn shares_one_column(separators: &[Option<(usize, usize, usize)>], run: &[usize]
 }
 
 fn code_context(line: &[u8]) -> &[u8] {
-    comment_start(line).map_or(line, |index| &line[..index])
+    let body_start = conditional_compilation_prefix(line).map_or(0, |prefix| prefix.body_start);
+    let body = &line[body_start..];
+    comment_start(body).map_or(body, |index| &body[..index])
 }
 
 fn trimmed(code: &[u8]) -> &[u8] {
