@@ -36,11 +36,10 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         }
         let mut lines = Vec::new();
         let mut start = 0usize;
-        // One lexical state for the whole file: a character literal or
-        // Hollerith payload that a `&` carries onto the next physical line is
-        // still protected there, so the `!` in `&def!ghi')` is literal text
-        // rather than the start of a comment.
-        let mut state = LexState::default();
+        // Ordinary and conditional-compilation code carry independent lexical
+        // state. A literal continued in one stream steps over a physical line
+        // from the other stream, so that line must not close or reset it.
+        let mut states = [LexState::default(), LexState::default()];
         for (i, b) in source.iter().enumerate() {
             if *b == b'\n' {
                 let is_crlf = i > start && source[i - 1] == b'\r';
@@ -49,7 +48,7 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
                     &source[start..end],
                     start..end,
                     if is_crlf { Newline::CrLf } else { Newline::Lf },
-                    &mut state,
+                    &mut states,
                 ));
                 start = i + 1;
             }
@@ -59,7 +58,7 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
                 &source[start..],
                 start..source.len(),
                 Newline::None,
-                &mut state,
+                &mut states,
             ));
         }
         Ok(Self { bytes, lines })
@@ -69,7 +68,7 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         content: &[u8],
         span: Range<usize>,
         newline: Newline,
-        state: &mut LexState,
+        states: &mut [LexState; 2],
     ) -> PhysicalLine {
         let mut first = 0;
         while first < content.len() && (content[first] == b' ' || content[first] == b'\t') {
@@ -97,16 +96,15 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         let mut comment = None;
         if matches!(kind, PhysicalLineKind::Code | PhysicalLineKind::FindentFix) {
             let code = &content[code_offset..];
+            let state = &mut states[usize::from(omp)];
             if let Some(i) = super::regions::line_comment_start(state, code) {
                 comment = Some((span.start + code_offset + i) as u32..span.end as u32);
             }
         }
-        // The other kinds deliberately leave `state` alone.  A continued
-        // statement steps over blank, comment and directive lines, so one
-        // appearing inside an open character context neither closes it nor
-        // lexes as part of it; the literal resumes on the next code line.
-        // Outside such a context the scan above already left `state` default,
-        // so there is nothing to reset either way.
+        // Non-code lines leave both stream states alone. A continued statement
+        // steps over blank, comment and directive lines, so one appearing
+        // inside an open protected context neither closes it nor lexes as part
+        // of it; the literal resumes on the next code line of the same stream.
         let code_end = comment.as_ref().map_or(span.end, |r| r.start as usize);
         let code_start = span.start + code_offset;
         PhysicalLine {
@@ -188,6 +186,17 @@ mod tests {
         assert!(buffer.lines[1].comment_span.is_some());
         assert_eq!(buffer.code_bytes(&buffer.lines[2]), b"call f( &");
         assert_eq!(buffer.code_bytes(&buffer.lines[3]), b"& arg = 1)");
+    }
+
+    #[test]
+    fn lexical_state_is_independent_between_sentinel_streams() {
+        let ordinary = SourceBuffer::new(b"x = 'ab &\n!$ y = 2\n&cd!ef'\n").unwrap();
+        assert!(ordinary.lines[2].comment_span.is_none());
+        assert_eq!(ordinary.code_bytes(&ordinary.lines[2]), b"&cd!ef'");
+
+        let conditional = SourceBuffer::new(b"!$ x = 'ab &\ny = 2\n!$&cd!ef'\n").unwrap();
+        assert!(conditional.lines[2].comment_span.is_none());
+        assert_eq!(conditional.code_bytes(&conditional.lines[2]), b"&cd!ef'");
     }
 
     #[test]
