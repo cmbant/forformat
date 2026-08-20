@@ -7,7 +7,7 @@ use crate::{
         regions::LexState,
         syntax::{
             conditional_compilation_body_start, conditional_compilation_prefix,
-            ConditionalPrefixKind,
+            openmp_directive_prefix, ConditionalPrefixKind, SourceStream,
         },
         RegionKind,
     },
@@ -52,11 +52,11 @@ pub fn normalize_continuations(
     let mut normalized = Vec::with_capacity(original.len());
     let mut continuation = false;
     let mut state = LexState::default();
-    let mut open_stream: Option<bool> = None;
+    let mut open_stream: Option<SourceStream> = None;
     for (index, original_line) in original.iter().enumerate() {
-        let conditional = conditional_stream(original_line);
-        let passed_over = (regions::stepped_over_by_continuation(original_line) && !conditional)
-            || open_stream.is_some_and(|open| open != conditional);
+        let stream = source_stream(original_line);
+        let passed_over = regions::stepped_over_by_continuation(original_line)
+            || open_stream.is_some_and(|open| open != stream);
         let incoming_protected = state.in_literal() || state.in_hollerith();
         let mut line = original_line.clone();
         let code = fortran_code(original_line);
@@ -86,7 +86,7 @@ pub fn normalize_continuations(
                 state = LexState::default();
             }
             let still_open = continuation || state.in_literal() || state.in_hollerith();
-            open_stream = still_open.then_some(conditional);
+            open_stream = still_open.then_some(stream);
         }
     }
     if normalized == original {
@@ -98,10 +98,11 @@ pub fn normalize_continuations(
 
 /// Step 13: OpenMP continuation sentinels.
 ///
-/// A continued directive needs a repeated `!$OMP` on each physical line with
-/// valid `&` markers, and the available width has to account for the sentinel.
-/// Note that `--openmp=0` disables OpenMP *indentation* while directive *text*
-/// normalization stays on: two concerns, two config fields, never one flag.
+/// A continued directive needs a repeated reserved sentinel (`!$OMP` or
+/// `!$OMPX`) on each physical line with valid `&` markers, and the available
+/// width has to account for the sentinel. `--openmp=0` disables OpenMP
+/// *indentation* while directive *text* normalization stays on: two concerns,
+/// two config fields, never one flag.
 ///
 /// Port target: `normalize_openmp_continuation_sentinels`,
 /// `join_openmp_directive`, `wrap_openmp_directive`.
@@ -114,24 +115,17 @@ pub fn normalize_openmp_continuation_sentinels(
     let mut updated = document.lines.clone();
     for line in &mut updated {
         let mut current = line.clone();
-        let Some((_, body_start, omp_style)) = openmp_prefix(&current) else {
+        let Some(prefix) = openmp_directive_prefix(&current) else {
             continuation = false;
             continue;
         };
-        // Conditional-compilation lines are ordinary Fortran code with a
-        // sentinel prefix. Step 12 owns their continuation markers, including
-        // the lexical-token exception; this pass only normalizes `!$OMP`.
-        if !omp_style {
-            continuation = false;
-            continue;
-        }
-        let body = &current[body_start..];
+        let body = &current[prefix.body_start..];
         let is_continuation = body
             .iter()
             .position(|byte| !byte.is_ascii_whitespace())
             .is_some_and(|start| body[start] == b'&');
         let should_repeat = is_continuation || continuation;
-        let mut start = body_start;
+        let mut start = prefix.body_start;
         if should_repeat && current.get(start) == Some(&b'&') {
             start += 1;
             while start < current.len() && current[start].is_ascii_whitespace() {
@@ -144,7 +138,7 @@ pub fn normalize_openmp_continuation_sentinels(
             .position(|byte| !byte.is_ascii_whitespace())
             .unwrap_or(0);
         let mut rebuilt = current[..indent_end].to_vec();
-        rebuilt.extend_from_slice(b"!$OMP ");
+        rebuilt.extend_from_slice(prefix.sentinel.canonical());
         rebuilt.extend_from_slice(&normalized_body);
         if rebuilt != current {
             current = rebuilt;
@@ -181,35 +175,41 @@ fn fortran_code_start(line: &[u8]) -> usize {
 fn statement_neighbours(lines: &[Vec<u8>]) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
     let carries_statement: Vec<bool> = lines
         .iter()
-        .map(|line| conditional_stream(line) || !regions::stepped_over_by_continuation(line))
+        .map(|line| !regions::stepped_over_by_continuation(line))
         .collect();
-    // One cursor per stream, so a neighbour is always of the line's own class.
-    let stream: Vec<usize> = lines
-        .iter()
-        .map(|line| usize::from(conditional_stream(line)))
-        .collect();
+    let streams: Vec<SourceStream> = lines.iter().map(|line| source_stream(line)).collect();
     let mut previous = vec![None; lines.len()];
-    let mut nearest = [None, None];
+    let mut ordinary = None;
+    let mut conditional = None;
     for index in 0..lines.len() {
-        previous[index] = nearest[stream[index]];
+        let nearest = match streams[index] {
+            SourceStream::Ordinary => &mut ordinary,
+            SourceStream::Conditional => &mut conditional,
+        };
+        previous[index] = *nearest;
         if carries_statement[index] {
-            nearest[stream[index]] = Some(index);
+            *nearest = Some(index);
         }
     }
     let mut next = vec![None; lines.len()];
-    let mut nearest = [None, None];
+    let mut ordinary = None;
+    let mut conditional = None;
     for index in (0..lines.len()).rev() {
-        next[index] = nearest[stream[index]];
+        let nearest = match streams[index] {
+            SourceStream::Ordinary => &mut ordinary,
+            SourceStream::Conditional => &mut conditional,
+        };
+        next[index] = *nearest;
         if carries_statement[index] {
-            nearest[stream[index]] = Some(index);
+            *nearest = Some(index);
         }
     }
     (previous, next)
 }
 
 /// Which continuation stream a physical line belongs to.
-fn conditional_stream(line: &[u8]) -> bool {
-    conditional_compilation_body_start(line).is_some()
+fn source_stream(line: &[u8]) -> SourceStream {
+    SourceStream::from(conditional_compilation_prefix(line))
 }
 
 fn lexical_prefix_end(line: &[u8]) -> Option<usize> {
@@ -311,27 +311,8 @@ fn normalize_continuation_marker(line: &[u8]) -> Vec<u8> {
     result
 }
 
-fn openmp_prefix(line: &[u8]) -> Option<(usize, usize, bool)> {
-    let start = line.iter().position(|byte| !byte.is_ascii_whitespace())?;
-    if !line[start..].starts_with(b"!$") {
-        return None;
-    }
-    let mut sentinel_end = start + 2;
-    let omp_style = line
-        .get(sentinel_end..sentinel_end + 3)
-        .is_some_and(|bytes| bytes.eq_ignore_ascii_case(b"omp"));
-    if omp_style {
-        sentinel_end += 3;
-    }
-    let mut body_start = sentinel_end;
-    while body_start < line.len() && line[body_start].is_ascii_whitespace() {
-        body_start += 1;
-    }
-    Some((sentinel_end, body_start, omp_style))
-}
-
 fn openmp_body(line: &[u8]) -> Option<&[u8]> {
-    openmp_prefix(line).map(|(_, start, _)| &line[start..])
+    openmp_directive_prefix(line).map(|prefix| &line[prefix.body_start..])
 }
 
 fn uppercase_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
@@ -455,7 +436,8 @@ fn normalize_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
 
 /// Match the narrow OpenMP clause rule: `DEFAULT(X) PRIVATE(Y)`
 /// becomes `DEFAULT(X), PRIVATE(Y)`, while adjacent tokens without whitespace
-/// remain authored.  This runs only on `!$OMP` bodies, never on `!$` lines.
+/// remain authored.  This runs only on reserved OpenMP directive bodies, never
+/// on conditional-compilation `!$` lines.
 fn normalize_openmp_clause_separators(body: &[u8]) -> Vec<u8> {
     let mut output = Vec::with_capacity(body.len() + 8);
     let mut index = 0;
@@ -702,27 +684,39 @@ mod tests {
 
     #[test]
     fn openmp_sentinels_repeat_and_macros_keep_their_case() {
-        let mut document =
-            Document::from_bytes(b"!$omp parallel do private=foo &\n!$omp & map(to:X)\n");
-        let local = FileFacts::default();
-        let mut project = ProjectContext::empty();
-        project.define(&[crate::config::MacroDefine {
-            name: "private".into(),
-            value: None,
-        }]);
-        assert_ne!(
-            normalize_openmp_continuation_sentinels(&mut document, &cx(&local, &project)).unwrap(),
-            Changed::No
-        );
-        assert!(document.lines[1].starts_with(b"!$"));
-        assert!(!document.lines[0]
-            .windows(b"PRIVATE".len())
-            .any(|w| w == b"PRIVATE"));
-        let before = document.lines.clone();
-        assert_eq!(
-            normalize_openmp_continuation_sentinels(&mut document, &cx(&local, &project)).unwrap(),
-            Changed::No
-        );
-        assert_eq!(document.lines, before);
+        for sentinel in ["!$omp", "!$ompx"] {
+            let source = format!(
+                "{sentinel} parallel do private=foo &\n{sentinel} & map(to:X)\n"
+            );
+            let mut document = Document::from_bytes(source.as_bytes());
+            let local = FileFacts::default();
+            let mut project = ProjectContext::empty();
+            project.define(&[crate::config::MacroDefine {
+                name: "private".into(),
+                value: None,
+            }]);
+            assert_ne!(
+                normalize_openmp_continuation_sentinels(&mut document, &cx(&local, &project))
+                    .unwrap(),
+                Changed::No
+            );
+            let canonical = if sentinel.ends_with('x') {
+                b"!$OMPX ".as_slice()
+            } else {
+                b"!$OMP ".as_slice()
+            };
+            assert!(document.lines[0].starts_with(canonical));
+            assert!(document.lines[1].starts_with(canonical));
+            assert!(!document.lines[0]
+                .windows(b"PRIVATE".len())
+                .any(|w| w == b"PRIVATE"));
+            let before = document.lines.clone();
+            assert_eq!(
+                normalize_openmp_continuation_sentinels(&mut document, &cx(&local, &project))
+                    .unwrap(),
+                Changed::No
+            );
+            assert_eq!(document.lines, before);
+        }
     }
 }
