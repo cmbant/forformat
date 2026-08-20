@@ -23,6 +23,13 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
 /// rather than contradictory: `-K` governs where an existing leading `&` sits,
 /// and the wrapper simply never creates one (§7.1 of the port plan).
 ///
+/// The `&` that splits a *lexical token* is the exception, and it is not
+/// cosmetic: `sub&` / `&routine` is one `subroutine` token only while the `&`
+/// immediately follows the token's characters. Writing the marker out as ` &`
+/// there leaves `sub routine`, which is a different program — and one gfortran
+/// rejects. Both neighbours are found by skipping the comment, blank and CPP
+/// lines a continuation passes over, because a split token may straddle them.
+///
 /// Port target: `normalize_continuations`.
 pub fn normalize_continuations(
     document: &mut Document,
@@ -30,6 +37,7 @@ pub fn normalize_continuations(
 ) -> Result<Changed, FormatError> {
     let _ = cx;
     let original = document.lines.clone();
+    let (previous_statement_line, next_statement_line) = statement_neighbours(&original);
     let mut normalized = Vec::with_capacity(original.len());
     let mut continuation = false;
     let mut state = LexState::default();
@@ -38,10 +46,10 @@ pub fn normalize_continuations(
         let mut line = original_line.clone();
         state.scan(original_line, |_| {});
         let in_literal = incoming_literal || state.in_literal();
-        let lexical_prefix =
-            index > 0 && is_lexical_token_continuation(&original[index - 1], original_line);
-        let lexical_suffix = index + 1 < original.len()
-            && is_lexical_token_continuation(original_line, &original[index + 1]);
+        let lexical_prefix = previous_statement_line[index]
+            .is_some_and(|at| is_lexical_token_continuation(&original[at], original_line));
+        let lexical_suffix = next_statement_line[index]
+            .is_some_and(|at| is_lexical_token_continuation(original_line, &original[at]));
         if continuation && !in_literal && !lexical_prefix {
             line = remove_leading_continuation(&line);
         }
@@ -148,6 +156,52 @@ pub fn normalize_openmp_continuation_sentinels(
 
 fn is_lexical_token_continuation(first: &[u8], second: &[u8]) -> bool {
     lexical_prefix_end(first).is_some() && leading_lexical_suffix_start(second).is_some()
+}
+
+/// A physical line a continued statement passes over rather than resumes on:
+/// a comment, a blank, or a CPP directive.  These are the lines
+/// `LogicalGroup::visit` steps across while joining a statement, so they are
+/// also the lines a split lexical token may straddle.
+///
+/// Testing the bytes is enough because the only caller's answer is consulted
+/// solely on lines outside a literal: a `!` that opens no comment because it
+/// sits inside a continued string is on a line where `in_literal` already
+/// suppresses both rewrites.
+fn passed_over_by_a_continuation(line: &[u8]) -> bool {
+    match line.iter().find(|byte| !byte.is_ascii_whitespace()) {
+        None => true,
+        Some(byte) => matches!(byte, b'!' | b'#'),
+    }
+}
+
+/// For every line, the nearest line above and below it that carries part of the
+/// same statement.
+///
+/// Precomputed in two linear passes rather than searched per line: a file that
+/// opens with a long comment header would otherwise make each of those lines
+/// rescan the whole header, which is quadratic and cost 2s on a 40k-line file.
+fn statement_neighbours(lines: &[Vec<u8>]) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
+    let skipped: Vec<bool> = lines
+        .iter()
+        .map(|line| passed_over_by_a_continuation(line))
+        .collect();
+    let mut previous = vec![None; lines.len()];
+    let mut nearest = None;
+    for index in 0..lines.len() {
+        previous[index] = nearest;
+        if !skipped[index] {
+            nearest = Some(index);
+        }
+    }
+    let mut next = vec![None; lines.len()];
+    let mut nearest = None;
+    for index in (0..lines.len()).rev() {
+        next[index] = nearest;
+        if !skipped[index] {
+            nearest = Some(index);
+        }
+    }
+    (previous, next)
 }
 
 fn lexical_prefix_end(line: &[u8]) -> Option<usize> {
@@ -460,6 +514,32 @@ mod tests {
         assert_eq!(document.lines[1], b"  b".to_vec());
         assert_eq!(document.lines[2], b"y = 'a &".to_vec());
         assert_eq!(document.lines[3], b" &b'".to_vec());
+    }
+
+    /// A token split across a continuation keeps its `&` glued to the token
+    /// even when a comment, a blank or a CPP directive sits between the halves.
+    /// Normalizing the marker to ` &` there un-splits the token: `sub&` /
+    /// `&routine` stops being `subroutine` and becomes `sub routine`, which is
+    /// not the program that was authored and does not compile.
+    #[test]
+    fn a_split_token_survives_a_separator_between_its_halves() {
+        for separator in ["!comment", "", "   ", "#ifdef X", "! don't stop here"] {
+            let source = format!("sub&\n{separator}\n&routine sub\nx = 1\nend subroutine sub\n");
+            let mut document = Document::from_bytes(source.as_bytes());
+            let local = FileFacts::default();
+            let project = ProjectContext::empty();
+            normalize_continuations(&mut document, &cx(&local, &project)).unwrap();
+            assert_eq!(
+                document.lines[0],
+                b"sub&".to_vec(),
+                "marker un-split the token across {separator:?}"
+            );
+            assert_eq!(
+                document.lines[2],
+                b"&routine sub".to_vec(),
+                "leading marker lost across {separator:?}"
+            );
+        }
     }
 
     #[test]
