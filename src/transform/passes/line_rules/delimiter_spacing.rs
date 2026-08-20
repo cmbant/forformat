@@ -281,10 +281,12 @@ fn scan_multiple_subscripts(
 
 pub(in crate::transform::passes::line_rules) fn advance_multiple_subscript_depths(
     line: &[u8],
+    incoming: LexState,
     open_depth: usize,
     active_depths: &mut Vec<usize>,
 ) {
-    let tokens = tokenize(line, &mut LexState::default());
+    let mut state = incoming;
+    let tokens = tokenize(line, &mut state);
     *active_depths = scan_multiple_subscripts(&tokens, open_depth, active_depths).active_depths;
 }
 
