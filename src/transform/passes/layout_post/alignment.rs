@@ -49,7 +49,7 @@ pub fn declaration_separator_alignment(
     let mut lines = document.lines.clone();
     loop {
         let cpp_lines = preprocessor_lines(&lines);
-        let separators = column_info(&lines, &cpp_lines, declaration_separator_info_in);
+        let separators = declaration_separator_columns(&lines, &cpp_lines);
         let original = lines.clone();
         let mut updated = original.clone();
         align_blocks(
@@ -195,20 +195,67 @@ fn set_comment_column(
     *updated.get_mut(line_index).expect("run line in range") = line;
 }
 
-/// The `::` a standalone line offers for alignment, scanned from a clean state.
-pub(crate) fn declaration_separator_info(line: &[u8]) -> Option<(usize, usize, usize)> {
-    declaration_separator_info_in(line, &mut LexState::default())
+#[derive(Default)]
+struct MultipleSubscriptState {
+    open_depth: usize,
+    active_depths: Vec<usize>,
 }
 
-/// The same, for one line of a group whose lexical state is already known.
-fn declaration_separator_info_in(line: &[u8], lex: &mut LexState) -> Option<(usize, usize, usize)> {
+struct MultipleSubscriptScan {
+    triplet_colons: Vec<usize>,
+    active_depths: Vec<usize>,
+    end_depth: usize,
+}
+
+/// The `::` a standalone line offers for alignment, scanned from a clean state.
+pub(crate) fn declaration_separator_info(line: &[u8]) -> Option<(usize, usize, usize)> {
+    declaration_separator_info_in(
+        line,
+        &mut LexState::default(),
+        &mut MultipleSubscriptState::default(),
+    )
+}
+
+/// The same, for one physical line while carrying any active multiple-subscript
+/// item from an earlier continuation line.
+fn declaration_separator_info_in(
+    line: &[u8],
+    lex: &mut LexState,
+    multiple_subscript: &mut MultipleSubscriptState,
+) -> Option<(usize, usize, usize)> {
     let tokens = tokenize(line, lex);
-    let (_, separator) = tokens.iter().enumerate().find(|(index, token)| {
-        token.kind == TokenKind::Operator
-            && token.text == b"::"
-            && !is_multiple_subscript_double_colon(&tokens, *index)
-    })?;
-    let index = separator.span.start;
+    let scan = scan_multiple_subscripts(
+        &tokens,
+        multiple_subscript.open_depth,
+        &multiple_subscript.active_depths,
+    );
+    let separator = tokens
+        .iter()
+        .enumerate()
+        .find(|(index, token)| {
+            token.kind == TokenKind::Operator
+                && token.text == b"::"
+                && !scan.triplet_colons.contains(index)
+        })
+        .map(|(_, token)| token.span.start);
+
+    let has_code = tokens.iter().any(|token| token.kind != TokenKind::Comment);
+    let continued = has_code
+        && tokens
+            .iter()
+            .rev()
+            .find(|token| token.kind != TokenKind::Comment)
+            .is_some_and(|token| token.kind == TokenKind::Ampersand);
+    if has_code {
+        if continued {
+            multiple_subscript.open_depth = scan.end_depth;
+            multiple_subscript.active_depths = scan.active_depths;
+        } else {
+            *multiple_subscript = MultipleSubscriptState::default();
+        }
+    }
+
+    let index = separator?;
     let mut before = index;
     while before > 0 && matches!(line[before - 1], b' ' | b'\t') {
         before -= 1;
@@ -223,23 +270,77 @@ fn declaration_separator_info_in(line: &[u8], lex: &mut LexState) -> Option<(usi
     Some((index, index - before, after - index - 2))
 }
 
-/// `::` is also the adjacent-colon form of a Fortran 2023 multiple-subscript
-/// triplet. At one delimiter depth, a comma ends the current subscript item;
-/// deeper tokens belong to nested expressions and do not hide its leading `@`.
-fn is_multiple_subscript_double_colon(tokens: &[crate::source::Token<'_>], index: usize) -> bool {
-    let depth = tokens[index].depth;
-    for token in tokens[..index].iter().rev() {
-        if token.depth > depth {
-            continue;
-        }
-        if token.depth < depth || token.kind == TokenKind::Comma {
-            return false;
-        }
-        if token.kind == TokenKind::Operator && token.text == b"@" {
-            return true;
+/// Scan one physical line using absolute delimiter depth, carrying active `@`
+/// items from earlier continuation lines. A comma at the active depth ends the
+/// item; closing delimiters discard deeper items. This is the same state model
+/// used by delimiter normalization, so post-layout alignment cannot reinterpret
+/// a continued multiple-subscript `::` as a declaration separator.
+fn scan_multiple_subscripts(
+    tokens: &[crate::source::Token<'_>],
+    open_depth: usize,
+    continued_multiple_subscripts: &[usize],
+) -> MultipleSubscriptScan {
+    let mut active_depths = continued_multiple_subscripts.to_vec();
+    let mut triplet_colons = Vec::new();
+    let mut depth = open_depth;
+
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TokenKind::LParen | TokenKind::LBracket => {
+                depth += 1;
+            }
+            TokenKind::RParen | TokenKind::RBracket => {
+                depth = depth.saturating_sub(1);
+                active_depths.retain(|active| *active <= depth);
+            }
+            TokenKind::Comma => {
+                active_depths.retain(|active| *active < depth);
+            }
+            TokenKind::Operator if token.text == b"@" => {
+                active_depths.retain(|active| *active != depth);
+                active_depths.push(depth);
+            }
+            TokenKind::Operator
+                if matches!(token.text, b":" | b"::") && active_depths.contains(&depth) =>
+            {
+                triplet_colons.push(index);
+            }
+            _ => {}
         }
     }
-    false
+
+    MultipleSubscriptScan {
+        triplet_colons,
+        active_depths,
+        end_depth: depth,
+    }
+}
+
+fn declaration_separator_columns(
+    lines: &[Vec<u8>],
+    cpp_lines: &[bool],
+) -> Vec<Option<(usize, usize, usize)>> {
+    let mut lex = [LexState::default(), LexState::default()];
+    let mut multiple_subscripts = [
+        MultipleSubscriptState::default(),
+        MultipleSubscriptState::default(),
+    ];
+    lines
+        .iter()
+        .zip(cpp_lines)
+        .map(|(line, cpp)| {
+            if *cpp {
+                None
+            } else {
+                let stream = usize::from(line.trim_ascii_start().starts_with(b"!$ "));
+                declaration_separator_info_in(
+                    line,
+                    &mut lex[stream],
+                    &mut multiple_subscripts[stream],
+                )
+            }
+        })
+        .collect()
 }
 
 fn preprocessor_lines(lines: &[Vec<u8>]) -> Vec<bool> {
