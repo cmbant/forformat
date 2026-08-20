@@ -33,7 +33,10 @@ use crate::{
     analysis::{analyze_file, scoped_declared_names, ProjectContext, ScopeTree},
     config::{FormatConfig, FormatMode},
     error::FormatError,
-    source::{LogicalGroup, PhysicalLineKind, SourceBuffer},
+    source::{
+        syntax::conditional_compilation_prefix, LexState, LogicalGroup, PhysicalLineKind,
+        SourceBuffer,
+    },
     transform::{document::Document, pipeline},
     FormatMeta, FormatResult,
 };
@@ -419,11 +422,17 @@ fn reflow_with_context_inner(
                 return (out, None);
             }
             let index = group.lines.start;
-            let continuation = first_indent.saturating_add(if config.indent_continuation {
-                config.continuation_indent
-            } else {
-                0
+            let conditional = analysis.buffer.lines.get(index).is_some_and(|line| {
+                line.is_conditional_compilation() && config.openmp
             });
+            let sentinel_width = if conditional { 3 } else { 0 };
+            let emitted_target = first_indent.saturating_sub(sentinel_width);
+            let continuation = sentinel_width
+                + emitted_target.saturating_add(if config.indent_continuation {
+                    config.continuation_indent
+                } else {
+                    0
+                });
             // Only the laid-out width decides.  The normalized line still carries
             // the authored indent and the authored `::` run, and both are about to
             // change: a declaration whose author lined its `::` up in a wide block
@@ -465,15 +474,16 @@ fn reflow_with_context_inner(
             let (label, first_body_column) = match crate::format::emitter::split_label(&body) {
                 Some((label, rest)) => {
                     let label = label.to_vec();
-                    let column = crate::format::emitter::labelled_body_column(
-                        first_indent,
-                        label.len(),
-                        config,
-                    );
+                    let column = sentinel_width
+                        + crate::format::emitter::labelled_body_column(
+                            emitted_target,
+                            label.len(),
+                            config,
+                        );
                     body = rest.to_vec();
                     (Some(label), column)
                 }
-                None => (None, first_indent),
+                None => (None, sentinel_width + emitted_target),
             };
             // Only the *body* moves to the label's column.  The continuation
             // indent and a detached comment are structural and stay where the
@@ -538,13 +548,23 @@ fn reflow_with_context_inner(
                     Some(Some(comment)) => {
                         out.extend(comment);
                         if group.lines.len() > 1 {
-                            emit_joined_body(&mut out, &with_label(body), first_indent);
+                            emit_joined_body(
+                                &mut out,
+                                &with_label(body),
+                                first_indent,
+                                conditional,
+                            );
                         } else {
                             copy_group_without_final_comment(document, group, &mut out);
                         }
                     }
                     Some(None) if group.lines.len() > 1 => {
-                        emit_joined_body(&mut out, &with_label(body), first_indent);
+                        emit_joined_body(
+                            &mut out,
+                            &with_label(body),
+                            first_indent,
+                            conditional,
+                        );
                     }
                     _ => copy_group(document, group, &mut out),
                 }
@@ -566,7 +586,11 @@ fn reflow_with_context_inner(
                     if let Some(first) = wrapped.first_mut() {
                         *first = with_label(std::mem::take(first));
                     }
-                    out.extend(wrapped)
+                    out.extend(
+                        wrapped
+                            .into_iter()
+                            .map(|line| restore_conditional_prefix(line, conditional)),
+                    );
                 }
                 // A decline means the statement stays exactly as authored.  It has
                 // to be copied whole: pushing only the first physical line silently
@@ -616,6 +640,32 @@ fn reflow_with_context_inner(
     Ok(declined)
 }
 
+#[derive(Default)]
+struct CommentLexStreams {
+    ordinary: LexState,
+    conditional: LexState,
+}
+
+impl CommentLexStreams {
+    /// Find an inline comment in one physical line while keeping conditional
+    /// and ordinary protected regions independent. The returned offset is in
+    /// the original physical line, not the sentinel-stripped body.
+    fn comment_start(&mut self, line: &[u8]) -> Option<usize> {
+        let prefix = conditional_compilation_prefix(line);
+        let body_start = prefix.map_or(0, |prefix| prefix.body_start);
+        let body = &line[body_start..];
+        let lex = if prefix.is_some() {
+            &mut self.conditional
+        } else {
+            &mut self.ordinary
+        };
+        if lex.in_literal() && !body.trim_ascii_start().starts_with(b"&") {
+            return None;
+        }
+        crate::source::regions::line_comment_start(lex, body).map(|start| body_start + start)
+    }
+}
+
 /// Return the final inline comment, if there is exactly one and it is on the
 /// last physical line of the group. `None` means the group is unsafe to detach;
 /// `Some(None)` means it has no inline comment.
@@ -624,17 +674,14 @@ fn detach_final_inline_comment(
     group: &LogicalGroup,
     comment_indent: usize,
 ) -> Option<Option<Vec<Vec<u8>>>> {
-    // One lexical state for the whole group: the `!` in a continued literal
-    // (`...invalid!')` on the second line of `'... &`) is literal text, and
-    // detaching it as a comment would emit it twice — once above the statement
-    // and once inside the body the wrapper rebuilds from the joined text.
-    // One lexical state per sentinel stream; see `regions::line_scan`.
-    let mut lex = [crate::source::LexState::default(); 2];
+    // One lexical state per source stream: a `!` in a continued literal is
+    // protected independently of conditional-compilation lines interleaved in
+    // the other stream.
+    let mut streams = CommentLexStreams::default();
     let mut comments = Vec::new();
     for index in group.lines.clone() {
         let line = &document.lines[index];
-        let stream = usize::from(line.trim_ascii_start().starts_with(b"!$ "));
-        if let Some(start) = crate::source::regions::line_comment_start(&mut lex[stream], line) {
+        if let Some(start) = streams.comment_start(line) {
             comments.push((index, start));
         }
     }
@@ -651,10 +698,31 @@ fn detach_final_inline_comment(
     Some(Some(vec![comment]))
 }
 
-fn emit_joined_body(lines: &mut Vec<Vec<u8>>, body: &[u8], first_indent: usize) {
+fn emit_joined_body(
+    lines: &mut Vec<Vec<u8>>,
+    body: &[u8],
+    first_indent: usize,
+    conditional: bool,
+) {
     let mut line = vec![b' '; first_indent];
     line.extend_from_slice(body);
-    lines.push(line);
+    lines.push(restore_conditional_prefix(line, conditional));
+}
+
+/// Restore the canonical conditional-compilation sentinel to a line generated
+/// by the wrapper. `line` already carries the absolute column where its Fortran
+/// body belongs, so the sentinel replaces three leading columns instead of
+/// shifting the body to the right.
+fn restore_conditional_prefix(line: Vec<u8>, conditional: bool) -> Vec<u8> {
+    if !conditional {
+        return line;
+    }
+    let leading = line.iter().take_while(|byte| byte.is_ascii_whitespace()).count();
+    let mut restored = Vec::with_capacity(line.len() + 3);
+    restored.extend_from_slice(b"!$ ");
+    restored.extend(std::iter::repeat_n(b' ', leading.saturating_sub(3)));
+    restored.extend_from_slice(&line[leading..]);
+    restored
 }
 
 fn join_openmp_directive(document: &Document, group: &LogicalGroup) -> Option<Vec<u8>> {
@@ -718,24 +786,23 @@ fn join_openmp_directive(document: &Document, group: &LogicalGroup) -> Option<Ve
     Some(joined)
 }
 
-/// findent's free-form sentinel is `!$` at EOL or followed by a blank.  The
-/// `OMP` spelling is the separate uppercase directive form; `!$acc` and other
-/// joined words are ordinary comments and must not be re-emitted as sentinels.
-fn openmp_candidate(line: &[u8], start: usize) -> bool {
-    if !line[start..].starts_with(b"!$") {
-        return false;
-    }
-    line.get(start + 2)
-        .is_none_or(|byte| matches!(byte, b' ' | b'\t') || is_openmp_line(line))
+/// Conditional-compilation source uses the shared parser. Actual `!$OMP`
+/// directives are recognized separately because they are directive comments,
+/// not conditional Fortran bodies.
+fn openmp_candidate(line: &[u8], _start: usize) -> bool {
+    conditional_compilation_prefix(line).is_some() || is_openmp_line(line)
 }
 
 fn is_openmp_line(line: &[u8]) -> bool {
-    let start = line.iter().position(|byte| !byte.is_ascii_whitespace());
-    start.is_some_and(|start| {
-        line[start..]
-            .get(..5)
-            .is_some_and(|prefix| prefix[..2] == *b"!$" && prefix[2..].eq_ignore_ascii_case(b"omp"))
-    })
+    let Some(start) = line.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return false;
+    };
+    let rest = &line[start..];
+    rest.get(..5).is_some_and(|prefix| {
+        prefix[..2] == *b"!$" && prefix[2..].eq_ignore_ascii_case(b"omp")
+    }) && rest
+        .get(5)
+        .is_none_or(|byte| byte.is_ascii_whitespace() || *byte == b'&')
 }
 
 fn wrap_openmp_directive(line: &[u8], line_length: usize) -> Result<Vec<Vec<u8>>, Decline> {
@@ -937,22 +1004,19 @@ fn copy_group_without_final_comment(
     lines: &mut Vec<Vec<u8>>,
 ) {
     let final_line = group.lines.end.saturating_sub(1);
-    let mut lex = [crate::source::LexState::default(); 2];
+    let mut streams = CommentLexStreams::default();
     for index in group.lines.clone() {
         let Some(line) = document.lines.get(index) else {
             continue;
         };
-        let stream = usize::from(line.trim_ascii_start().starts_with(b"!$ "));
-        let comment = crate::source::regions::line_comment_start(&mut lex[stream], line);
+        let comment = streams.comment_start(line);
         if index == final_line {
             if let Some(comment) = comment {
                 lines.push(line[..comment].trim_ascii_end().to_vec());
                 continue;
             }
         }
-        {
-            lines.push(line.clone());
-        }
+        lines.push(line.clone());
     }
 }
 
