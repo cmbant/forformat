@@ -61,11 +61,22 @@ pub fn join_lexical_token_continuations(
     })
 }
 
+#[derive(Clone, Copy)]
+struct ParenthesisFrame {
+    open: usize,
+    protected: bool,
+    safe: bool,
+    directly_nested: bool,
+    has_top_level_question: bool,
+}
+
 /// Step 7: remove redundant nested parentheses.
 ///
 /// Eligible: a right-hand side, an `IF` condition, a `DO WHILE` condition.
 /// Protected: procedure arguments and `ASSOCIATE` targets, where an extra pair
-/// can change meaning or intent.
+/// can change meaning or intent. A pair containing a top-level `?` is also
+/// protected because Fortran 2023 conditional expressions require those
+/// parentheses syntactically.
 ///
 /// Port target: `remove_redundant_nested_parentheses`.
 pub fn remove_redundant_nested_parentheses(
@@ -92,7 +103,7 @@ pub fn remove_redundant_nested_parentheses(
     let protected = protected_offsets(&document.lines);
     let glue = continuation_glue(&source, &protected);
     let mut removals = HashSet::new();
-    let mut stack: Vec<(usize, bool, bool, bool)> = Vec::new();
+    let mut stack: Vec<ParenthesisFrame> = Vec::new();
     let mut line_start = 0usize;
     let mut line_has_assignment = false;
     let mut last_non_whitespace = None;
@@ -139,21 +150,40 @@ pub fn remove_redundant_nested_parentheses(
                 });
                 let (parent_protected, parent_safe, directly_nested) = stack
                     .last()
-                    .map(|(open, protected, safe, _)| {
-                        (*protected, *safe, last_non_whitespace == Some(*open))
+                    .map(|parent| {
+                        (
+                            parent.protected,
+                            parent.safe,
+                            last_non_whitespace == Some(parent.open),
+                        )
                     })
                     .unwrap_or((false, false, false));
-                stack.push((
-                    index,
-                    is_argument_list || parent_protected,
-                    line_has_assignment || is_condition || parent_safe,
+                stack.push(ParenthesisFrame {
+                    open: index,
+                    protected: is_argument_list || parent_protected,
+                    safe: line_has_assignment || is_condition || parent_safe,
                     directly_nested,
-                ));
+                    has_top_level_question: false,
+                });
+            }
+            b'?' => {
+                // The current frame is exactly the parenthesis depth at which
+                // the marker occurs. Nested calls/subscripts have their own
+                // frames, so this records a top-level conditional marker for
+                // this pair without needing to parse the rest of the F2023
+                // conditional-expression grammar yet.
+                if let Some(frame) = stack.last_mut() {
+                    frame.has_top_level_question = true;
+                }
             }
             b')' => {
-                if let Some((inner, _, _, directly_nested)) = stack.pop() {
-                    if let Some((_, protected, safe, _)) = stack.last() {
-                        if *safe && !*protected && directly_nested {
+                if let Some(inner) = stack.pop() {
+                    if let Some(parent) = stack.last() {
+                        if parent.safe
+                            && !parent.protected
+                            && inner.directly_nested
+                            && !inner.has_top_level_question
+                        {
                             let mut following = index + 1;
                             while source.get(following).is_some_and(u8::is_ascii_whitespace)
                                 || glue.get(following) == Some(&true)
@@ -161,7 +191,7 @@ pub fn remove_redundant_nested_parentheses(
                                 following += 1;
                             }
                             if source.get(following) == Some(&b')') {
-                                removals.insert(inner);
+                                removals.insert(inner.open);
                                 removals.insert(index);
                             }
                         }
@@ -487,6 +517,41 @@ mod tests {
         assert_eq!(document.lines[1], b"if (x) then".to_vec());
         assert_eq!(document.lines[2], b"call f(((x)))".to_vec());
         assert_eq!(document.lines[3], b"associate (a => ((x)))".to_vec());
+        let (local, scopes, analysis) = context(&document);
+        let cx = pipeline::PassContext {
+            config: &FormatConfig::default(),
+            project: &ProjectContext::empty(),
+            local: &local,
+            analysis: &analysis,
+            scopes: &scopes,
+        };
+        assert_eq!(
+            remove_redundant_nested_parentheses(&mut document, &cx).unwrap(),
+            pipeline::Changed::No
+        );
+    }
+
+    #[test]
+    fn conditional_expression_parentheses_are_not_removed() {
+        let mut document = Document::from_bytes(
+            b"if ((flag ? a : b)) then\nif (((flag ? a : b))) then\nif ((flag .and. '?' == '?')) then\n",
+        );
+        let (local, scopes, analysis) = context(&document);
+        let cx = pipeline::PassContext {
+            config: &FormatConfig::default(),
+            project: &ProjectContext::empty(),
+            local: &local,
+            analysis: &analysis,
+            scopes: &scopes,
+        };
+        assert_eq!(
+            remove_redundant_nested_parentheses(&mut document, &cx).unwrap(),
+            pipeline::Changed::Text
+        );
+        assert_eq!(document.lines[0], b"if ((flag ? a : b)) then".to_vec());
+        assert_eq!(document.lines[1], b"if ((flag ? a : b)) then".to_vec());
+        assert_eq!(document.lines[2], b"if (flag .and. '?' == '?') then".to_vec());
+
         let (local, scopes, analysis) = context(&document);
         let cx = pipeline::PassContext {
             config: &FormatConfig::default(),
