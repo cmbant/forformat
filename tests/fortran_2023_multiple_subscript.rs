@@ -85,7 +85,7 @@ fn post_layout_alignment_keeps_continued_double_colons_compact() {
         let output = String::from_utf8(once.clone()).unwrap();
         assert!(
             output.contains(&format!("{first_line}\n::stride")),
-            "continued multiple-subscript lost compact ::: {output:?}"
+            "continued multiple-subscript lost compact `::`: {output:?}"
         );
         assert!(
             !output.lines().any(|line| line.contains(":: stride")),
