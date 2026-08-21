@@ -41,8 +41,9 @@ Run the full local bar (mirrors `.github/workflows/rust-checks.yml` and the `rel
 ./tools/check_local.sh
 ```
 
-The script runs Clippy with `CARGO_TARGET_DIR=/tmp/forformat-lint`; tests and formatter binaries remain in
-the default `target/` directory.
+The devcontainer sets `CARGO_TARGET_DIR=/tmp/forformat-target` for normal builds; Clippy overrides it with
+`CARGO_TARGET_DIR=/tmp/forformat-lint`. Outside the devcontainer, tests and formatter binaries use the
+default `target/` directory.
 
 Only when a change touches packaging (`pyproject.toml`, `setup.py`, `forformat/`, `forformat_runner/`,
 or `.github/workflows/pypi.yml`), also build and check the wheel:

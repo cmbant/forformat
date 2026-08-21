@@ -373,88 +373,41 @@ fn openmp_body(line: &[u8]) -> Option<&[u8]> {
 /// Directive words get their own switch rather than following `--keyword-case`
 /// because uppercase directives over lowercase Fortran is a convention in its
 /// own right; `--openmp-case=false` hands them back to `--keyword-case`, which
-/// is how `preserve` reaches them. Words this table does not recognize — clause
-/// arguments, user identifiers, macros — are never re-cased here.
+/// is how `preserve` reaches them.
+///
+/// What is *not* re-cased is the point of the two tables. A clause's arguments
+/// are the user's own program — `PRIVATE(i)` names a variable — so matching a
+/// word against one flat keyword table re-spells any identifier that happens to
+/// collide with the OpenMP vocabulary, and that vocabulary contains ordinary
+/// words: `shared`, `static`, `final`, `order`, `device`, `hint`. Legal Fortran
+/// such as `!$omp parallel private(shared)` came out as `PRIVATE(SHARED)`,
+/// renaming the user's variable in the source text. Fortran's own
+/// case-insensitivity makes that harmless to run, but it is still the formatter
+/// rewriting a name it does not own.
+///
+/// So position decides. At the top level of the directive a word can only be a
+/// directive or clause name, and [`DIRECTIVE_WORDS`] applies. Inside a clause's
+/// parentheses the default is that the word is the user's, and the exceptions
+/// are listed one clause at a time in [`CLAUSE_KINDS`]: the handful of clauses
+/// whose argument grammar is a fixed vocabulary rather than a list of names.
+/// `SCHEDULE(STATIC, chunk)` is cased because `schedule` takes a kind; the
+/// `chunk` beside it is not, and neither is anything in `MAP(to: a)`, because
+/// `map` takes a list and telling its modifier from the list would take the
+/// clause-by-clause grammar of the whole OpenMP specification.
 ///
 /// [`StyleConfig::openmp_keyword_case`]: crate::config::StyleConfig::openmp_keyword_case
 fn case_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
-    const KEYWORDS: &[&[u8]] = &[
-        b"omp",
-        b"do",
-        b"atomic",
-        b"barrier",
-        b"cancel",
-        b"cancellation",
-        b"critical",
-        b"declare",
-        b"distribute",
-        b"end",
-        b"flush",
-        b"loop",
-        b"master",
-        b"masked",
-        b"ordered",
-        b"parallel",
-        b"sections",
-        b"section",
-        b"simd",
-        b"single",
-        b"target",
-        b"task",
-        b"taskgroup",
-        b"taskloop",
-        b"taskwait",
-        b"taskyield",
-        b"teams",
-        b"threadprivate",
-        b"workshare",
-        b"allocate",
-        b"collapse",
-        b"copyin",
-        b"copyprivate",
-        b"default",
-        b"firstprivate",
-        b"if",
-        b"lastprivate",
-        b"linear",
-        b"map",
-        b"nowait",
-        b"num_threads",
-        b"private",
-        b"reduction",
-        b"schedule",
-        b"static",
-        b"dynamic",
-        b"guided",
-        b"runtime",
-        b"shared",
-        b"simdlen",
-        b"proc_bind",
-        b"defaultmap",
-        b"depend",
-        b"device",
-        b"dist_schedule",
-        b"final",
-        b"grainsize",
-        b"hint",
-        b"in_reduction",
-        b"is_device_ptr",
-        b"mergeable",
-        b"nogroup",
-        b"num_tasks",
-        b"order",
-        b"priority",
-        b"safelen",
-        b"thread_limit",
-        b"to",
-        b"from",
-        b"use_device_addr",
-        b"use_device_ptr",
-    ];
     let mut result = Vec::with_capacity(body.len());
     let mut state = LexState::default();
     let mut regions = Vec::new();
     state.scan(body, |region| regions.push(region));
+    // Depth counts only delimiters the code regions report, so a parenthesis
+    // inside a string literal or a comment cannot open a clause.
+    let mut depth = 0usize;
+    // The word immediately before the `(` that took the depth from zero to one,
+    // resolved to the reserved argument spellings that clause admits.
+    let mut clause_kinds: Option<&[&[u8]]> = None;
+    let mut clause_name: Vec<u8> = Vec::new();
     for region in regions {
         let bytes = &body[region.range.clone()];
         if region.kind != RegionKind::Code {
@@ -472,10 +425,20 @@ fn case_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
                     index += 1;
                 }
                 let word = &bytes[start..index];
+                // Depth two and beyond is inside an expression — `if(f(x))`,
+                // `schedule(static, n(1))` — where every word is the user's.
+                let reserved = match depth {
+                    0 => Some(DIRECTIVE_WORDS),
+                    1 => clause_kinds,
+                    _ => None,
+                };
+                // A macro name outranks every case rule (I4).
                 if !cx.project.macros.contains(word)
-                    && KEYWORDS
-                        .iter()
-                        .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                    && reserved.is_some_and(|reserved| {
+                        reserved
+                            .iter()
+                            .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                    })
                 {
                     result.extend_from_slice(&crate::transform::passes::line_rules::apply_case(
                         word,
@@ -484,14 +447,146 @@ fn case_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
                 } else {
                     result.extend_from_slice(word);
                 }
-            } else {
-                result.push(bytes[index]);
-                index += 1;
+                if depth == 0 {
+                    clause_name = word.to_vec();
+                }
+                continue;
             }
+            match bytes[index] {
+                b'(' => {
+                    if depth == 0 {
+                        clause_kinds = CLAUSE_KINDS
+                            .iter()
+                            .find(|(clause, _)| clause_name.eq_ignore_ascii_case(clause))
+                            .map(|(_, kinds)| *kinds);
+                    }
+                    depth += 1;
+                }
+                b')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        clause_kinds = None;
+                        clause_name.clear();
+                    }
+                }
+                _ => {}
+            }
+            result.push(bytes[index]);
+            index += 1;
         }
     }
     result
 }
+
+/// Words that name a directive or one of its clauses, recognized only at the
+/// top level of a directive line. Kind words that exist solely as a clause
+/// argument — `static`, `guided` — are deliberately absent: they live in
+/// [`CLAUSE_KINDS`] under the clause that admits them.
+const DIRECTIVE_WORDS: &[&[u8]] = &[
+    b"omp",
+    b"do",
+    b"atomic",
+    b"barrier",
+    b"cancel",
+    b"cancellation",
+    b"critical",
+    b"declare",
+    b"distribute",
+    b"end",
+    b"flush",
+    b"loop",
+    b"master",
+    b"masked",
+    b"ordered",
+    b"parallel",
+    b"sections",
+    b"section",
+    b"simd",
+    b"single",
+    b"target",
+    b"task",
+    b"taskgroup",
+    b"taskloop",
+    b"taskwait",
+    b"taskyield",
+    b"teams",
+    b"threadprivate",
+    b"workshare",
+    b"allocate",
+    b"collapse",
+    b"copyin",
+    b"copyprivate",
+    b"default",
+    b"firstprivate",
+    b"if",
+    b"lastprivate",
+    b"linear",
+    b"map",
+    b"nowait",
+    b"num_threads",
+    b"private",
+    b"reduction",
+    b"schedule",
+    b"shared",
+    b"simdlen",
+    b"proc_bind",
+    b"defaultmap",
+    b"depend",
+    b"device",
+    b"dist_schedule",
+    b"final",
+    b"grainsize",
+    b"hint",
+    b"in_reduction",
+    b"is_device_ptr",
+    b"mergeable",
+    b"nogroup",
+    b"num_tasks",
+    b"order",
+    b"priority",
+    b"safelen",
+    b"thread_limit",
+    b"to",
+    b"from",
+    b"use_device_addr",
+    b"use_device_ptr",
+];
+
+/// Clauses whose arguments are a fixed vocabulary rather than a list of the
+/// user's names, with the spellings each one admits.
+///
+/// Membership is the promise that no argument of that clause is ever a program
+/// identifier, so casing a word there cannot rename anything. `schedule` is on
+/// the list even though its second argument is a chunk-size expression, because
+/// no kind spelling is a plausible name for one. Clauses that take a list —
+/// `private`, `shared`, `map`, `depend`, `reduction`, `linear` — are absent
+/// however reserved-looking their modifiers are, because a list is exactly
+/// where the user's own names appear.
+const CLAUSE_KINDS: &[(&[u8], &[&[u8]])] = &[
+    (
+        b"default",
+        &[b"none", b"shared", b"private", b"firstprivate"],
+    ),
+    (b"proc_bind", &[b"master", b"primary", b"close", b"spread"]),
+    (
+        b"schedule",
+        &[
+            b"static",
+            b"dynamic",
+            b"guided",
+            b"auto",
+            b"runtime",
+            b"monotonic",
+            b"nonmonotonic",
+            b"simd",
+        ],
+    ),
+    (b"dist_schedule", &[b"static"]),
+    (
+        b"order",
+        &[b"concurrent", b"reproducible", b"unconstrained"],
+    ),
+];
 
 fn normalize_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
     // Casing is [`case_openmp_directives`]'s, and it has already run.
@@ -658,7 +753,62 @@ mod tests {
         case_openmp_directives(&mut cased, &context).unwrap();
         assert_eq!(
             String::from_utf8(cased.to_bytes()).unwrap(),
-            "!$OMP PARALLEL DO   PRIVATE(i) &\n!$OMP & MAP(TO:X)\n",
+            "!$OMP PARALLEL DO   PRIVATE(i) &\n!$OMP & MAP(to:X)\n",
+        );
+    }
+
+    /// A clause's arguments are the user's program, and the OpenMP vocabulary
+    /// is full of ordinary words, so a flat keyword table re-spells declared
+    /// names: `private(shared)` came out `PRIVATE(SHARED)`. Fortran is
+    /// case-insensitive so it still ran, but the formatter had rewritten a name
+    /// it does not own, against its own documented contract.
+    #[test]
+    fn a_clause_argument_spelled_like_a_keyword_keeps_the_authored_case() {
+        let mut document = Document::from_bytes(
+            b"!$omp parallel private(shared) firstprivate(static) if(final)\n",
+        );
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+        let context = cx_cased(&document, &local, &project, KeywordCase::Lower, true);
+        case_openmp_directives(&mut document, &context).unwrap();
+        assert_eq!(
+            String::from_utf8(document.to_bytes()).unwrap(),
+            "!$OMP PARALLEL PRIVATE(shared) FIRSTPRIVATE(static) IF(final)\n",
+        );
+    }
+
+    /// The exception, and why it is safe: these clauses take a fixed kind
+    /// vocabulary, so no argument of theirs is ever a declared name. The
+    /// chunk-size expression beside a kind still is one.
+    #[test]
+    fn a_kind_clause_cases_its_reserved_argument_but_not_the_expression() {
+        let mut document = Document::from_bytes(
+            b"!$omp do schedule(dynamic, chunk) default(none) proc_bind(close) order(concurrent)\n",
+        );
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+        let context = cx_cased(&document, &local, &project, KeywordCase::Lower, true);
+        case_openmp_directives(&mut document, &context).unwrap();
+        assert_eq!(
+            String::from_utf8(document.to_bytes()).unwrap(),
+            "!$OMP DO SCHEDULE(DYNAMIC, chunk) DEFAULT(NONE) PROC_BIND(CLOSE) ORDER(CONCURRENT)\n",
+        );
+    }
+
+    /// Nesting is where a kind clause stops applying: depth two is an
+    /// expression, and `default` there is the intrinsic's argument, not a
+    /// clause kind.
+    #[test]
+    fn a_nested_expression_inside_a_kind_clause_is_left_alone() {
+        let mut document =
+            Document::from_bytes(b"!$omp do schedule(static, size(shared)) if(f(none))\n");
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+        let context = cx_cased(&document, &local, &project, KeywordCase::Lower, true);
+        case_openmp_directives(&mut document, &context).unwrap();
+        assert_eq!(
+            String::from_utf8(document.to_bytes()).unwrap(),
+            "!$OMP DO SCHEDULE(STATIC, size(shared)) IF(f(none))\n",
         );
     }
 

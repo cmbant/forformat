@@ -29,7 +29,7 @@
 use super::{document::Document, passes};
 use crate::{
     analysis::{names::CaseResolver, FileFacts, ProjectContext, ScopeTree},
-    config::{FormatConfig, FormatMode},
+    config::FormatConfig,
     error::FormatError,
     transform::document::Analysis,
 };
@@ -102,46 +102,32 @@ pub fn normalize(
     // `SourceBuffer` analysis, then let every later pass use the stable `!$ `
     // spelling. This is a deliberate ordering exception for step 12: the later
     // continuation pass still owns removal of the body-leading `&`.
-    let mut changed = if normalize_whitespace && config.style.continuation_markers {
-        passes::conditional_continuations::run(document)?
-    } else {
-        Changed::No
-    };
+    if normalize_whitespace && config.style.continuation_markers {
+        passes::conditional_continuations::run(document)?;
+    }
 
     // Steps 1-3: macro-name casing, from `-D` and from `#define`.
-    changed = changed.or(with_context(
-        document,
-        project,
-        local,
-        config,
-        passes::case_pass::macros,
-    )?);
+    with_context(document, project, local, config, passes::case_pass::macros)?;
 
     // Step 5 needs a fresh statement view after macro casing. Steps 6 and 7 do
     // not inspect their PassContext at all, so they can follow on the same
     // snapshot even though they mutate the document. Canonicalization-only
     // keeps physical line structure, so it deliberately does not join tokens
     // across authored continuation boundaries.
-    changed = changed.or(with_context(
-        document,
-        project,
-        local,
-        config,
-        |document, cx| {
-            let mut stage = passes::case_pass::declared(document, cx)?;
-            if normalize_whitespace {
-                stage = stage.or(passes::structure::join_lexical_token_continuations(
-                    document, cx,
-                )?);
-            }
-            if config.style.remove_redundant_parens {
-                stage = stage.or(passes::structure::remove_redundant_nested_parentheses(
-                    document, cx,
-                )?);
-            }
-            Ok(stage)
-        },
-    )?);
+    with_context(document, project, local, config, |document, cx| {
+        let mut stage = passes::case_pass::declared(document, cx)?;
+        if normalize_whitespace {
+            stage = stage.or(passes::structure::join_lexical_token_continuations(
+                document, cx,
+            )?);
+        }
+        if config.style.remove_redundant_parens {
+            stage = stage.or(passes::structure::remove_redundant_nested_parentheses(
+                document, cx,
+            )?);
+        }
+        Ok(stage)
+    })?;
 
     // Redundant statement separators are syntax normalization rather than a
     // wrapping policy, so this stays active when presentation whitespace is
@@ -150,57 +136,45 @@ pub fn normalize(
     // afterwards because deleting separators changes source offsets even
     // though it does not change the non-empty statements.
     if config.style.normalize_semicolons {
-        changed = changed.or(with_context(
-            document,
-            project,
-            local,
-            config,
-            passes::semicolons::run,
-        )?);
+        with_context(document, project, local, config, passes::semicolons::run)?;
     }
 
     // Step 11 consumes statement/scope data, so rebuild after the lexical,
     // parenthesis, and separator edits above. Steps 12-13 read only
     // config/project fields from PassContext; they intentionally share this
     // snapshot after line rules.
-    changed = changed.or(with_context(
-        document,
-        project,
-        local,
-        config,
-        |document, cx| {
-            let mut stage = passes::line_rules::run(document, cx)?;
-            // How a reserved OpenMP directive is spelled is canonicalization,
-            // not presentation, so it is not gated on either whitespace policy
-            // or `--continuation-markers`; see
-            // [`passes::continuations::case_openmp_directives`].
-            stage = stage.or(passes::continuations::case_openmp_directives(document, cx)?);
-            if normalize_whitespace && config.style.continuation_markers {
-                stage = stage.or(passes::continuations::run(document, cx)?);
-            }
-            Ok(stage)
-        },
-    )?);
+    with_context(document, project, local, config, |document, cx| {
+        let mut stage = passes::line_rules::run(document, cx)?;
+        // How a reserved OpenMP directive is spelled is canonicalization,
+        // not presentation, so it is not gated on either whitespace policy
+        // or `--continuation-markers`; see
+        // [`passes::continuations::case_openmp_directives`].
+        stage = stage.or(passes::continuations::case_openmp_directives(document, cx)?);
+        if normalize_whitespace && config.style.continuation_markers {
+            stage = stage.or(passes::continuations::run(document, cx)?);
+        }
+        Ok(stage)
+    })?;
 
     // Steps 14-15 consume scope and statement structure, so they get a fresh
     // view after every preceding text transformation. Removing a whole RETURN
     // line is presentation/structure policy and therefore outside the
     // canonicalization-only contract.
     if normalize_whitespace && config.style.remove_terminal_return {
-        changed = changed.or(with_context(
+        with_context(
             document,
             project,
             local,
             config,
             passes::structure::remove_terminal_procedure_returns,
-        )?);
+        )?;
     }
 
     // Full mode normally obtains END completion from the layout planner. The
     // normalize-only early return used by canonicalization needs the same
     // scope-aware replacement without taking ownership of the authored column.
     if !normalize_whitespace && config.refactor_end {
-        changed = changed.or(passes::canonical_end::run(document, config)?);
+        passes::canonical_end::run(document, config)?;
     }
 
     // Rewrap only prepares authored continuations. The existing full wrapper
@@ -208,21 +182,13 @@ pub fn normalize(
     // width measurement. Re-run line rules after a successful join so spacing
     // at the old continuation seam is normalized by the same rule chain as any
     // ordinary one-line statement.
-    if config.mode == FormatMode::Full && config.wrap.enabled && config.rewrap {
+    if config.mode.wraps() && config.wrap.enabled && config.rewrap {
         let rejoined = with_context(document, project, local, config, passes::rewrap::prepare)?;
-        changed = changed.or(rejoined);
         if rejoined == Changed::Structure {
-            changed = changed.or(with_context(
-                document,
-                project,
-                local,
-                config,
-                passes::line_rules::run,
-            )?);
+            with_context(document, project, local, config, passes::line_rules::run)?;
         }
     }
 
-    let _ = changed;
     Ok(())
 }
 

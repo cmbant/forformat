@@ -226,8 +226,16 @@ defaults to true and `!$omp parallel do private(i)` becomes `!$OMP PARALLEL DO P
 which is also how `--keyword-case=preserve` reaches them: pass both to leave an authored `!$OmP`
 exactly as written.
 
-Both settings draw the same boundaries. Clause arguments, user identifiers, and macro names inside a
-directive are never re-cased. Unreserved sentinels such as `!$acc` are ordinary comments to this
+Both settings draw the same boundaries. Macro names are never re-cased, and neither is a clause's
+argument list: `PRIVATE(shared)` keeps the declared name as written even though `shared` is itself a
+clause name elsewhere, because the argument is the user's program and not the formatter's to respell.
+The exception is the handful of clauses whose argument grammar is a fixed vocabulary rather than a
+list of names — `default`, `schedule`, `dist_schedule`, `proc_bind`, `order` — where the
+argument is cased too, so `schedule(dynamic, chunk)` becomes `SCHEDULE(DYNAMIC, chunk)` and the
+chunk-size expression beside it stays as authored. Clauses that take a list keep their modifiers as
+written for the same reason the list itself is kept: `MAP(to: a)` is not re-cased, since telling a
+modifier from a name there needs the clause-by-clause grammar of the whole specification.
+Unreserved sentinels such as `!$acc` are ordinary comments to this
 formatter and keep their authored spelling under every setting. A conditional-compilation `!$ ` line
 is not a directive at all — it is ordinary Fortran that only an OpenMP compiler sees — so its body
 follows `--keyword-case` like any other statement and `--openmp-case` never touches it.

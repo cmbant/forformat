@@ -3,39 +3,41 @@
 //! This module deliberately contains no formatting rules. It selects sources,
 //! builds one project context, delegates bytes to the library formatter, and
 //! performs the requested output operation.
+//!
+//! The work is split by the question each part answers: `sources` and `select`
+//! decide which files the invocation reads, `context` turns them into the
+//! analysis and runs the formatter, `diff` and `write` deliver the result, and
+//! `report` says what was declined. What stays here is the sequencing —
+//! [`execute`] and the phases it walks through.
+
+mod context;
+mod diff;
+mod exclude;
+mod report;
+mod select;
+mod sources;
+mod write;
+
+use context::{analyze_sources, format_one, format_targets, isolated_context, project_context};
+use diff::unified_diff;
+use exclude::ExcludeMatcher;
+use report::{fixed_message, skips_fixed_form, DeclineReporter};
+use select::{deduplicate_indices, select_paths, Loaded, Scope, Selection};
+use sources::{display_path, read_source, resolve_input, tracked_sources_without_submodules};
+use write::write_all_stdout;
+
+pub use sources::{repository_root, tracked_sources, validate_extension};
+pub use write::atomic_replace;
 
 use crate::{
-    analysis::{analyze_file, FileFacts, ProjectContext},
-    cli::{ContextPath, Invocation},
-    error::FormatError,
-    format_source,
-    source::SourceForm,
-    FormatResult,
+    analysis::analyze_file, cli::Invocation, error::FormatError, format_source, source::SourceForm,
 };
-mod exclude;
-use exclude::ExcludeMatcher;
 use std::{
-    collections::{HashMap, HashSet},
-    env,
-    ffi::OsString,
-    fs::{self, File, OpenOptions},
-    io::{self, Read, Write},
-    num::NonZeroUsize,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-    sync::{
-        atomic::{AtomicU64, AtomicUsize, Ordering},
-        mpsc,
-    },
+    env, fs,
+    io::{self, Read},
+    path::PathBuf,
     time::Instant,
 };
-
-const GIT_HOOK_VARS: [&str; 4] = [
-    "GIT_DIR",
-    "GIT_WORK_TREE",
-    "GIT_COMMON_DIR",
-    "GIT_INDEX_FILE",
-];
 
 /// A workflow failure carries the exit-status class required by the CLI.
 #[derive(Debug)]
@@ -84,891 +86,6 @@ impl From<FormatError> for WorkflowError {
     fn from(error: FormatError) -> Self {
         Self::Format(error)
     }
-}
-
-/// Validate only the suffix. This is intentionally pure: existence and file
-/// opening are separate operations (§9.1 of the port plan).
-pub fn validate_extension(path: &Path) -> Result<(), String> {
-    let valid = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .map(|extension| {
-            let suffix = format!(".{extension}");
-            crate::transform::vocab::SOURCE_EXTENSIONS
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(&suffix))
-        })
-        .unwrap_or(false);
-    if valid {
-        Ok(())
-    } else {
-        Err(format!(
-            "expected a free-form Fortran source (suffix match is case-insensitive: .f, .f03, .f08, .f18, .f23, .f90, .f95): {}",
-            path.display()
-        ))
-    }
-}
-
-/// Run a nested git command with all hook repository variables removed.
-/// Keeping this as the only git entry point makes F2 difficult to regress.
-fn git(args: &[&str], cwd: &Path) -> io::Result<std::process::Output> {
-    let mut command = Command::new("git");
-    command.args(args).current_dir(cwd).stdin(Stdio::null());
-    for variable in GIT_HOOK_VARS {
-        command.env_remove(variable);
-    }
-    command.output()
-}
-
-fn git_path(raw: &[u8]) -> io::Result<PathBuf> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStringExt;
-        Ok(PathBuf::from(OsString::from_vec(raw.to_vec())))
-    }
-    #[cfg(not(unix))]
-    {
-        String::from_utf8(raw.to_vec())
-            .map(OsString::from)
-            .map(PathBuf::from)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
-    }
-}
-
-/// Find the checkout containing start.
-pub fn repository_root(start: &Path) -> io::Result<Option<PathBuf>> {
-    let output = git(&["rev-parse", "--show-toplevel"], start)?;
-    if !output.status.success() {
-        return Ok(None);
-    }
-    let raw = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
-    let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
-    if raw.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(fs::canonicalize(git_path(raw)?)?))
-    }
-}
-
-/// Return tracked free-form sources, accepting upper-case suffix spellings.
-pub fn tracked_sources(root: &Path) -> io::Result<Vec<PathBuf>> {
-    tracked_sources_with_submodules(root, true)
-}
-
-/// Return tracked free-form sources from the checkout itself, excluding
-/// sources owned by initialized submodules.
-pub fn tracked_sources_without_submodules(root: &Path) -> io::Result<Vec<PathBuf>> {
-    tracked_sources_with_submodules(root, false)
-}
-
-fn tracked_sources_with_submodules(
-    root: &Path,
-    recurse_submodules: bool,
-) -> io::Result<Vec<PathBuf>> {
-    let mut args = vec!["ls-files", "-z", "--"];
-    if recurse_submodules {
-        args.insert(1, "--recurse-submodules");
-    }
-    let output = git(&args, root)?;
-    if !output.status.success() {
-        return Err(io::Error::other(
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ));
-    }
-    let mut paths = Vec::new();
-    for raw in output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|raw| !raw.is_empty())
-    {
-        let relative = git_path(raw)?;
-        if validate_extension(&relative).is_ok() {
-            paths.push(root.join(relative));
-        }
-    }
-    paths.sort();
-    Ok(paths)
-}
-
-#[derive(Debug)]
-struct Source {
-    path: PathBuf,
-    bytes: Vec<u8>,
-    form: SourceForm,
-}
-
-fn resolve_input(path: &Path, root: Option<&Path>) -> PathBuf {
-    if path.is_absolute() || path.exists() {
-        path.to_path_buf()
-    } else if let Some(root) = root {
-        let candidate = root.join(path);
-        if candidate.exists() {
-            candidate
-        } else {
-            path.to_path_buf()
-        }
-    } else {
-        path.to_path_buf()
-    }
-}
-
-fn read_source(path: &Path, force_free_input: bool) -> Result<Option<Source>, WorkflowError> {
-    validate_extension(path).map_err(WorkflowError::Usage)?;
-    let canonical = match fs::canonicalize(path) {
-        Ok(canonical) => canonical,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(WorkflowError::Io(error)),
-    };
-    let mut file = match File::open(&canonical) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(WorkflowError::Io(error)),
-    };
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(WorkflowError::Usage(format!(
-            "Fortran source file is not a regular file: {}",
-            path.display()
-        )));
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)?;
-    let form = if force_free_input {
-        SourceForm::Free
-    } else {
-        crate::source::detect_path(path, &bytes)
-    };
-    Ok(Some(Source {
-        bytes,
-        path: canonical,
-        form,
-    }))
-}
-
-/// Drop repeated paths, keeping the first occurrence and the original order.
-///
-/// The order is what makes diagnostics, diffs and the changed-file listing
-/// reproducible, and the set is what keeps `--all` over a large checkout from
-/// being quadratic in the number of tracked sources.
-fn deduplicate(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
-    let mut seen = HashSet::new();
-    let mut result = Vec::new();
-    for path in paths {
-        if seen.insert(path.clone()) {
-            result.push(path);
-        }
-    }
-    result
-}
-
-fn display_path(path: &Path, root: Option<&Path>) -> PathBuf {
-    root.and_then(|root| path.strip_prefix(root).ok())
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| path.to_path_buf())
-}
-
-fn resolve_context_paths(
-    context_paths: &[ContextPath],
-    root: Option<&Path>,
-    cwd: &Path,
-) -> Result<Vec<PathBuf>, WorkflowError> {
-    context_paths
-        .iter()
-        .map(|context_path| {
-            let path = &context_path.path;
-            let candidate = if path.is_absolute() {
-                path.clone()
-            } else {
-                context_path
-                    .base
-                    .as_deref()
-                    .or(root)
-                    .unwrap_or(cwd)
-                    .join(path)
-            };
-            let resolved = fs::canonicalize(&candidate).map_err(|error| {
-                WorkflowError::Usage(format!(
-                    "--context-path does not exist: {} ({error})",
-                    candidate.display()
-                ))
-            })?;
-            if !fs::metadata(&resolved)?.is_dir() {
-                return Err(WorkflowError::Usage(format!(
-                    "--context-path requires a directory: {}",
-                    candidate.display()
-                )));
-            }
-            if let Some(root) = root {
-                if !resolved.starts_with(root) {
-                    return Err(WorkflowError::Usage(format!(
-                        "--context-path must be inside the Git checkout: {}",
-                        candidate.display()
-                    )));
-                }
-            }
-            Ok(resolved)
-        })
-        .collect()
-}
-
-fn filesystem_sources(
-    context_paths: &[PathBuf],
-    exclude_matcher: &ExcludeMatcher,
-) -> io::Result<Vec<PathBuf>> {
-    fn visit(directory: &Path, sources: &mut Vec<PathBuf>) -> io::Result<()> {
-        let mut entries = fs::read_dir(directory)?.collect::<Result<Vec<_>, _>>()?;
-        entries.sort_by_key(|entry| entry.path());
-        for entry in entries {
-            let path = entry.path();
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                visit(&path, sources)?;
-            } else if file_type.is_file() && validate_extension(&path).is_ok() {
-                sources.push(path);
-            }
-        }
-        Ok(())
-    }
-
-    let mut sources = Vec::new();
-    for context_path in context_paths {
-        visit(context_path, &mut sources)?;
-    }
-    sources.retain(|path| {
-        !context_paths
-            .iter()
-            .any(|root| exclude_matcher.is_excluded(root, path))
-    });
-    sources.sort();
-    sources.dedup();
-    Ok(sources)
-}
-
-fn context_sources(
-    tracked: Option<&Vec<PathBuf>>,
-    context_paths: &[PathBuf],
-    exclude_matcher: &ExcludeMatcher,
-    exclusion_root: &Path,
-) -> Result<Option<Vec<PathBuf>>, WorkflowError> {
-    let sources = if let Some(tracked) = tracked {
-        tracked
-            .iter()
-            .filter(|path| {
-                context_paths.is_empty()
-                    || context_paths
-                        .iter()
-                        .any(|context_path| path.starts_with(context_path))
-            })
-            .cloned()
-            .collect::<Vec<_>>()
-    } else if !context_paths.is_empty() {
-        filesystem_sources(context_paths, exclude_matcher)?
-    } else {
-        return Ok(None);
-    };
-    if tracked.is_some() {
-        Ok(Some(
-            sources
-                .into_iter()
-                .filter(|path| !exclude_matcher.is_excluded(exclusion_root, path))
-                .collect(),
-        ))
-    } else {
-        Ok(Some(sources))
-    }
-}
-
-fn analyze_sources(
-    sources: &[Source],
-    indices: &[usize],
-) -> Result<Vec<Option<FileFacts>>, WorkflowError> {
-    let mut facts = (0..sources.len()).map(|_| None).collect::<Vec<_>>();
-    for &index in indices {
-        facts[index] = Some(analyze_file(&sources[index].bytes)?);
-    }
-    Ok(facts)
-}
-
-fn project_context(
-    sources: &[Source],
-    indices: &[usize],
-    facts: &[Option<FileFacts>],
-    stdin_source: Option<(&Path, &FileFacts)>,
-    config: &crate::config::FormatConfig,
-) -> ProjectContext {
-    // Source facts are extracted once for the invocation, then reused both to
-    // build project tables and as target-local precedence data during format.
-    let mut context = ProjectContext::empty();
-    for &index in indices {
-        context.absorb(
-            &sources[index].path,
-            facts[index]
-                .as_ref()
-                .expect("every project source must have precomputed facts"),
-        );
-    }
-    // A file-valued --project-context makes stdin the current version of that
-    // tracked source. Its already-extracted facts replace the stale disk copy.
-    if let Some((path, local)) = stdin_source {
-        context.absorb(path, local);
-    }
-    context.define(&config.defines);
-    context.enable_target_local_component_resolution();
-    context
-}
-
-fn isolated_context(config: &crate::config::FormatConfig) -> ProjectContext {
-    let mut context = ProjectContext::empty();
-    context.define(&config.defines);
-    context
-}
-
-fn format_one(
-    source: &Source,
-    local: Option<&FileFacts>,
-    context: &ProjectContext,
-    config: &crate::config::FormatConfig,
-) -> Result<FormatResult, WorkflowError> {
-    let result = if !config.mode.normalizes() {
-        format_source(&source.bytes, config)?
-    } else {
-        crate::format::full::format_with_context_and_local(
-            &source.bytes,
-            context,
-            local.expect("every full-mode target must have precomputed facts"),
-            config,
-        )?
-    };
-    Ok(result)
-}
-
-/// One formatted target: its metadata, and its bytes only if they differ from
-/// what was read.
-type FormattedTarget = (crate::FormatMeta, Option<Vec<u8>>);
-
-/// Format every target, in parallel, and return one entry per target in target
-/// order.
-///
-/// Formatting is pure once the single project-analysis pass has run, so the
-/// targets are independent. Two things bound the cost of that independence:
-///
-/// * the worker count is `available_parallelism()`, not one thread per file —
-///   `--all` over a large repository would otherwise ask the OS for thousands
-///   of threads at once;
-/// * a target whose output equals its input contributes only its metadata, so
-///   an already-formatted tree does not hold a second copy of itself in memory.
-///
-/// Every target is formatted before the caller writes anything, which is what
-/// keeps a failure part-way through from leaving a half-rewritten tree.
-fn format_targets(
-    sources: &[Source],
-    target_indices: &[usize],
-    facts: &[Option<FileFacts>],
-    context: &ProjectContext,
-    config: &crate::config::FormatConfig,
-) -> Result<Vec<FormattedTarget>, WorkflowError> {
-    let workers = std::thread::available_parallelism()
-        .map(NonZeroUsize::get)
-        .unwrap_or(1)
-        .min(target_indices.len().max(1));
-    let next = AtomicUsize::new(0);
-    let (sender, receiver) = mpsc::channel();
-    let mut slots: Vec<Option<Result<FormattedTarget, WorkflowError>>> =
-        (0..target_indices.len()).map(|_| None).collect();
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            let sender = sender.clone();
-            let next = &next;
-            scope.spawn(move || loop {
-                let index = next.fetch_add(1, Ordering::Relaxed);
-                let Some(&source_index) = target_indices.get(index) else {
-                    return;
-                };
-                let target = &sources[source_index];
-                let outcome = format_one(target, facts[source_index].as_ref(), context, config)
-                    .map(|result| {
-                        let changed = result.bytes != target.bytes;
-                        (result.meta, changed.then_some(result.bytes))
-                    });
-                if sender.send((index, outcome)).is_err() {
-                    return;
-                }
-            });
-        }
-        // The workers hold the only remaining senders, so the receiver ends
-        // exactly when the last one finishes.
-        drop(sender);
-        for (index, outcome) in receiver {
-            slots[index] = Some(outcome);
-        }
-    });
-    slots
-        .into_iter()
-        .map(|slot| slot.expect("format worker panicked"))
-        .collect()
-}
-
-/// Keep routine formatting invocations useful when a generated source has
-/// hundreds of equally-unwrappable statements.  Five concrete locations are
-/// enough to identify the condition; the remainder are counted below.
-const DECLINE_DIAGNOSTIC_LIMIT: usize = 5;
-
-/// Bounded declined-wrap diagnostics for one CLI invocation.
-///
-/// The formatter deliberately keeps paths out of [`crate::FormatMeta`] so the
-/// library API remains about a source buffer.  The CLI has the path, and adds
-/// it here while combining diagnostics from all formatted targets.
-#[derive(Default)]
-struct DeclineReporter {
-    reported: usize,
-    suppressed: usize,
-    suppressed_inputs: HashSet<String>,
-    suppressed_stdin: bool,
-}
-
-impl DeclineReporter {
-    fn report_fixed(&mut self, path: &Path, root: Option<&Path>) {
-        let input = display_path(path, root).display().to_string();
-        eprintln!("{}", fixed_message(&input));
-    }
-
-    fn report(&mut self, meta: &crate::FormatMeta, path: Option<&Path>, root: Option<&Path>) {
-        let input = path
-            .map(|path| display_path(path, root).display().to_string())
-            .unwrap_or_else(|| "<stdin>".to_owned());
-        for (line, reason) in &meta.declines {
-            if self.reported < DECLINE_DIAGNOSTIC_LIMIT {
-                eprintln!("{}", decline_message(&input, *line, *reason));
-                self.reported += 1;
-            } else {
-                self.suppressed += 1;
-                self.suppressed_stdin |= path.is_none();
-                self.suppressed_inputs.insert(input.clone());
-            }
-        }
-    }
-
-    fn finish(&self) {
-        if let Some(message) = self.summary() {
-            eprintln!("{message}");
-        }
-    }
-
-    fn summary(&self) -> Option<String> {
-        (self.suppressed > 0).then(|| {
-            let inputs = self.suppressed_inputs.len();
-            let input_word = if self.suppressed_stdin {
-                if inputs == 1 {
-                    "input"
-                } else {
-                    "inputs"
-                }
-            } else if inputs == 1 {
-                "file"
-            } else {
-                "files"
-            };
-            format!(
-                "forformat: + {} additional declined-wrap diagnostics in {inputs} {input_word}",
-                self.suppressed
-            )
-        })
-    }
-}
-
-fn decline_message(input: &str, line: usize, reason: crate::format::wrapping::Decline) -> String {
-    format!("forformat: {input}:{}: declined wrap: {reason:?}", line + 1)
-}
-
-fn fixed_message(input: &str) -> String {
-    format!("forformat: {input}: fixed-form source, skipped")
-}
-
-/// Should this unnamed buffer be declined as fixed form?
-///
-/// Two carve-outs beyond the `-ifree` override. A buffer with no non-blank byte
-/// has nothing to protect, and findent's detector answers FIXED at EOF, so
-/// without this every content-free invocation — `forformat </dev/null` among
-/// them — would report a skip. And `-lastindent`/`-lastusable` only report on
-/// the source rather than rewriting it, so there is nothing to decline.
-fn skips_fixed_form(invocation: &Invocation, input_path: Option<&Path>, source: &[u8]) -> bool {
-    !invocation.force_free_input
-        && !invocation.config.last_indent
-        && !invocation.config.last_usable
-        && source.iter().any(|byte| !byte.is_ascii_whitespace())
-        && input_path.map_or_else(
-            || crate::source::detect(source),
-            |path| crate::source::detect_path(path, source),
-        ) == SourceForm::Fixed
-}
-
-fn write_all_stdout(bytes: &[u8]) -> Result<(), WorkflowError> {
-    let mut stdout = io::BufWriter::new(io::stdout().lock());
-    stdout.write_all(bytes)?;
-    stdout.flush()?;
-    Ok(())
-}
-
-/// Replace a file atomically, preserving its mode bits. Symlink resolution is
-/// done by the caller, so a symlink argument leaves the link intact.
-pub fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<(), WorkflowError> {
-    let target = fs::canonicalize(path)?;
-    let metadata = fs::metadata(&target)?;
-    let mode = mode_bits(&metadata);
-    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let number = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let name = format!(
-        ".{}.forformat-{}-{}",
-        target.file_name().unwrap_or_default().to_string_lossy(),
-        std::process::id(),
-        number
-    );
-    let temporary = target.parent().unwrap_or_else(|| Path::new(".")).join(name);
-    let result = (|| -> Result<(), WorkflowError> {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)?;
-        set_mode(&file, mode)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&temporary, &target)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
-}
-
-#[cfg(unix)]
-fn mode_bits(metadata: &fs::Metadata) -> u32 {
-    use std::os::unix::fs::PermissionsExt;
-    metadata.permissions().mode()
-}
-
-#[cfg(not(unix))]
-fn mode_bits(_metadata: &fs::Metadata) -> u32 {
-    0
-}
-
-#[cfg(unix)]
-fn set_mode(file: &File, mode: u32) -> Result<(), WorkflowError> {
-    use std::os::unix::fs::PermissionsExt;
-    file.set_permissions(fs::Permissions::from_mode(mode))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_mode(_file: &File, _mode: u32) -> Result<(), WorkflowError> {
-    Ok(())
-}
-
-fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
-    if bytes.is_empty() {
-        return Vec::new();
-    }
-    let mut lines = Vec::new();
-    let mut start = 0;
-    for (index, byte) in bytes.iter().enumerate() {
-        if *byte == b'\n' {
-            lines.push(&bytes[start..=index]);
-            start = index + 1;
-        }
-    }
-    if start < bytes.len() {
-        lines.push(&bytes[start..]);
-    }
-    lines
-}
-
-const DIFF_CONTEXT_LINES: usize = 3;
-const MAX_DIFF_TRACE_CELLS: usize = 4_000_000;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DiffKind {
-    Context,
-    Delete,
-    Insert,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct DiffLine {
-    kind: DiffKind,
-    old_index: usize,
-    new_index: usize,
-}
-
-fn diagonal_index(diagonal: isize, distance: usize) -> usize {
-    ((diagonal + distance as isize) / 2) as usize
-}
-
-fn coarse_diff(old: &[&[u8]], new: &[&[u8]]) -> Vec<DiffLine> {
-    let common_limit = old.len().min(new.len());
-    let mut prefix = 0usize;
-    while prefix < common_limit && old[prefix] == new[prefix] {
-        prefix += 1;
-    }
-
-    let mut suffix = 0usize;
-    while suffix < common_limit - prefix
-        && old[old.len() - 1 - suffix] == new[new.len() - 1 - suffix]
-    {
-        suffix += 1;
-    }
-
-    let old_change_end = old.len() - suffix;
-    let new_change_end = new.len() - suffix;
-    let mut lines = Vec::with_capacity(old.len() + new.len());
-
-    for index in 0..prefix {
-        lines.push(DiffLine {
-            kind: DiffKind::Context,
-            old_index: index,
-            new_index: index,
-        });
-    }
-    for old_index in prefix..old_change_end {
-        lines.push(DiffLine {
-            kind: DiffKind::Delete,
-            old_index,
-            new_index: prefix,
-        });
-    }
-    for new_index in prefix..new_change_end {
-        lines.push(DiffLine {
-            kind: DiffKind::Insert,
-            old_index: old_change_end,
-            new_index,
-        });
-    }
-    for offset in 0..suffix {
-        lines.push(DiffLine {
-            kind: DiffKind::Context,
-            old_index: old_change_end + offset,
-            new_index: new_change_end + offset,
-        });
-    }
-    lines
-}
-
-fn backtrack_diff(trace: &[Vec<isize>], old_len: usize, new_len: usize) -> Vec<DiffLine> {
-    let mut old_cursor = old_len as isize;
-    let mut new_cursor = new_len as isize;
-    let mut kinds = Vec::with_capacity(old_len + new_len);
-
-    for distance in (1..trace.len()).rev() {
-        let diagonal = old_cursor - new_cursor;
-        let previous = &trace[distance - 1];
-        let previous_diagonal = if diagonal == -(distance as isize) {
-            diagonal + 1
-        } else if diagonal == distance as isize {
-            diagonal - 1
-        } else {
-            let down = previous[diagonal_index(diagonal + 1, distance - 1)];
-            let right = previous[diagonal_index(diagonal - 1, distance - 1)] + 1;
-            if right > down {
-                diagonal - 1
-            } else {
-                diagonal + 1
-            }
-        };
-        let previous_old = previous[diagonal_index(previous_diagonal, distance - 1)];
-        let previous_new = previous_old - previous_diagonal;
-
-        while old_cursor > previous_old && new_cursor > previous_new {
-            old_cursor -= 1;
-            new_cursor -= 1;
-            kinds.push(DiffKind::Context);
-        }
-        if old_cursor == previous_old {
-            new_cursor -= 1;
-            kinds.push(DiffKind::Insert);
-        } else {
-            old_cursor -= 1;
-            kinds.push(DiffKind::Delete);
-        }
-    }
-
-    while old_cursor > 0 && new_cursor > 0 {
-        old_cursor -= 1;
-        new_cursor -= 1;
-        kinds.push(DiffKind::Context);
-    }
-    while old_cursor > 0 {
-        old_cursor -= 1;
-        kinds.push(DiffKind::Delete);
-    }
-    while new_cursor > 0 {
-        new_cursor -= 1;
-        kinds.push(DiffKind::Insert);
-    }
-    kinds.reverse();
-
-    let mut old_index = 0usize;
-    let mut new_index = 0usize;
-    kinds
-        .into_iter()
-        .map(|kind| {
-            let line = DiffLine {
-                kind,
-                old_index,
-                new_index,
-            };
-            if kind != DiffKind::Insert {
-                old_index += 1;
-            }
-            if kind != DiffKind::Delete {
-                new_index += 1;
-            }
-            line
-        })
-        .collect()
-}
-
-/// Return a shortest line edit script with stable indices into both inputs.
-///
-/// Myers' frontier is compact for formatter output, where most lines are equal.
-/// The retained trace is explicitly bounded so a near-total rewrite falls back
-/// to one coarse changed region instead of consuming memory proportional to the
-/// square of the edit distance.
-fn diff_lines(old: &[&[u8]], new: &[&[u8]]) -> Vec<DiffLine> {
-    let old_len = old.len() as isize;
-    let new_len = new.len() as isize;
-    let max_distance = old.len() + new.len();
-    let mut trace = Vec::<Vec<isize>>::new();
-    let mut trace_cells = 0usize;
-
-    for distance in 0..=max_distance {
-        trace_cells += distance + 1;
-        if trace_cells > MAX_DIFF_TRACE_CELLS {
-            return coarse_diff(old, new);
-        }
-
-        let mut frontier = vec![0isize; distance + 1];
-        for diagonal in (-(distance as isize)..=distance as isize).step_by(2) {
-            let mut old_cursor = if distance == 0 {
-                0
-            } else {
-                let previous = &trace[distance - 1];
-                if diagonal == -(distance as isize) {
-                    previous[diagonal_index(diagonal + 1, distance - 1)]
-                } else if diagonal == distance as isize {
-                    previous[diagonal_index(diagonal - 1, distance - 1)] + 1
-                } else {
-                    let down = previous[diagonal_index(diagonal + 1, distance - 1)];
-                    let right = previous[diagonal_index(diagonal - 1, distance - 1)] + 1;
-                    if right > down {
-                        right
-                    } else {
-                        down
-                    }
-                }
-            };
-            let mut new_cursor = old_cursor - diagonal;
-            while old_cursor < old_len
-                && new_cursor < new_len
-                && old[old_cursor as usize] == new[new_cursor as usize]
-            {
-                old_cursor += 1;
-                new_cursor += 1;
-            }
-            frontier[diagonal_index(diagonal, distance)] = old_cursor;
-            if old_cursor == old_len && new_cursor == new_len {
-                trace.push(frontier);
-                return backtrack_diff(&trace, old.len(), new.len());
-            }
-        }
-        trace.push(frontier);
-    }
-    unreachable!("edit distance cannot exceed the combined input length")
-}
-
-fn diff_hunks(lines: &[DiffLine]) -> Vec<std::ops::Range<usize>> {
-    let changes: Vec<_> = lines
-        .iter()
-        .enumerate()
-        .filter_map(|(index, line)| (line.kind != DiffKind::Context).then_some(index))
-        .collect();
-    let Some((&first, rest)) = changes.split_first() else {
-        return Vec::new();
-    };
-
-    let mut hunks = Vec::new();
-    let mut start = first.saturating_sub(DIFF_CONTEXT_LINES);
-    let mut last = first;
-    for &change in rest {
-        if change - last - 1 > 2 * DIFF_CONTEXT_LINES {
-            hunks.push(start..(last + DIFF_CONTEXT_LINES + 1).min(lines.len()));
-            start = change.saturating_sub(DIFF_CONTEXT_LINES);
-        }
-        last = change;
-    }
-    hunks.push(start..(last + DIFF_CONTEXT_LINES + 1).min(lines.len()));
-    hunks
-}
-
-fn append_diff_line(output: &mut Vec<u8>, marker: u8, line: &[u8]) {
-    output.push(marker);
-    output.extend_from_slice(line);
-    if !line.ends_with(b"\n") {
-        output.extend_from_slice(b"\n\\ No newline at end of file\n");
-    }
-}
-
-fn hunk_line_number(start: usize, count: usize) -> usize {
-    if count == 0 {
-        start
-    } else {
-        start + 1
-    }
-}
-
-fn unified_diff(path: &Path, old: &[u8], new: &[u8], root: Option<&Path>) -> Vec<u8> {
-    if old == new {
-        return Vec::new();
-    }
-
-    let relative = display_path(path, root).display().to_string();
-    let old_lines = split_lines(old);
-    let new_lines = split_lines(new);
-    let diff = diff_lines(&old_lines, &new_lines);
-    let mut output = Vec::new();
-    output.extend_from_slice(format!("--- a/{relative}\n+++ b/{relative}\n").as_bytes());
-
-    for hunk in diff_hunks(&diff) {
-        let lines = &diff[hunk];
-        let old_start = lines[0].old_index;
-        let new_start = lines[0].new_index;
-        let old_count = lines
-            .iter()
-            .filter(|line| line.kind != DiffKind::Insert)
-            .count();
-        let new_count = lines
-            .iter()
-            .filter(|line| line.kind != DiffKind::Delete)
-            .count();
-        output.extend_from_slice(
-            format!(
-                "@@ -{},{} +{},{} @@\n",
-                hunk_line_number(old_start, old_count),
-                old_count,
-                hunk_line_number(new_start, new_count),
-                new_count,
-            )
-            .as_bytes(),
-        );
-
-        for line in lines {
-            match line.kind {
-                DiffKind::Context => append_diff_line(&mut output, b' ', old_lines[line.old_index]),
-                DiffKind::Delete => append_diff_line(&mut output, b'-', old_lines[line.old_index]),
-                DiffKind::Insert => append_diff_line(&mut output, b'+', new_lines[line.new_index]),
-            }
-        }
-    }
-    output
 }
 
 fn execute_query_format(invocation: Invocation) -> Result<i32, WorkflowError> {
@@ -1077,6 +194,11 @@ fn promote_directory_argument(mut invocation: Invocation) -> Invocation {
 
 /// Execute one parsed invocation. Return value is the process status for a
 /// successful operation: 0 clean/success, 1 differences found.
+///
+/// The body is the sequence and nothing else. Each phase below answers one
+/// question — where are we rooted, which files, what do they say, where does
+/// the output go — and the early returns here are the routes that can answer
+/// the last one before the ones in between have to be paid for.
 pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     let invocation = promote_directory_argument(invocation);
     if invocation.query_format {
@@ -1084,29 +206,14 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     }
     let all_selection = invocation.all || invocation.all_files;
     let stdin_mode = invocation.stdin || (invocation.paths.is_empty() && !all_selection);
+    // A buffer on stdin with no project to read needs none of the discovery
+    // below, and this is the route an editor takes on every keystroke, so it
+    // does not pay for any of it.
     if stdin_mode && invocation.project_context.is_none() && invocation.context_paths.is_empty() {
-        let mut source = Vec::new();
-        io::stdin().read_to_end(&mut source)?;
-        // stdin is the primary documented route, so it needs the same guard the
-        // file routes get: free-form normalization of a fixed-form source
-        // rewrites column-1 `*`/`C` comment markers as operators and destroys
-        // the file.  There is no path to name in the diagnostic here.
-        if skips_fixed_form(&invocation, None, &source) {
-            eprintln!("{}", fixed_message("<stdin>"));
-            write_all_stdout(&source)?;
-            return Ok(0);
-        }
-        let config = invocation.config;
-        let result = format_source(&source, &config)?;
-        let mut declines = DeclineReporter::default();
-        declines.report(&result.meta, None, None);
-        declines.finish();
-        write_all_stdout(&result.bytes)?;
-        return Ok(0);
+        return format_bare_stdin(&invocation);
     }
 
-    let profile = env::var_os("FORFORMAT_PROFILE_IO").is_some();
-    let profile_start = Instant::now();
+    let profile = Profile::new();
     let cwd = env::current_dir()?;
     let stdin_source = if stdin_mode {
         let mut source = Vec::new();
@@ -1115,382 +222,287 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     } else {
         None
     };
-    // A directory-valued project context describes an anonymous stdin buffer.
-    // A file-valued context additionally identifies the tracked file whose
-    // in-memory contents stdin replaces, so its stale on-disk bytes must not
-    // contribute to project analysis.
-    let project_scope = invocation
-        .project_context
-        .as_deref()
-        .map(|path| {
-            let candidate = resolve_input(path, None);
-            let canonical = fs::canonicalize(&candidate).map_err(|error| {
-                WorkflowError::Usage(format!(
-                    "--project-context path does not exist: {} ({error})",
-                    candidate.display()
-                ))
-            })?;
-            let metadata = fs::metadata(&canonical)?;
-            if metadata.is_dir() {
-                return Ok((canonical, None));
-            }
-            if !metadata.is_file() {
-                return Err(WorkflowError::Usage(format!(
-                    "--project-context requires a directory or regular source file: {}",
-                    candidate.display()
-                )));
-            }
-            validate_extension(&candidate).map_err(WorkflowError::Usage)?;
-            let parent = candidate
-                .parent()
-                .filter(|parent| !parent.as_os_str().is_empty())
-                .unwrap_or_else(|| Path::new("."));
-            let directory = fs::canonicalize(parent)?;
-            let stdin_path = directory.join(
-                candidate
-                    .file_name()
-                    .expect("a regular file must have a file name"),
-            );
-            Ok((directory, Some(stdin_path)))
-        })
-        .transpose()?;
-    let all_scope = if all_selection {
-        invocation
-            .paths
-            .first()
-            .map(|path| {
-                let candidate = resolve_input(path, None);
-                let canonical = fs::canonicalize(&candidate).map_err(|error| {
-                    WorkflowError::Usage(format!(
-                        "--all/--all-files directory does not exist: {} ({error})",
-                        candidate.display()
-                    ))
-                })?;
-                if !fs::metadata(&canonical)?.is_dir() {
-                    return Err(WorkflowError::Usage(format!(
-                        "--all/--all-files requires a directory: {}",
-                        candidate.display()
-                    )));
-                }
-                Ok(canonical)
-            })
-            .transpose()?
-    } else {
-        None
-    };
-    let root = if let Some(scope) = all_scope.as_deref() {
-        repository_root(scope)?
-    } else if let Some((scope, _)) = project_scope.as_ref() {
-        repository_root(scope)?
-    } else {
-        repository_root(&cwd)?
-    };
-    if invocation.project_context.is_some() && root.is_none() {
-        return Err(WorkflowError::Usage(
-            "--project-context requires a valid Git checkout".into(),
-        ));
+    let scope = Scope::resolve(&invocation, &cwd, all_selection)?;
+    if let Some(status) = stdin_shortcut(&invocation, &scope, stdin_source.as_deref())? {
+        return Ok(status);
     }
-    let context_paths = if invocation.context_paths.is_empty() {
-        Vec::new()
-    } else {
-        resolve_context_paths(&invocation.context_paths, root.as_deref(), &cwd)?
-    };
-    if stdin_mode {
-        let source = stdin_source
-            .as_deref()
-            .expect("stdin mode must have read stdin");
-        let input_path = project_scope.as_ref().and_then(|(_, path)| path.as_deref());
-        if skips_fixed_form(&invocation, input_path, source) {
-            let input = input_path
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "<stdin>".to_string());
-            eprintln!("{}", fixed_message(&input));
-            write_all_stdout(source)?;
-            return Ok(0);
-        }
-        if !invocation.config.mode.normalizes() {
-            let formatted = format_source(source, &invocation.config)?;
-            let mut declines = DeclineReporter::default();
-            declines.report(&formatted.meta, None, root.as_deref());
-            declines.finish();
-            write_all_stdout(&formatted.bytes)?;
-            return Ok(0);
-        }
-    }
-    let exclude_matcher = ExcludeMatcher::new(&invocation.exclude_patterns());
-    let tracked_source_reader = if invocation.no_submodules {
-        tracked_sources_without_submodules
-    } else {
-        tracked_sources
-    };
-    let tracked = if all_selection
-        || invocation.project_context.is_some()
-        || (!invocation.isolated && root.is_some())
-    {
-        root.as_deref().map(tracked_source_reader).transpose()?
-    } else {
-        None
-    };
-    let exclusion_root = root.as_deref().unwrap_or(cwd.as_path());
-    let context_tracked = context_sources(
-        tracked.as_ref(),
-        &context_paths,
-        &exclude_matcher,
-        exclusion_root,
-    )?;
-    let tracked = tracked.map(|paths| {
-        paths
-            .into_iter()
-            .filter(|path| !exclude_matcher.is_excluded(exclusion_root, path))
-            .collect::<Vec<_>>()
-    });
-    let mut target_paths = if invocation.all {
-        let tracked = tracked
-            .as_ref()
-            .ok_or_else(|| WorkflowError::Usage("--all requires a valid Git checkout".into()))?;
-        match all_scope.as_deref() {
-            Some(scope) => tracked
-                .iter()
-                .filter(|path| path.starts_with(scope))
-                .cloned()
-                .collect(),
-            None => tracked.clone(),
-        }
-    } else if invocation.all_files {
-        let tracked = root
-            .as_deref()
-            .map(tracked_sources_without_submodules)
-            .transpose()?
-            .ok_or_else(|| {
-                WorkflowError::Usage("--all-files requires a valid Git checkout".into())
-            })?;
-        let tracked = tracked
-            .into_iter()
-            .filter(|path| !exclude_matcher.is_excluded(root.as_deref().unwrap(), path));
-        match all_scope.as_deref() {
-            Some(scope) => tracked.filter(|path| path.starts_with(scope)).collect(),
-            None => tracked.collect(),
-        }
-    } else if stdin_mode {
-        Vec::new()
-    } else {
-        deduplicate(
-            invocation
-                .paths
-                .iter()
-                .map(|path| resolve_input(path, root.as_deref()))
-                .collect::<Vec<_>>(),
-        )
-    };
+
+    let mut selection = select_paths(&invocation, &scope, &cwd, stdin_mode, all_selection)?;
     if invocation.show_files {
-        for path in &target_paths {
-            println!("{}", display_path(path, root.as_deref()).display());
+        for path in &selection.targets {
+            println!("{}", display_path(path, scope.root.as_deref()).display());
         }
         return Ok(0);
     }
-    let mut project_paths = if invocation.isolated {
-        // Isolated means no project tables at all. The target is still read
-        // and formatted, but its declarations remain local to the formatter,
-        // exactly as they are for stdin.
-        Vec::new()
-    } else if let Some((_, stdin_path)) = project_scope.as_ref() {
-        context_tracked
-            .as_ref()
-            .expect("project-context requires tracked sources")
-            .iter()
-            .filter(|path| stdin_path.as_ref() != Some(*path))
-            .cloned()
-            .collect()
-    } else if let Some(context_tracked) = context_tracked.as_ref() {
-        if context_paths.is_empty() {
-            deduplicate(
-                context_tracked
-                    .iter()
-                    .cloned()
-                    .chain(target_paths.iter().cloned())
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            context_tracked.clone()
-        }
-    } else {
-        target_paths.clone()
-    };
-    let all_paths = deduplicate(
-        target_paths
-            .iter()
-            .cloned()
-            .chain(project_paths.iter().cloned())
-            .collect::<Vec<_>>(),
-    );
-    if profile {
-        eprintln!(
-            "forformat profile: discovery={:?} targets={} project={} loaded-set={}",
-            profile_start.elapsed(),
-            target_paths.len(),
-            project_paths.len(),
-            all_paths.len()
-        );
-    }
-    // Read each selected source once. The same in-memory bytes serve both the
-    // target formatter and the single project-analysis pass.
-    let explicit_targets: HashSet<&Path> = if all_selection || stdin_mode {
-        HashSet::new()
-    } else {
-        target_paths.iter().map(PathBuf::as_path).collect()
-    };
-    let mut loaded = Vec::with_capacity(all_paths.len());
-    let mut loaded_index = HashMap::with_capacity(all_paths.len());
-    for path in &all_paths {
-        match read_source(path, invocation.force_free_input)? {
-            Some(source) => {
-                loaded_index.insert(path.clone(), loaded.len());
-                loaded.push(source);
-            }
-            None if explicit_targets.contains(path.as_path()) => {
-                return Err(WorkflowError::Usage(format!(
-                    "Fortran source file does not exist: {}",
-                    path.display()
-                )));
-            }
-            None => {}
-        }
-    }
-    target_paths.retain(|path| loaded_index.contains_key(path));
-    project_paths.retain(|path| {
-        loaded_index.contains_key(path) && loaded[loaded_index[path]].form == SourceForm::Free
+    profile.report(|| {
+        format!(
+            "discovery={:?} targets={} project={} loaded-set={}",
+            profile.elapsed(),
+            selection.targets.len(),
+            selection.project.len(),
+            selection.all().len()
+        )
     });
-    if profile {
-        eprintln!(
-            "forformat profile: read={:?} sources={}",
-            profile_start.elapsed(),
-            loaded.len()
-        );
-    }
-    let target_indices: Vec<usize> = target_paths
-        .iter()
-        .filter_map(|path| {
-            let index = loaded_index[path];
-            (loaded[index].form == SourceForm::Free).then_some(index)
-        })
-        .collect();
-    let project_indices: Vec<usize> = project_paths
-        .iter()
-        .map(|path| loaded_index[path])
-        .collect();
 
-    let mut analysis_needed = vec![false; loaded.len()];
-    if invocation.config.mode.normalizes() {
-        for &index in target_indices.iter().chain(project_indices.iter()) {
-            analysis_needed[index] = true;
-        }
-    }
-    let analysis_indices = analysis_needed
-        .iter()
-        .enumerate()
-        .filter_map(|(index, needed)| (*needed).then_some(index))
-        .collect::<Vec<_>>();
-    let facts = analyze_sources(&loaded, &analysis_indices)?;
+    let loaded = Loaded::read(&selection, &invocation, all_selection || stdin_mode)?;
+    selection.retain_loaded(&loaded);
+    profile.report(|| {
+        format!(
+            "read={:?} sources={}",
+            profile.elapsed(),
+            loaded.sources.len()
+        )
+    });
+
+    let target_indices = selection.free_form_indices(&selection.targets, &loaded);
+    let project_indices = selection.free_form_indices(&selection.project, &loaded);
+    let analysis_indices = if invocation.config.mode.normalizes() {
+        deduplicate_indices(&target_indices, &project_indices)
+    } else {
+        Vec::new()
+    };
+    let facts = analyze_sources(&loaded.sources, &analysis_indices)?;
     let stdin_local = if stdin_mode && invocation.config.mode.normalizes() {
-        Some(analyze_file(
-            stdin_source
-                .as_deref()
-                .expect("stdin mode must have read stdin"),
-        )?)
+        Some(analyze_file(expect_stdin(stdin_source.as_deref()))?)
     } else {
         None
     };
-
-    let context = if invocation.isolated || !invocation.config.mode.normalizes() {
-        isolated_context(&invocation.config)
-    } else {
-        let stdin_project_source = project_scope
-            .as_ref()
-            .and_then(|(_, path)| path.as_deref())
-            .filter(|path| {
-                context_paths.is_empty()
-                    || context_paths
-                        .iter()
-                        .any(|context_path| path.starts_with(context_path))
-            })
-            .zip(stdin_local.as_ref());
-        project_context(
-            &loaded,
-            &project_indices,
-            &facts,
-            stdin_project_source,
-            &invocation.config,
-        )
-    };
-    if profile {
-        eprintln!("forformat profile: analysis={:?}", profile_start.elapsed(),);
-    }
+    let context = build_context(
+        &invocation,
+        &scope,
+        &loaded,
+        &project_indices,
+        &facts,
+        stdin_local.as_ref(),
+    );
+    profile.report(|| format!("analysis={:?}", profile.elapsed()));
 
     if stdin_mode {
-        let source = stdin_source
-            .as_deref()
-            .expect("stdin mode must have read stdin");
-        let formatted = if !invocation.config.mode.normalizes() {
-            format_source(source, &invocation.config)?
-        } else {
-            crate::format::full::format_with_context_and_local(
-                source,
-                &context,
-                stdin_local
-                    .as_ref()
-                    .expect("full-mode stdin must have precomputed facts"),
-                &invocation.config,
-            )?
-        };
-        let mut declines = DeclineReporter::default();
-        declines.report(&formatted.meta, None, root.as_deref());
-        declines.finish();
-        write_all_stdout(&formatted.bytes)?;
-        return Ok(0);
+        return format_project_stdin(
+            &invocation,
+            &scope,
+            expect_stdin(stdin_source.as_deref()),
+            &context,
+            stdin_local.as_ref(),
+        );
     }
-
     if invocation.stdout {
-        let mut declines = DeclineReporter::default();
-        let source_index = loaded_index[&target_paths[0]];
-        if loaded[source_index].form == SourceForm::Fixed {
-            declines.report_fixed(&target_paths[0], root.as_deref());
-            write_all_stdout(&loaded[source_index].bytes)?;
-        } else {
-            let formatted = format_one(
-                &loaded[source_index],
-                facts[source_index].as_ref(),
-                &context,
-                &invocation.config,
-            )?;
-            declines.report(&formatted.meta, Some(&target_paths[0]), root.as_deref());
-            write_all_stdout(&formatted.bytes)?;
-        }
-        declines.finish();
-        return Ok(0);
+        return format_to_stdout(&invocation, &scope, &selection, &loaded, &facts, &context);
     }
-
-    let formatting_start = Instant::now();
-    let formatted = format_targets(
+    format_files(
+        &invocation,
+        &scope,
+        &selection,
         &loaded,
         &target_indices,
         &facts,
         &context,
+        &profile,
+    )
+}
+
+fn expect_stdin(source: Option<&[u8]>) -> &[u8] {
+    source.expect("stdin mode must have read stdin")
+}
+
+/// `FORFORMAT_PROFILE_IO` timing, inert unless the variable is set.
+struct Profile {
+    enabled: bool,
+    start: Instant,
+}
+
+impl Profile {
+    fn new() -> Self {
+        Self {
+            enabled: env::var_os("FORFORMAT_PROFILE_IO").is_some(),
+            start: Instant::now(),
+        }
+    }
+
+    fn elapsed(&self) -> std::time::Duration {
+        self.start.elapsed()
+    }
+
+    /// The message is built only when profiling is on, so an ordinary run
+    /// pays nothing for the counts a profile line reports.
+    fn report(&self, fields: impl FnOnce() -> String) {
+        if self.enabled {
+            eprintln!("forformat profile: {}", fields());
+        }
+    }
+}
+
+/// stdin with nothing else to read: format the buffer and write it out.
+fn format_bare_stdin(invocation: &Invocation) -> Result<i32, WorkflowError> {
+    let mut source = Vec::new();
+    io::stdin().read_to_end(&mut source)?;
+    // stdin is the primary documented route, so it needs the same guard the
+    // file routes get: free-form normalization of a fixed-form source
+    // rewrites column-1 `*`/`C` comment markers as operators and destroys
+    // the file.  There is no path to name in the diagnostic here.
+    if skips_fixed_form(invocation, None, &source) {
+        eprintln!("{}", fixed_message("<stdin>"));
+        write_all_stdout(&source)?;
+        return Ok(0);
+    }
+    let result = format_source(&source, &invocation.config)?;
+    let mut declines = DeclineReporter::default();
+    declines.report(&result.meta, None, None);
+    declines.finish();
+    write_all_stdout(&result.bytes)?;
+    Ok(0)
+}
+
+/// The two stdin routes that answer before any project source is read: a
+/// fixed-form buffer, which is passed through untouched, and a mode that does
+/// not consult the project at all.
+fn stdin_shortcut(
+    invocation: &Invocation,
+    scope: &Scope,
+    stdin_source: Option<&[u8]>,
+) -> Result<Option<i32>, WorkflowError> {
+    let Some(source) = stdin_source else {
+        return Ok(None);
+    };
+    let input_path = scope.stdin_path();
+    if skips_fixed_form(invocation, input_path, source) {
+        let input = input_path
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<stdin>".to_string());
+        eprintln!("{}", fixed_message(&input));
+        write_all_stdout(source)?;
+        return Ok(Some(0));
+    }
+    if !invocation.config.mode.normalizes() {
+        let formatted = format_source(source, &invocation.config)?;
+        let mut declines = DeclineReporter::default();
+        declines.report(&formatted.meta, None, scope.root.as_deref());
+        declines.finish();
+        write_all_stdout(&formatted.bytes)?;
+        return Ok(Some(0));
+    }
+    Ok(None)
+}
+
+fn build_context(
+    invocation: &Invocation,
+    scope: &Scope,
+    loaded: &Loaded,
+    project_indices: &[usize],
+    facts: &[Option<crate::analysis::FileFacts>],
+    stdin_local: Option<&crate::analysis::FileFacts>,
+) -> crate::analysis::ProjectContext {
+    if invocation.isolated || !invocation.config.mode.normalizes() {
+        return isolated_context(&invocation.config);
+    }
+    let stdin_project_source = scope
+        .stdin_path()
+        .filter(|path| {
+            scope.context_paths.is_empty()
+                || scope
+                    .context_paths
+                    .iter()
+                    .any(|context_path| path.starts_with(context_path))
+        })
+        .zip(stdin_local);
+    project_context(
+        &loaded.sources,
+        project_indices,
+        facts,
+        stdin_project_source,
+        &invocation.config,
+    )
+}
+
+fn format_project_stdin(
+    invocation: &Invocation,
+    scope: &Scope,
+    source: &[u8],
+    context: &crate::analysis::ProjectContext,
+    stdin_local: Option<&crate::analysis::FileFacts>,
+) -> Result<i32, WorkflowError> {
+    let formatted = if !invocation.config.mode.normalizes() {
+        format_source(source, &invocation.config)?
+    } else {
+        crate::format::full::format_with_context_and_local(
+            source,
+            context,
+            stdin_local.expect("full-mode stdin must have precomputed facts"),
+            &invocation.config,
+        )?
+    };
+    let mut declines = DeclineReporter::default();
+    declines.report(&formatted.meta, None, scope.root.as_deref());
+    declines.finish();
+    write_all_stdout(&formatted.bytes)?;
+    Ok(0)
+}
+
+fn format_to_stdout(
+    invocation: &Invocation,
+    scope: &Scope,
+    selection: &Selection,
+    loaded: &Loaded,
+    facts: &[Option<crate::analysis::FileFacts>],
+    context: &crate::analysis::ProjectContext,
+) -> Result<i32, WorkflowError> {
+    let path = &selection.targets[0];
+    let source_index = loaded.index[path];
+    let mut declines = DeclineReporter::default();
+    if loaded.sources[source_index].form == SourceForm::Fixed {
+        declines.report_fixed(path, scope.root.as_deref());
+        write_all_stdout(&loaded.sources[source_index].bytes)?;
+    } else {
+        let formatted = format_one(
+            &loaded.sources[source_index],
+            facts[source_index].as_ref(),
+            context,
+            &invocation.config,
+        )?;
+        declines.report(&formatted.meta, Some(path), scope.root.as_deref());
+        write_all_stdout(&formatted.bytes)?;
+    }
+    declines.finish();
+    Ok(0)
+}
+
+/// Format every target, then deliver the results: a diff, an in-place
+/// replacement, or nothing at all under `--check`.
+///
+/// Every target is formatted before anything is written, so a failure part-way
+/// through cannot leave a half-rewritten tree.
+#[allow(clippy::too_many_arguments)]
+fn format_files(
+    invocation: &Invocation,
+    scope: &Scope,
+    selection: &Selection,
+    loaded: &Loaded,
+    target_indices: &[usize],
+    facts: &[Option<crate::analysis::FileFacts>],
+    context: &crate::analysis::ProjectContext,
+    profile: &Profile,
+) -> Result<i32, WorkflowError> {
+    let formatting_start = Instant::now();
+    let formatted = format_targets(
+        &loaded.sources,
+        target_indices,
+        facts,
+        context,
         &invocation.config,
     )?;
     let mut changed = Vec::new();
     let mut declines = DeclineReporter::default();
     let mut formatted = formatted.into_iter();
-    for path in &target_paths {
-        let source_index = loaded_index[path];
-        let target = &loaded[source_index];
+    for path in &selection.targets {
+        let target = &loaded.sources[loaded.index[path]];
         if target.form == SourceForm::Fixed {
-            declines.report_fixed(path, root.as_deref());
+            declines.report_fixed(path, scope.root.as_deref());
             continue;
         }
         let (meta, output) = formatted
             .next()
             .expect("one formatting result per free-form target");
-        declines.report(&meta, Some(path), root.as_deref());
+        declines.report(&meta, Some(path), scope.root.as_deref());
         let Some(formatted) = output else {
             continue;
         };
@@ -1500,7 +512,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
                 path,
                 &target.bytes,
                 &formatted,
-                root.as_deref(),
+                scope.root.as_deref(),
             ))?;
         } else if !invocation.check {
             atomic_replace(path, &formatted)?;
@@ -1509,167 +521,18 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     declines.finish();
     if !invocation.diff {
         for path in &changed {
-            println!("{}", display_path(path, root.as_deref()).display());
+            println!("{}", display_path(path, scope.root.as_deref()).display());
         }
     }
-    if profile {
-        eprintln!(
-            "forformat profile: formatting={:?} total={:?} changed={}",
+    profile.report(|| {
+        format!(
+            "formatting={:?} total={:?} changed={}",
             formatting_start.elapsed(),
-            profile_start.elapsed(),
+            profile.elapsed(),
             changed.len()
-        );
-    }
+        )
+    });
     Ok(i32::from(
         (invocation.check || invocation.diff) && !changed.is_empty(),
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    #[cfg(unix)]
-    use super::atomic_replace;
-    use super::{
-        decline_message, project_context, unified_diff, validate_extension, DeclineReporter,
-    };
-    use crate::{analysis::names::NameSpace, config::FormatConfig, format::wrapping::Decline};
-    #[cfg(unix)]
-    use std::fs;
-    use std::path::Path;
-
-    #[test]
-    fn section_9_1_valid_extension_is_pure_and_accepts_missing_path() {
-        assert!(validate_extension(Path::new("does-not-exist.F90")).is_ok());
-        assert!(validate_extension(Path::new("does-not-exist.txt")).is_err());
-    }
-
-    #[test]
-    fn unified_diff_marks_missing_final_newlines() {
-        let diff = unified_diff(Path::new("source.f90"), b"a\nold", b"a\nnew", None);
-        assert_eq!(
-            diff,
-            b"--- a/source.f90\n+++ b/source.f90\n@@ -1,2 +1,2 @@\n a\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file\n"
-        );
-    }
-
-    #[test]
-    fn unified_diff_reports_a_newline_only_change() {
-        let diff = unified_diff(Path::new("source.f90"), b"same", b"same\n", None);
-        assert_eq!(
-            diff,
-            b"--- a/source.f90\n+++ b/source.f90\n@@ -1,1 +1,1 @@\n-same\n\\ No newline at end of file\n+same\n"
-        );
-    }
-
-    #[test]
-    fn unified_diff_trims_unchanged_file_ends() {
-        let old = b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n";
-        let new = b"1\n2\n3\n4\n5\n6\n7\nchanged\n9\n10\n11\n12\n13\n14\n15\n";
-        let diff = unified_diff(Path::new("source.f90"), old, new, None);
-        assert_eq!(
-            diff,
-            b"--- a/source.f90\n+++ b/source.f90\n@@ -5,7 +5,7 @@\n 5\n 6\n 7\n-8\n+changed\n 9\n 10\n 11\n"
-        );
-    }
-
-    #[test]
-    fn unified_diff_splits_distant_changes_into_hunks() {
-        let old = b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n";
-        let new = b"1\nTWO\n3\n4\n5\n6\n7\n8\n9\n10\n11\nTWELVE\n13\n14\n15\n";
-        let diff = unified_diff(Path::new("source.f90"), old, new, None);
-        assert_eq!(
-            diff,
-            b"--- a/source.f90\n+++ b/source.f90\n@@ -1,5 +1,5 @@\n 1\n-2\n+TWO\n 3\n 4\n 5\n@@ -9,7 +9,7 @@\n 9\n 10\n 11\n-12\n+TWELVE\n 13\n 14\n 15\n"
-        );
-    }
-
-    #[test]
-    fn unified_diff_tracks_later_hunk_lines_after_an_insertion() {
-        let old = b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\n14\n15\n";
-        let new = b"1\n2\ninserted\n3\n4\n5\n6\n7\n8\n9\n10\n11\n12\n13\nFOURTEEN\n15\n";
-        let diff = unified_diff(Path::new("source.f90"), old, new, None);
-        assert_eq!(
-            diff,
-            b"--- a/source.f90\n+++ b/source.f90\n@@ -1,5 +1,6 @@\n 1\n 2\n+inserted\n 3\n 4\n 5\n@@ -11,5 +12,5 @@\n 11\n 12\n 13\n-14\n+FOURTEEN\n 15\n"
-        );
-    }
-
-    #[test]
-    fn declined_wrap_diagnostics_include_the_input_and_bound_the_summary() {
-        assert_eq!(
-            decline_message("src/example.f90", 41, Decline::NoSafeBreak),
-            "forformat: src/example.f90:42: declined wrap: NoSafeBreak"
-        );
-
-        let mut reporter = DeclineReporter {
-            suppressed: 7,
-            ..Default::default()
-        };
-        reporter
-            .suppressed_inputs
-            .insert("src/example.f90".to_owned());
-        reporter
-            .suppressed_inputs
-            .insert("src/another.f90".to_owned());
-        assert_eq!(
-            reporter.summary().as_deref(),
-            Some("forformat: + 7 additional declined-wrap diagnostics in 2 files")
-        );
-
-        let mut stdin_reporter = DeclineReporter {
-            suppressed: 1,
-            suppressed_stdin: true,
-            ..Default::default()
-        };
-        stdin_reporter
-            .suppressed_inputs
-            .insert("<stdin>".to_owned());
-        assert_eq!(
-            stdin_reporter.summary().as_deref(),
-            Some("forformat: + 1 additional declined-wrap diagnostics in 1 input")
-        );
-    }
-
-    #[test]
-    fn stdin_replacement_is_present_in_the_project_tables() {
-        let replacement = b"module CurrentName\nend module CurrentName\n";
-        let replacement_facts = crate::analysis::analyze_file(replacement).unwrap();
-        let context = project_context(
-            &[],
-            &[],
-            &[],
-            Some((Path::new("target.f90"), &replacement_facts)),
-            &FormatConfig::default(),
-        );
-        let local = crate::analysis::analyze_file(b"program p\nend program p\n").unwrap();
-        assert_eq!(
-            context
-                .resolver(&local)
-                .spelling(NameSpace::Module, b"currentname"),
-            Some(b"CurrentName".as_slice())
-        );
-        assert_eq!(context.sources, vec![Path::new("target.f90")]);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn atomic_replace_preserves_mode_and_cleans_failed_temporary_write() {
-        use std::os::unix::fs::PermissionsExt;
-        let directory = std::env::temp_dir().join(format!("forformat-io-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&directory);
-        fs::create_dir(&directory).unwrap();
-        let path = directory.join("source.f90");
-        fs::write(&path, b"old\n").unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
-        atomic_replace(&path, b"new\n").unwrap();
-        assert_eq!(
-            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o640
-        );
-        assert_eq!(fs::read(&path).unwrap(), b"new\n");
-        let failure = atomic_replace(&directory, b"nope\n");
-        assert!(failure.is_err());
-        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
-        let _ = fs::remove_dir_all(directory);
-    }
 }

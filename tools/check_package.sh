@@ -15,6 +15,7 @@ archive="$package_dir/$crate.crate"
 test -f "$archive"
 package_root="$package_dir/$crate"
 test -f "$package_root/Cargo.toml"
+package_target_dir="$package_root/target"
 first_hash=$(sha256sum "$archive" | awk '{print $1}')
 
 cargo package --locked --allow-dirty >/dev/null
@@ -25,11 +26,15 @@ test "$first_hash" = "$second_hash"
 # Cargo's package verification compiles the unpacked crate. Run its complete
 # test/bench target set too, so the archive—not only the workspace—must remain
 # self-contained and executable.
-cargo test --manifest-path "$package_root/Cargo.toml" --locked --all-targets >/dev/null
+# Keep this verification build inside the unpacked crate. The workspace's
+# CARGO_TARGET_DIR may contain a different binary from the outer checkout.
+cargo test --target-dir "$package_target_dir" \
+    --manifest-path "$package_root/Cargo.toml" --locked --all-targets >/dev/null
 echo "package check: unpacked crate tests passed"
 
-cargo build --manifest-path "$package_root/Cargo.toml" --locked --release >/dev/null
-./tools/check_cli_contract.sh "$package_root/target/release/forformat"
+cargo build --target-dir "$package_target_dir" \
+    --manifest-path "$package_root/Cargo.toml" --locked --release >/dev/null
+./tools/check_cli_contract.sh "$package_target_dir/release/forformat"
 echo "package check: unpacked release binary passed the CLI contract"
 
 listing=$(tar -tzf "$archive")

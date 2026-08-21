@@ -5,6 +5,7 @@
 set -eu
 
 cd "$(dirname "$0")/.."
+target_dir=${CARGO_TARGET_DIR:-target}
 
 echo "== cargo fmt --check =="
 cargo fmt --check
@@ -16,12 +17,12 @@ echo "== cargo test --locked --all-targets =="
 cargo test --locked --all-targets
 
 echo "== check_fixture_syntax.sh =="
-./tools/check_fixture_syntax.sh target/debug/forformat
+./tools/check_fixture_syntax.sh "$target_dir/debug/forformat"
 
 echo "== check_fuzz_regression.sh =="
 ./tools/check_fuzz_regression.sh
 
 echo "== check_cli_contract.sh =="
-./tools/check_cli_contract.sh target/debug/forformat
+./tools/check_cli_contract.sh "$target_dir/debug/forformat"
 
 echo "All CI checks passed."

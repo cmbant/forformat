@@ -5,6 +5,9 @@
     "context": ".."
   },
   "remoteUser": "vscode",
+  "containerEnv": {
+    "CARGO_TARGET_DIR": "/tmp/forformat-target"
+  },
   "features": {
     "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
   },

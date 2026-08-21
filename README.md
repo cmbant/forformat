@@ -38,7 +38,7 @@ To build from source, install Rust 1.85 or newer:
 
 ```sh
 cargo build --locked --release
-./target/release/forformat --version
+"${CARGO_TARGET_DIR:-target}/release/forformat" --version
 ```
 
 ## Quick start
