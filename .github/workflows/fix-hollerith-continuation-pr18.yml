@@ -1,0 +1,427 @@
+name: Fix Hollerith continuation handling in PR18
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'fix/conditional-continuation-state'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: fix/conditional-continuation-state
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.85.0
+          components: rustfmt,clippy
+      - name: Centralize lexer-aware continuation detection
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              assert count == 1, f"{label}: expected 1 match, found {count}"
+              return text.replace(old, new, 1)
+
+          # regions.rs: make the protected-region scanner own the semantic
+          # question of whether the final significant ampersand is a real
+          # continuation marker.
+          path = Path('src/source/regions.rs')
+          text = path.read_text()
+          old = '''#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+          pub struct LexState {
+              /// The active character-literal delimiter, or 0 outside a literal.
+              quote: u8,
+              /// Hollerith payload bytes still owed from a previous line.
+              hollerith: usize,
+          }
+          '''
+          new = old + '''
+          #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+          pub(crate) struct LineScan {
+              pub comment_start: Option<usize>,
+              pub continued: bool,
+          }
+          '''
+          text = replace_once(text, old, new, 'LineScan insertion')
+
+          old = '''    /// Walk `s`, reporting a contiguous partition of it into regions.
+              ///
+              /// Offsets are relative to `s`.  The regions are emitted in order, are
+              /// non-empty, and together cover exactly `0..s.len()`, so a transform can
+              /// rebuild the input by concatenating them.
+              pub fn scan<F: FnMut(Region)>(&mut self, s: &[u8], mut push: F) {
+          '''
+          new = '''    /// Scan one Fortran line body and classify how it ends.
+              ///
+              /// A trailing `&` is a continuation marker only when that byte belongs to
+              /// ordinary code, or when it is the final byte of a still-open character
+              /// literal. An ampersand consumed by a Hollerith payload is data, not a
+              /// continuation marker. The caller decides whether non-continuation state
+              /// should be reset or whether this physical line is stepped over.
+              pub(crate) fn scan_line<F: FnMut(Region)>(&mut self, s: &[u8], mut push: F) -> LineScan {
+                  let mut comment_start = None;
+                  let mut trailing = None;
+                  self.scan(s, |region| {
+                      let range = region.range.clone();
+                      let kind = region.kind;
+                      if kind == RegionKind::Comment {
+                          if comment_start.is_none() {
+                              comment_start = Some(range.start);
+                          }
+                      } else if let Some(relative) = s[range.clone()]
+                          .iter()
+                          .rposition(|byte| !byte.is_ascii_whitespace())
+                      {
+                          trailing = Some((range.start + relative, kind));
+                      }
+                      push(region);
+                  });
+                  let continued = trailing.is_some_and(|(index, kind)| {
+                      s[index] == b'&'
+                          && (kind == RegionKind::Code
+                              || (kind == RegionKind::StringLiteral && self.in_literal()))
+                  });
+                  LineScan {
+                      comment_start,
+                      continued,
+                  }
+              }
+
+              /// Walk `s`, reporting a contiguous partition of it into regions.
+              ///
+              /// Offsets are relative to `s`.  The regions are emitted in order, are
+              /// non-empty, and together cover exactly `0..s.len()`, so a transform can
+              /// rebuild the input by concatenating them.
+              pub fn scan<F: FnMut(Region)>(&mut self, s: &[u8], mut push: F) {
+          '''
+          text = replace_once(text, old, new, 'scan_line method')
+
+          old = '''pub fn line_comment_start(state: &mut LexState, line: &[u8]) -> Option<usize> {
+              let mut found = None;
+              line_scan(state, line, |region| {
+                  if found.is_none() && region.kind == RegionKind::Comment {
+                      found = Some(region.range.start);
+                  }
+              });
+              found
+          }
+
+          /// [`line_comment_start`]'s sibling for a pass that needs the code bytes rather
+          /// than the comment offset: the code spans of one physical line of a
+          /// continuation group, with `state` carried on to the next line.
+          pub fn line_code_spans<F: FnMut(usize, &[u8])>(state: &mut LexState, line: &[u8], mut f: F) {
+              line_scan(state, line, |region| {
+                  if region.kind == RegionKind::Code {
+                      f(region.range.start, &line[region.range]);
+                  }
+              });
+          }
+
+          /// Scan one line of a group, then decide whether the state survives it.
+          fn line_scan<F: FnMut(Region)>(state: &mut LexState, line: &[u8], push: F) {
+              if *state != LexState::default() && stepped_over_by_continuation(line) {
+                  return;
+              }
+              state.scan(line, push);
+              if line.trim_ascii_end().last() != Some(&b'&') {
+                  *state = LexState::default();
+              }
+          }
+          '''
+          new = '''pub fn line_comment_start(state: &mut LexState, line: &[u8]) -> Option<usize> {
+              scan_group_line(state, line, |_| {}).comment_start
+          }
+
+          /// [`line_comment_start`]'s sibling for a pass that needs the code bytes rather
+          /// than the comment offset: the code spans of one physical line of a
+          /// continuation group, with `state` carried on to the next line.
+          pub fn line_code_spans<F: FnMut(usize, &[u8])>(state: &mut LexState, line: &[u8], mut f: F) {
+              scan_group_line(state, line, |region| {
+                  if region.kind == RegionKind::Code {
+                      f(region.range.start, &line[region.range]);
+                  }
+              });
+          }
+
+          /// Scan one line of a continuation group, then decide whether lexical state
+          /// survives it. Protected bytes that merely happen to be `&` never license a
+          /// carry into the next physical line.
+          fn scan_group_line<F: FnMut(Region)>(state: &mut LexState, line: &[u8], push: F) -> LineScan {
+              if *state != LexState::default() && stepped_over_by_continuation(line) {
+                  return LineScan::default();
+              }
+              let scan = state.scan_line(line, push);
+              if !scan.continued {
+                  *state = LexState::default();
+              }
+              scan
+          }
+          '''
+          text = replace_once(text, old, new, 'group line scanner')
+
+          anchor = '''    #[test]
+              fn regions_partition_the_input_exactly() {
+          '''
+          test = '''    #[test]
+              fn trailing_continuation_respects_region_ownership() {
+                  let scan = |line: &[u8]| {
+                      let mut state = LexState::default();
+                      state.scan_line(line, |_| {}).continued
+                  };
+
+                  assert!(scan(b"x = a &"));
+                  assert!(scan(b"x = 'abc &"));
+                  assert!(!scan(b"x = 1H&"));
+                  assert!(!scan(b"x = 2H&&"));
+                  assert!(scan(b"x = 1H&&"));
+                  assert!(!scan(b"x = 1 ! comment &"));
+              }
+
+          ''' + anchor
+          text = replace_once(text, anchor, test, 'regions regression test')
+          path.write_text(text)
+
+          # buffer.rs: consume the shared line scan result for comment and
+          # continuation state; add the exact contextual-classification regression.
+          path = Path('src/source/buffer.rs')
+          text = path.read_text()
+          text = replace_once(
+              text,
+              '    regions::{LexState, RegionKind},\n',
+              '    regions::LexState,\n',
+              'buffer import',
+          )
+          old = '''                    if can_scan {
+                          let mut comment_start = None;
+                          stream.lex.scan(code, |region| {
+                              if comment_start.is_none() && region.kind == RegionKind::Comment {
+                                  comment_start = Some(region.range.start);
+                              }
+                          });
+                          if let Some(i) = comment_start {
+                              comment = Some((span.start + code_offset + i) as u32..span.end as u32);
+                          }
+                          stream.continued = ends_with_continuation_before(code, comment_start);
+                          if !stream.continued {
+                              stream.lex = LexState::default();
+                          }
+                      }
+          '''
+          new = '''                    if can_scan {
+                          let scan = stream.lex.scan_line(code, |_| {});
+                          if let Some(i) = scan.comment_start {
+                              comment = Some((span.start + code_offset + i) as u32..span.end as u32);
+                          }
+                          stream.continued = scan.continued;
+                          if !stream.continued {
+                              stream.lex = LexState::default();
+                          }
+                      }
+          '''
+          text = replace_once(text, old, new, 'buffer scan')
+          old = '''
+          fn ends_with_continuation_before(line: &[u8], comment: Option<usize>) -> bool {
+              let mut end = comment.unwrap_or(line.len());
+              while end > 0 && line[end - 1].is_ascii_whitespace() {
+                  end -= 1;
+              }
+              end > 0 && line[end - 1] == b'&'
+          }
+          '''
+          text = replace_once(text, old, '\n', 'remove buffer byte-tail predicate')
+          anchor = '''    #[test]
+              fn lexical_state_is_independent_between_sentinel_streams() {
+          '''
+          test = '''    #[test]
+              fn hollerith_payload_ampersand_does_not_open_conditional_stream() {
+                  let buffer = SourceBuffer::new(b"!$ x = 1H&\n!$& standalone\n").unwrap();
+                  assert!(buffer.lines[0].is_conditional_compilation());
+                  assert_eq!(buffer.code_bytes(&buffer.lines[0]), b"x = 1H&");
+                  assert_eq!(buffer.lines[1].kind, PhysicalLineKind::Comment);
+                  assert!(!buffer.lines[1].is_conditional_compilation());
+                  assert_eq!(buffer.line_bytes(&buffer.lines[1]), b"!$& standalone");
+              }
+
+          ''' + anchor
+          text = replace_once(text, anchor, test, 'buffer Hollerith regression')
+          path.write_text(text)
+
+          # continuations.rs: use the same lexer-owned answer for outgoing
+          # continuation state and only normalize a marker when that answer is true.
+          path = Path('src/transform/passes/continuations.rs')
+          text = path.read_text()
+          old = '''        let mut comment = None;
+                  if !passed_over {
+                      state.scan(code, |region| {
+                          if comment.is_none() && region.kind == RegionKind::Comment {
+                              comment = Some(region.range.start);
+                          }
+                      });
+                  }
+          '''
+          new = '''        let mut line_continued = false;
+                  if !passed_over {
+                      line_continued = state.scan_line(code, |_| {}).continued;
+                  }
+          '''
+          text = replace_once(text, old, new, 'continuation scan')
+          old = '''            if !protected && !lexical_suffix {
+                          line = normalize_continuation_marker(&line);
+                      }
+          '''
+          new = '''            if line_continued && !protected && !lexical_suffix {
+                          line = normalize_continuation_marker(&line);
+                      }
+          '''
+          text = replace_once(text, old, new, 'marker normalization guard')
+          old = '''        if !passed_over {
+                      continuation = ends_with_continuation_before(code, comment);
+                      if code.trim_ascii_end().last() != Some(&b'&') {
+                          state = LexState::default();
+                      }
+                      let still_open = continuation || state.in_literal() || state.in_hollerith();
+          '''
+          new = '''        if !passed_over {
+                      continuation = line_continued;
+                      if !continuation {
+                          state = LexState::default();
+                      }
+                      let still_open = continuation || state.in_literal() || state.in_hollerith();
+          '''
+          text = replace_once(text, old, new, 'outgoing continuation state')
+          old = '''fn ends_with_continuation(line: &[u8]) -> bool {
+              let line = fortran_code(line);
+              ends_with_continuation_before(line, crate::source::regions::comment_start(line))
+          }
+
+          fn ends_with_continuation_before(line: &[u8], comment: Option<usize>) -> bool {
+              let mut end = comment.unwrap_or(line.len());
+              while end > 0 && line[end - 1].is_ascii_whitespace() {
+                  end -= 1;
+              }
+              end > 0 && line.get(end - 1) == Some(&b'&')
+          }
+          '''
+          new = '''fn ends_with_continuation(line: &[u8]) -> bool {
+              let line = fortran_code(line);
+              let mut state = LexState::default();
+              state.scan_line(line, |_| {}).continued
+          }
+          '''
+          text = replace_once(text, old, new, 'shared OpenMP continuation detection')
+          text = text.replace('`join_openmp_directive`, `wrap_openmp_directive`.', '`prepare_sentinel_reflow`, `wrap_sentinel_line`.')
+          path.write_text(text)
+
+          # Alignment also inferred continuation state from a protected trailing
+          # ampersand; use the same incoming LexState with the shared scanner.
+          path = Path('src/transform/passes/layout_post/alignment.rs')
+          text = path.read_text()
+          old = '''    let tokens = tokenize(line, lex);
+              let scan = scan_multiple_subscripts(
+          '''
+          new = '''    let mut continuation_lex = *lex;
+              let line_scan = continuation_lex.scan_line(line, |_| {});
+              let tokens = tokenize(line, lex);
+              let scan = scan_multiple_subscripts(
+          '''
+          text = replace_once(text, old, new, 'alignment line scan')
+          old = '''    let has_code = tokens.iter().any(|token| token.kind != TokenKind::Comment);
+              let trailing_token_marker = tokens
+                  .iter()
+                  .rev()
+                  .find(|token| token.kind != TokenKind::Comment)
+                  .is_some_and(|token| token.kind == TokenKind::Ampersand);
+              let protected_trailing_marker =
+                  (lex.in_literal() || lex.in_hollerith()) && line.trim_ascii_end().last() == Some(&b'&');
+              let continued = has_code && (trailing_token_marker || protected_trailing_marker);
+          '''
+          new = '''    let has_code = tokens.iter().any(|token| token.kind != TokenKind::Comment);
+              let continued = has_code && line_scan.continued;
+          '''
+          text = replace_once(text, old, new, 'alignment continuation state')
+          path.write_text(text)
+
+          # Early canonicalization gets a focused unit regression too.
+          path = Path('src/transform/passes/conditional_continuations.rs')
+          text = path.read_text()
+          anchor = '''    #[test]
+              fn malformed_literal_continuation_does_not_consume_protected_state() {
+          '''
+          test = '''    #[test]
+              fn hollerith_payload_ampersand_does_not_open_compact_continuation() {
+                  let mut document = Document::from_bytes(b"!$ x = 1H&\n!$& standalone\n");
+                  let original = document.lines.clone();
+                  assert_eq!(run(&mut document).unwrap(), Changed::No);
+                  assert_eq!(document.lines, original);
+              }
+
+          ''' + anchor
+          text = replace_once(text, anchor, test, 'canonicalization Hollerith regression')
+          path.write_text(text)
+
+          # Full-mode integration: the compact line remains byte-preserved and
+          # the Hollerith payload's ampersand is not normalized into syntax.
+          path = Path('tests/conditional_compilation.rs')
+          text = path.read_text()
+          anchor = '''#[test]
+          fn compact_conditional_literal_continuation_keeps_the_required_ampersand() {
+          '''
+          test = '''#[test]
+          fn hollerith_payload_ampersand_does_not_promote_following_compact_prefix() {
+              let source = b"program p\n!$ x = 1H&\n!$& standalone\nend program p\n";
+              let config = full();
+              let output = format_source(source, &config).unwrap().bytes;
+              let text = String::from_utf8(output.clone()).unwrap();
+
+              assert!(text.lines().any(|line| line == "!$& standalone"), "{text}");
+              assert!(text.lines().any(|line| line.contains("1H&")), "{text}");
+              assert!(!text.lines().any(|line| line.contains("1H &")), "{text}");
+              assert_eq!(format_source(&output, &config).unwrap().bytes, output);
+          }
+
+          ''' + anchor
+          text = replace_once(text, anchor, test, 'full-mode Hollerith regression')
+          path.write_text(text)
+
+          # Mechanical naming cleanup: these helpers now handle both conditional
+          # compilation and OpenMP sentinel lines.
+          path = Path('src/format/full.rs')
+          text = path.read_text()
+          assert text.count('join_openmp_directive') >= 3
+          assert text.count('wrap_openmp_directive') >= 2
+          text = text.replace('join_openmp_directive', 'prepare_sentinel_reflow')
+          text = text.replace('wrap_openmp_directive', 'wrap_sentinel_line')
+          text = text.replace(
+              'The authored document laid out, kept for the OpenMP directive path, which',
+              'The authored document laid out, kept for the sentinel reflow path, which',
+          )
+          path.write_text(text)
+      - name: Validate focused and full tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          git diff --check
+          cargo test --locked source::regions::tests::trailing_continuation_respects_region_ownership --lib
+          cargo test --locked source::buffer::tests::hollerith_payload_ampersand_does_not_open_conditional_stream --lib
+          cargo test --locked transform::passes::conditional_continuations::tests::hollerith_payload_ampersand_does_not_open_compact_continuation --lib
+          cargo test --locked --test conditional_compilation hollerith_payload_ampersand_does_not_promote_following_compact_prefix
+          cargo test --locked --all-targets
+          cargo clippy --locked --all-targets -- -D warnings
+      - name: Commit clean fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/fix-hollerith-continuation-pr18.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/source/regions.rs src/source/buffer.rs src/transform/passes/continuations.rs src/transform/passes/layout_post/alignment.rs src/transform/passes/conditional_continuations.rs src/format/full.rs tests/conditional_compilation.rs
+          git commit -m 'Make continuation detection Hollerith-aware'
+          git push origin HEAD:fix/conditional-continuation-state
