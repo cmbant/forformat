@@ -374,12 +374,12 @@ where
 
 /// Parse the native reduction level while retaining findent's numeric levels.
 /// TOML booleans are serialized through the same option parser, so accepting
-/// boolean words here makes `reduce_whitespace = true/false` natural without
-/// losing `--reduce-whitespace=N` or the legacy `--ws_remred=N` spellings.
+/// `true` and `false` here makes `reduce_whitespace = true/false` natural
+/// without losing `--reduce-whitespace=N` or legacy numeric diagnostics.
 fn parse_whitespace_reduction(value: Option<&str>) -> Result<usize, FormatError> {
     match value {
-        None | Some("true") | Some("yes") => Ok(1),
-        Some("false") | Some("no") => Ok(0),
+        None | Some("true") => Ok(1),
+        Some("false") => Ok(0),
         Some(value) => parse_num(value),
     }
 }
