@@ -1,8 +1,10 @@
 //! Steps 17-20: passes that run after the layout engine has placed every line.
 //!
-//! Alignment owns the only post-layout width-changing rules and their strict
-//! no-padding contract. Program-unit separation, generic blank-line limiting,
-//! and final output cleanup are independent invariants and live separately.
+//! Alignment owns the post-layout rules that can widen code and their strict
+//! no-padding contract. Program-unit separation and generic blank-line limiting
+//! are independent invariants. Final output cleanup may shrink overlong visual
+//! separator comments to the wrap budget; because those lines are comments and
+//! the change is shrink-only, it cannot invalidate statement wrap decisions.
 
 mod alignment;
 mod blank_lines;
