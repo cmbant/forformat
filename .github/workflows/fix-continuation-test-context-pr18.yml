@@ -23,13 +23,12 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
+          import re
 
           path = Path('src/transform/passes/continuations.rs')
           text = path.read_text()
 
-          old = '''    let _ = cx;
-              let original = document.lines.clone();
-          '''
+          old = '    let _ = cx;\n    let original = document.lines.clone();\n'
           new = '''    let original = document.lines.clone();
               debug_assert_eq!(
                   original.len(),
@@ -40,18 +39,19 @@ jobs:
           assert text.count(old) == 1
           text = text.replace(old, new, 1)
 
-          old = '''    fn cx<'a>(local: &'a FileFacts, project: &'a ProjectContext) -> PassContext<'a> {
-              let analysis = Box::leak(Box::new(Document::from_bytes(b"").analyze().unwrap()));
-          '''
-          new = '''    fn cx<'a>(
+          pattern = re.compile(
+              r"    fn cx<'a>\(local: &'a FileFacts, project: &'a ProjectContext\) -> PassContext<'a> \{\n"
+              r"\s*let analysis = Box::leak\(Box::new\(Document::from_bytes\(b\"\"\)\.analyze\(\)\.unwrap\(\)\)\);\n"
+          )
+          replacement = '''    fn cx<'a>(
               document: &Document,
               local: &'a FileFacts,
               project: &'a ProjectContext,
           ) -> PassContext<'a> {
               let analysis = Box::leak(Box::new(document.analyze().unwrap()));
           '''
-          assert text.count(old) == 1
-          text = text.replace(old, new, 1)
+          text, replaced = pattern.subn(replacement, text, count=1)
+          assert replaced == 1, replaced
 
           needle = 'cx(&local, &project)'
           count = text.count(needle)
