@@ -85,11 +85,12 @@ buffer is formatted. Pass a directory instead when the buffer has no correspondi
 
 ### Formatting modes
 
-`--full` is the default. The three modes are:
+`--full` is the default. The four modes are:
 
 - `--full` — normalization, wrapping, and findent-compatible layout.
 - `--indent-only` — findent-compatible indentation and trailing-whitespace handling only.
 - `--normalize-only` — normalization without structural layout or wrapping.
+- `--canonicalize-only` — canonical transformations without whitespace or layout normalization.
 
 For example:
 
