@@ -142,8 +142,7 @@ fn collect_evidence(source: &[u8]) -> FormEvidence {
 
         let free_comment = trim_left(line).first() == Some(&b'!');
         if !previous_free_continuation
-            && (fixed_comment_signature(line)
-                || fixed_continuation_signature(line, previous_code))
+            && (fixed_comment_signature(line) || fixed_continuation_signature(line, previous_code))
         {
             evidence.strong_fixed = true;
         }
@@ -210,7 +209,7 @@ fn update_cpp_activity(line: &[u8], stack: &mut Vec<CppFrame>) {
             }
         }
         b"endif" => {
-            stack.pop();
+            let _ = stack.pop();
         }
         _ => {}
     }
@@ -701,6 +700,9 @@ mod tests {
     #[test]
     fn every_printable_nonblank_nonzero_column_six_marker_is_detected_when_required() {
         for marker in 0x21u8..=0x7e {
+            if marker == b'0' {
+                continue;
+            }
             let mut source = b"      x = 1 +\n     ".to_vec();
             source.push(marker);
             source.extend_from_slice(b" y\n      end\n");
@@ -768,10 +770,12 @@ mod tests {
 
     #[test]
     fn cpp_literal_conditions_contribute_only_active_branch_evidence() {
-        let inactive = b"#if 0\nC legacy fixed-form text in disabled branch\n#endif\nmodule m\nend module m\n";
+        let inactive =
+            b"#if 0\nC legacy fixed-form text in disabled branch\n#endif\nmodule m\nend module m\n";
         assert_eq!(detect(inactive), SourceForm::Free);
 
-        let active = b"#if 1\nC legacy fixed-form text in active branch\n#endif\nmodule m\nend module m\n";
+        let active =
+            b"#if 1\nC legacy fixed-form text in active branch\n#endif\nmodule m\nend module m\n";
         assert_eq!(detect(active), SourceForm::Fixed);
 
         let active_else = b"#if 0\nC ignored\n#else\nmodule m\n#endif\n";
