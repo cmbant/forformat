@@ -31,10 +31,11 @@ jobs:
 
           emitter = Path('src/format/emitter.rs')
           text = emitter.read_text()
-          old = '''        let prefix = conditional_compilation_prefix(original)
-              .expect("conditional SourceBuffer line has a parsed sentinel prefix");
-          source = trim_start(&original[prefix.body_start..]);
-          '''
+          start_needle = '        let prefix = conditional_compilation_prefix(original)\n'
+          end_needle = '        source = trim_start(&original[prefix.body_start..]);\n'
+          start = text.index(start_needle)
+          end = text.index(end_needle, start) + len(end_needle)
+          old = text[start:end]
           new = '''        let prefix = conditional_compilation_prefix(original)
               .expect("conditional SourceBuffer line has a parsed sentinel prefix");
           // Indent-only is a spelling-preserving mode. A contextual compact
@@ -53,7 +54,7 @@ jobs:
           }
           source = trim_start(&original[prefix.body_start..]);
           '''
-          text = one(text, old, new, 'emitter compact indent-only guard')
+          text = text[:start] + new + text[end:]
           emitter.write_text(text)
 
           tests = Path('tests/conditional_compilation.rs')
