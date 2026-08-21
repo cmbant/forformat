@@ -22,8 +22,12 @@ The Rust release intentionally diverges from legacy findent in three ways:
 Input format detection follows findent's own `determine_fix_or_free` and is enabled by default, so
 `-iauto` and `--input-format=auto` are accepted as the default rather than rejected. A source the
 detector calls fixed-form is left byte-identical and reported on stderr; `-ifree` forces free-form
-handling, and `--query-format` reports the detector's verdict without formatting. The port is
-checked against `findent -q` over the whole corpus, currently 4,992 files with no disagreement.
+handling, and `--query-format` reports the detector's path-aware verdict without formatting. For
+modern free-form suffixes such as `.f90`, the path-aware detector deliberately gives the suffix a
+free-form prior: it may report `free` even when findent's content-only detector reports `fixed` for
+an otherwise ambiguous file. This prevents valid modern free-form sources from being skipped by
+automatic detection. Bare `.f`/`.F` files remain content-detected, with strong fixed-form evidence
+able to override a provisional free-form result.
 
 The accepted format is free-form only. The parser is deliberately a shallow structural classifier,
 not a full Fortran semantic parser. Unknown or incomplete statements are emitted conservatively.
