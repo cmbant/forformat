@@ -53,11 +53,73 @@ jobs:
           text, replaced = pattern.subn(replacement, text, count=1)
           assert replaced == 1, replaced
 
-          needle = 'cx(&local, &project)'
-          count = text.count(needle)
-          assert count >= 10, count
-          text = text.replace(needle, 'cx(&document, &local, &project)')
-          assert needle not in text
+          anchor = '''        PassContext {
+              config,
+              project,
+              local,
+              analysis,
+              scopes,
+          }
+          }
+
+          #[test]
+          '''
+          helpers = '''        PassContext {
+              config,
+              project,
+              local,
+              analysis,
+              scopes,
+          }
+          }
+
+          fn normalize(
+              document: &mut Document,
+              local: &FileFacts,
+              project: &ProjectContext,
+          ) -> Result<Changed, crate::error::FormatError> {
+              let context = cx(document, local, project);
+              normalize_continuations(document, &context)
+          }
+
+          fn run_pass(
+              document: &mut Document,
+              local: &FileFacts,
+              project: &ProjectContext,
+          ) -> Result<Changed, crate::error::FormatError> {
+              let context = cx(document, local, project);
+              run(document, &context)
+          }
+
+          fn normalize_openmp(
+              document: &mut Document,
+              local: &FileFacts,
+              project: &ProjectContext,
+          ) -> Result<Changed, crate::error::FormatError> {
+              let context = cx(document, local, project);
+              normalize_openmp_continuation_sentinels(document, &context)
+          }
+
+          #[test]
+          '''
+          assert text.count(anchor) == 1
+          text = text.replace(anchor, helpers, 1)
+
+          replacements = {
+              'normalize_continuations(&mut document, &cx(&local, &project))':
+                  'normalize(&mut document, &local, &project)',
+              'run(&mut document, &cx(&local, &project))':
+                  'run_pass(&mut document, &local, &project)',
+              'normalize_openmp_continuation_sentinels(&mut document, &cx(&local, &project))':
+                  'normalize_openmp(&mut document, &local, &project)',
+          }
+          total = 0
+          for old_call, new_call in replacements.items():
+              count = text.count(old_call)
+              total += count
+              text = text.replace(old_call, new_call)
+          assert total >= 10, total
+          assert 'cx(&local, &project)' not in text
 
           path.write_text(text)
       - name: Validate focused and full tests
