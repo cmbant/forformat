@@ -33,56 +33,16 @@ jobs:
 
           cont = Path('src/transform/passes/continuations.rs')
           text = cont.read_text()
-          old = '''    for index in 0..lines.len() {
-              let nearest = match source_stream(cx, index) {
-                  SourceStream::Ordinary => &mut ordinary,
-                  SourceStream::Conditional => &mut conditional,
-              };
-              previous[index] = *nearest;
-              if carries_statement(cx, index) {
-                  *nearest = Some(index);
-              }
-          }
-          let mut next = vec![None; lines.len()];
-          let mut ordinary = None;
-          let mut conditional = None;
-          for index in (0..lines.len()).rev() {
-              let nearest = match source_stream(cx, index) {
-                  SourceStream::Ordinary => &mut ordinary,
-                  SourceStream::Conditional => &mut conditional,
-              };
-              next[index] = *nearest;
-              if carries_statement(cx, index) {
-                  *nearest = Some(index);
-              }
-          }
-          '''
-          new = '''    for (index, slot) in previous.iter_mut().enumerate() {
-              let nearest = match source_stream(cx, index) {
-                  SourceStream::Ordinary => &mut ordinary,
-                  SourceStream::Conditional => &mut conditional,
-              };
-              *slot = *nearest;
-              if carries_statement(cx, index) {
-                  *nearest = Some(index);
-              }
-          }
-          let mut next = vec![None; lines.len()];
-          let mut ordinary = None;
-          let mut conditional = None;
-          for (index, slot) in next.iter_mut().enumerate().rev() {
-              let nearest = match source_stream(cx, index) {
-                  SourceStream::Ordinary => &mut ordinary,
-                  SourceStream::Conditional => &mut conditional,
-              };
-              *slot = *nearest;
-              if carries_statement(cx, index) {
-                  *nearest = Some(index);
-              }
-          }
-          '''
-          assert text.count(old) == 1
-          cont.write_text(text.replace(old, new, 1))
+          edits = [
+              ('    for index in 0..lines.len() {\n', '    for (index, slot) in previous.iter_mut().enumerate() {\n'),
+              ('        previous[index] = *nearest;\n', '        *slot = *nearest;\n'),
+              ('    for index in (0..lines.len()).rev() {\n', '    for (index, slot) in next.iter_mut().enumerate().rev() {\n'),
+              ('        next[index] = *nearest;\n', '        *slot = *nearest;\n'),
+          ]
+          for old, new in edits:
+              assert text.count(old) == 1, old
+              text = text.replace(old, new, 1)
+          cont.write_text(text)
       - run: cargo fmt --all && git diff --check
       - name: Commit clean tree
         shell: bash
