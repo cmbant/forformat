@@ -1,14 +1,15 @@
 name: Merge current main into PR18
 
 on:
-  pull_request:
+  push:
+    branches:
+      - fix/conditional-continuation-state
 
 permissions:
   contents: write
 
 jobs:
   merge:
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'fix/conditional-continuation-state'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
