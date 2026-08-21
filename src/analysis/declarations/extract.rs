@@ -5,11 +5,11 @@ use super::{
         type_definition_parent, type_spec_name,
     },
     types::TypeMaps,
-    HostAccess, HostUnit, UnitFacts, UseAssociation, UseName,
+    Accessibility, HostAccess, HostUnit, UnitFacts, UseAssociation, UseName,
 };
 use crate::{
     analysis::{
-        names::{CaseMap, CaseTables},
+        names::CaseMap,
         scope::{ScopeKind, ScopeTree},
     },
     source::{
@@ -23,14 +23,7 @@ use crate::{
 pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
     let mut facts = FileFacts::default();
     initialize_units(scopes, &mut facts);
-    scope_names(
-        scopes,
-        &mut facts.cases,
-        &mut facts.file_symbols,
-        &mut facts.external_symbols,
-        &mut facts.declared_types,
-        &mut facts.units,
-    );
+    scope_names(scopes, &mut facts);
     for group in &analysis.groups {
         let first = &analysis.buffer.lines[group.lines.start];
         if first.kind == PhysicalLineKind::Preprocessor {
@@ -85,10 +78,16 @@ pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
             scope_header_semantics(&statement.text, unit_scope, scopes, &mut facts);
             import_statement(&statement.text, unit_scope, &mut facts);
             include_statement(&statement.text, group.lines.start, &mut facts.includes);
+            // A bare PRIVATE inside a derived type sets component accessibility
+            // and must not touch the module's own default, so the access
+            // statement stays gated on being outside a type body. The
+            // accessibility attribute of `TYPE, PUBLIC :: T` does not: that
+            // statement opens the type it names, so it is always seen with the
+            // type already entered.
             if owner.is_none() {
                 access_statement(&statement.text, unit_scope, &mut facts);
-                type_definition_access(&statement.text, unit_scope, &mut facts);
             }
+            type_definition_access(&statement.text, unit_scope, &mut facts);
             if let Some((child, parent)) = type_definition_parent(&statement.text) {
                 facts.types.insert_parent(child, parent);
                 if let Some(unit) = facts.units.get_mut(&unit_scope) {
@@ -425,9 +424,9 @@ fn entity_declaration(
                             if let Some(declared) = declared {
                                 unit.insert_variable_type(token.text, declared);
                             }
-                            if let Some(private) = access {
+                            if let Some(access) = access {
                                 if matches!(unit.kind, ScopeKind::Module | ScopeKind::File) {
-                                    unit.access.mark(token.text, private);
+                                    unit.access.mark(token.text, access);
                                 }
                             }
                         }
@@ -456,16 +455,18 @@ fn entity_declaration(
     }
 }
 
+/// The accessibility attribute carried in a declaration's attribute list, if
+/// it has one. Absent means the enclosing scope's default governs.
 fn declaration_access(
     tokens: &[crate::source::Token<'_>],
     start: usize,
     separator: usize,
-) -> Option<bool> {
+) -> Option<Accessibility> {
     tokens[start..separator].iter().find_map(|token| {
         token
             .is_name(b"private")
-            .then_some(true)
-            .or_else(|| token.is_name(b"public").then_some(false))
+            .then_some(Accessibility::Private)
+            .or_else(|| token.is_name(b"public").then_some(Accessibility::Public))
     })
 }
 
@@ -580,45 +581,39 @@ fn old_style_declaration(
     }
 }
 
-fn scope_names(
-    scopes: &ScopeTree,
-    cases: &mut CaseTables,
-    file_symbols: &mut CaseMap,
-    external_symbols: &mut CaseMap,
-    declared_types: &mut CaseMap,
-    units: &mut std::collections::HashMap<usize, UnitFacts>,
-) {
+fn scope_names(scopes: &ScopeTree, facts: &mut FileFacts) {
     for (scope_index, scope) in scopes.scopes.iter().enumerate() {
         let Some(name) = scope.name.as_deref() else {
             continue;
         };
         match scope.kind {
-            ScopeKind::Module | ScopeKind::Submodule => cases.modules.insert(name),
+            ScopeKind::Module | ScopeKind::Submodule => facts.cases.modules.insert(name),
             ScopeKind::Program => {
-                cases.symbols.insert(name);
-                file_symbols.insert(name);
+                facts.cases.symbols.insert(name);
+                facts.file_symbols.insert(name);
             }
             ScopeKind::Procedure => {
-                cases.symbols.insert(name);
-                file_symbols.insert(name);
-                let parent_scope = units.get(&scope_index).and_then(|unit| unit.parent);
-                if let Some(parent_scope) = parent_scope {
-                    if let Some(parent) = units.get_mut(&parent_scope) {
+                facts.cases.symbols.insert(name);
+                facts.file_symbols.insert(name);
+                let parent_scope = facts.units.get(&scope_index).and_then(|unit| unit.parent);
+                let host_kind = parent_scope
+                    .and_then(|parent_scope| facts.units.get_mut(&parent_scope))
+                    .map(|parent| {
                         parent.symbols.insert(name);
-                        if parent.kind == ScopeKind::File {
-                            external_symbols.insert(name);
-                        }
-                    }
+                        parent.kind
+                    });
+                if host_kind == Some(ScopeKind::File) {
+                    facts.external_symbols.insert(name);
                 }
             }
             ScopeKind::DerivedType => {
-                cases.types.insert(name);
-                cases.symbols.insert(name);
-                file_symbols.insert(name);
-                declared_types.insert(name);
+                facts.cases.types.insert(name);
+                facts.cases.symbols.insert(name);
+                facts.file_symbols.insert(name);
+                facts.declared_types.insert(name);
                 let mut parent = scope.parent;
                 while let Some(candidate) = parent {
-                    if let Some(unit) = units.get_mut(&candidate) {
+                    if let Some(unit) = facts.units.get_mut(&candidate) {
                         unit.types.insert(name);
                         unit.symbols.insert(name);
                         break;
@@ -639,10 +634,10 @@ fn access_statement(text: &[u8], unit_scope: usize, facts: &mut FileFacts) {
     else {
         return;
     };
-    let private = if tokens[first].is_name(b"private") {
-        true
+    let access = if tokens[first].is_name(b"private") {
+        Accessibility::Private
     } else if tokens[first].is_name(b"public") {
-        false
+        Accessibility::Public
     } else {
         return;
     };
@@ -662,10 +657,10 @@ fn access_statement(text: &[u8], unit_scope: usize, facts: &mut FileFacts) {
         .map(|token| token.text)
         .collect::<Vec<_>>();
     if names.is_empty() {
-        unit.access.set_default(private);
+        unit.access.set_default(access);
     } else {
         for name in names {
-            unit.access.mark(name, private);
+            unit.access.mark(name, access);
         }
     }
 }
@@ -687,7 +682,7 @@ fn type_definition_access(text: &[u8], unit_scope: usize, facts: &mut FileFacts)
     else {
         return;
     };
-    let Some(private) = declaration_access(&tokens, first, separator) else {
+    let Some(access) = declaration_access(&tokens, first, separator) else {
         return;
     };
     let Some(name) = tokens[separator + 1..]
@@ -698,7 +693,7 @@ fn type_definition_access(text: &[u8], unit_scope: usize, facts: &mut FileFacts)
     };
     if let Some(unit) = facts.units.get_mut(&unit_scope) {
         if matches!(unit.kind, ScopeKind::Module | ScopeKind::File) {
-            unit.access.mark(name.text, private);
+            unit.access.mark(name.text, access);
         }
     }
 }

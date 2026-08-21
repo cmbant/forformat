@@ -69,6 +69,13 @@ impl FileFacts {
         self.includes.extend(other.includes.iter().cloned());
     }
 
+    /// The narrowest unit covering `line`.
+    ///
+    /// This is on the per-token query path, so a linear scan here is an
+    /// O(tokens x units) factor in principle. In practice the largest file in
+    /// the reference corpora owns 74 units and a precomputed line index
+    /// measured within noise of the scan while costing a vector per file, so
+    /// the scan stays.
     pub(crate) fn active_unit(&self, line: usize) -> Option<&UnitFacts> {
         self.units
             .values()

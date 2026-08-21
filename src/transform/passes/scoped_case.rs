@@ -8,36 +8,42 @@
 //! spelling is restored before the later keyword/intrinsic rule sees it.
 
 use crate::{
-    analysis::scoped_declared_names,
+    analysis::{project::ResolvedType, scoped_declared_names, DeclaredNameIndex},
     error::FormatError,
     source::{
+        syntax::is_end_construct_keyword,
         tokens::{tokenize, Token, TokenKind},
         LexState,
     },
     transform::{
         document::Document,
         edit::EditBuffer,
-        passes::case_pass,
+        passes::{
+            case_pass,
+            provenance::{source_spans, spread_replacement},
+        },
         pipeline::{Changed, PassContext},
     },
 };
-use std::{collections::HashSet, ops::Range};
+use std::{collections::HashMap, ops::Range};
 
 pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
     let mut changed = case_pass::declared(document, cx)?;
     let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
     let mut line_edits: Vec<Vec<(Range<usize>, Vec<u8>)>> = vec![Vec::new(); document.lines.len()];
-    let mut associate_stack: Vec<HashSet<Vec<u8>>> = Vec::new();
+    let mut associate_stack: Vec<HashMap<Vec<u8>, Vec<u8>>> = Vec::new();
 
     for group in &cx.analysis.groups {
         for statement in &group.statements {
             let tokens = tokenize(&statement.text, &mut LexState::default());
             let opening_aliases = associate_opening_aliases(&tokens);
+            // Innermost last, so a nested construct that reuses an outer
+            // alias name governs the uses inside it.
             let active_aliases = associate_stack
                 .iter()
                 .flat_map(|frame| frame.iter())
-                .cloned()
-                .collect::<HashSet<_>>();
+                .map(|(name, spelling)| (name.clone(), spelling.clone()))
+                .collect::<HashMap<_, _>>();
 
             for (index, token) in tokens.iter().enumerate() {
                 if token.kind != TokenKind::Name || cx.project.macros.contains(token.text) {
@@ -61,18 +67,19 @@ pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, Fo
                     Decision::Replace(spelling) => spelling,
                     Decision::Restore => token.text.to_vec(),
                 };
-                if replacement.len() != token.text.len() {
+                // Reuse the base pass's own distribution rule rather than a
+                // parallel one: writing back piece by piece is only sound
+                // because a replacement always has the token's length, and
+                // `spread_replacement` is where that is decided.
+                let Some(pieces) = spread_replacement(&spans, token, &replacement) else {
                     continue;
-                }
-                let mut taken = 0usize;
-                for (source_line, span) in spans {
+                };
+                for (source_line, span, piece) in pieces {
                     let line_start = cx.analysis.buffer.lines[source_line].span.start as usize;
-                    let len = span.len();
                     line_edits[source_line].push((
                         span.start - line_start..span.end - line_start,
-                        replacement[taken..taken + len].to_vec(),
+                        piece.to_vec(),
                     ));
-                    taken += len;
                 }
             }
 
@@ -115,15 +122,15 @@ fn scoped_spelling(
     tokens: &[Token<'_>],
     index: usize,
     line: usize,
-    declared_names: &crate::analysis::DeclaredNameIndex,
+    declared_names: &DeclaredNameIndex,
     cx: &PassContext,
-    active_aliases: &HashSet<Vec<u8>>,
-    opening_aliases: Option<&HashSet<Vec<u8>>>,
+    active_aliases: &HashMap<Vec<u8>, Vec<u8>>,
+    opening_aliases: Option<&HashMap<Vec<u8>, Vec<u8>>>,
 ) -> Decision {
     let token = &tokens[index];
 
-    if crate::source::syntax::is_end_construct_keyword(tokens, index)
-        || (index > 0 && crate::source::syntax::is_end_construct_keyword(tokens, index - 1))
+    if is_end_construct_keyword(tokens, index)
+        || (index > 0 && is_end_construct_keyword(tokens, index - 1))
         || named_end_space(tokens, index)
         || scope_header(tokens, index)
         || is_use_module(tokens, index)
@@ -132,12 +139,23 @@ fn scoped_spelling(
         return Decision::KeepBase;
     }
 
-    if opening_aliases.is_some_and(|aliases| aliases.contains(&token.text.to_ascii_lowercase())) {
-        return Decision::KeepBase;
-    }
-
     if preceded_by_percent(tokens, index) {
         return scoped_member_spelling(tokens, index, line, cx, active_aliases);
+    }
+
+    // The ASSOCIATE statement is the alias's declaration and the alias is
+    // invisible outside its construct, so no project-wide evidence governs it:
+    // every use inside the block takes the spelling the construct gave it.
+    // Neither pass can find that spelling in a declaration table -- an alias is
+    // recorded nowhere -- so without this a use spelled differently from the
+    // alias falls through to `Decision::Restore` and stays as authored, and a
+    // same-named module entity elsewhere in the project could claim it.
+    let lower = token.text.to_ascii_lowercase();
+    if let Some(spelling) = opening_aliases
+        .and_then(|aliases| aliases.get(&lower))
+        .or_else(|| active_aliases.get(&lower))
+    {
+        return Decision::Replace(spelling.clone());
     }
 
     if is_type_spec_name(tokens, index) {
@@ -180,7 +198,7 @@ fn scoped_member_spelling(
     index: usize,
     line: usize,
     cx: &PassContext,
-    active_aliases: &HashSet<Vec<u8>>,
+    active_aliases: &HashMap<Vec<u8>, Vec<u8>>,
 ) -> Decision {
     let Some(names) = component_owner_names(tokens, index, true) else {
         return Decision::KeepBase;
@@ -188,7 +206,9 @@ fn scoped_member_spelling(
     let Some(root) = names.first() else {
         return Decision::KeepBase;
     };
-    if active_aliases.contains(&root.to_ascii_lowercase()) {
+    // An alias has no entry in the type graph, so a member reached through one
+    // cannot be resolved and must keep whatever the base pass decided.
+    if active_aliases.contains_key(&root.to_ascii_lowercase()) {
         return Decision::KeepBase;
     }
 
@@ -205,36 +225,16 @@ fn scoped_member_spelling(
 }
 
 fn resolve_component_owner(
-    mut current: crate::analysis::project::ResolvedType,
+    mut current: ResolvedType,
     links: &[&[u8]],
     cx: &PassContext,
-) -> Option<crate::analysis::project::ResolvedType> {
+) -> Option<ResolvedType> {
     for link in links {
         current = cx
             .project
             .visible_component_type(cx.local, &current, link)?;
     }
     Some(current)
-}
-
-fn source_spans(
-    group: &crate::source::LogicalGroup,
-    statement: &crate::source::LogicalStatement,
-    token: &Token<'_>,
-) -> Vec<(usize, Range<usize>)> {
-    let start = statement.offset + token.span.start;
-    let end = statement.offset + token.span.end;
-    let mut spans = Vec::new();
-    for piece in &group.pieces {
-        let lo = start.max(piece.text.start);
-        let hi = end.min(piece.text.end);
-        if lo >= hi {
-            continue;
-        }
-        let origin = piece.bytes.start as usize + (lo - piece.text.start);
-        spans.push((piece.line, origin..origin + (hi - lo)));
-    }
-    spans
 }
 
 fn preceded_by_percent(tokens: &[Token<'_>], index: usize) -> bool {
@@ -395,7 +395,10 @@ fn is_declaration_entity(tokens: &[Token<'_>], index: usize) -> bool {
     !initializer && array_depth == 0 && tokens[index].depth == 0
 }
 
-fn associate_opening_aliases(tokens: &[Token<'_>]) -> Option<HashSet<Vec<u8>>> {
+/// The aliases one ASSOCIATE statement introduces, keyed by their lowercased
+/// name and carrying the spelling the author gave each one. That spelling is
+/// the alias's declaration: it is what every use inside the block resolves to.
+fn associate_opening_aliases(tokens: &[Token<'_>]) -> Option<HashMap<Vec<u8>, Vec<u8>>> {
     let associate = tokens
         .iter()
         .position(|token| token.is_name(b"associate"))?;
@@ -409,7 +412,7 @@ fn associate_opening_aliases(tokens: &[Token<'_>]) -> Option<HashSet<Vec<u8>>> {
         .skip(associate + 2)
         .find(|(_, token)| token.kind == TokenKind::RParen && token.depth == open.depth)
         .map(|(index, _)| index)?;
-    let mut aliases = HashSet::new();
+    let mut aliases = HashMap::new();
     let mut start = associate + 2;
     for end in (start..close)
         .filter(|index| {
@@ -424,7 +427,7 @@ fn associate_opening_aliases(tokens: &[Token<'_>]) -> Option<HashSet<Vec<u8>>> {
             && entry[1].text == b"=>"
             && entry[1].depth == entry_depth
         {
-            aliases.insert(entry[0].text.to_ascii_lowercase());
+            aliases.insert(entry[0].text.to_ascii_lowercase(), entry[0].text.to_vec());
         }
         start = end.saturating_add(1);
     }

@@ -358,3 +358,128 @@ fn import_controls_host_association_and_interface_defaults() {
         .contains("subroutine OnlyCase\nimport, only: HostName\nprint *, HostName, othername"));
     assert!(output.contains("subroutine AllCase\nimport, all\nprint *, HostName, OtherName"));
 }
+
+#[test]
+fn type_accessibility_attribute_exports_from_a_private_module() {
+    let module = b"module Ranges\nimplicit none\nprivate\ntype, public :: TRanges\ndouble precision, allocatable :: points(:)\nend type TRanges\nend module Ranges\n";
+    let target = b"program p\nuse Ranges\nimplicit none\ntype(tranges) :: R\nprint *, R%Points\nend program p\n";
+    let output = String::from_utf8(normalize(
+        target,
+        [
+            (Path::new("ranges.f90"), module.as_slice()),
+            (Path::new("target.f90"), target.as_slice()),
+        ],
+    ))
+    .unwrap();
+    assert!(output.contains("type(TRanges) :: R"), "{output}");
+    assert!(output.contains("print *, R%points"), "{output}");
+}
+
+#[test]
+fn private_type_attribute_hides_the_type_from_importers() {
+    let module = b"module Guard\nimplicit none\ntype, private :: HiddenType\ninteger :: HiddenField\nend type HiddenType\ntype :: OpenType\ninteger :: OpenField\nend type OpenType\nend module Guard\n";
+    let target = b"program p\nuse Guard\nimplicit none\ntype(hiddentype) :: h\ntype(opentype) :: o\nprint *, h%hiddenfield, o%openfield\nend program p\n";
+    let output = String::from_utf8(normalize(
+        target,
+        [
+            (Path::new("guard.f90"), module.as_slice()),
+            (Path::new("target.f90"), target.as_slice()),
+        ],
+    ))
+    .unwrap();
+    assert!(output.contains("type(OpenType) :: o"), "{output}");
+    assert!(output.contains("o%OpenField"), "{output}");
+    assert!(output.contains("type(hiddentype) :: h"), "{output}");
+    assert!(output.contains("h%hiddenfield"), "{output}");
+}
+
+#[test]
+fn duplicate_module_does_not_poison_names_it_never_declares() {
+    let first = b"module Utils\nimplicit none\ninteger :: SharedCase\nend module Utils\n";
+    let second = b"module Utils\nimplicit none\ninteger :: SharedCase\ninteger :: ExtraCase\nend module Utils\n";
+    let settings =
+        b"module Settings\nuse Utils\nimplicit none\ninteger :: MpiRank\nend module Settings\n";
+    let target =
+        b"program p\nuse Settings\nimplicit none\nprint *, mpirank, sharedcase\nend program p\n";
+    let output = String::from_utf8(normalize(
+        target,
+        [
+            (Path::new("a/utils.f90"), first.as_slice()),
+            (Path::new("b/utils.f90"), second.as_slice()),
+            (Path::new("settings.f90"), settings.as_slice()),
+            (Path::new("target.f90"), target.as_slice()),
+        ],
+    ))
+    .unwrap();
+    assert!(output.contains("print *, MpiRank, SharedCase"), "{output}");
+}
+
+#[test]
+fn duplicate_modules_are_ambiguous_only_where_their_spellings_disagree() {
+    let first = b"module Utils\nimplicit none\ninteger :: AgreedCase\ninteger :: DisputedCase\nend module Utils\n";
+    let second = b"module Utils\nimplicit none\ninteger :: AgreedCase\ninteger :: DISPUTEDcase\nend module Utils\n";
+    let target =
+        b"program p\nuse Utils\nimplicit none\nprint *, agreedcase, disputedcase\nend program p\n";
+    let output = String::from_utf8(normalize(
+        target,
+        [
+            (Path::new("a/utils.f90"), first.as_slice()),
+            (Path::new("b/utils.f90"), second.as_slice()),
+            (Path::new("target.f90"), target.as_slice()),
+        ],
+    ))
+    .unwrap();
+    assert!(
+        output.contains("print *, AgreedCase, disputedcase"),
+        "{output}"
+    );
+}
+
+#[test]
+fn an_associate_alias_governs_the_spelling_of_uses_inside_its_block() {
+    let grid = b"module Grid\nimplicit none\ninteger :: ROWS = 1\nend module Grid\n";
+    let target = b"program p\nuse Grid\nimplicit none\ninteger :: Table(3)\nassociate(Rows => Table)\nprint *, rOWs\nend associate\nend program p\n";
+    let output = String::from_utf8(normalize(
+        target,
+        [
+            (Path::new("grid.f90"), grid.as_slice()),
+            (Path::new("target.f90"), target.as_slice()),
+        ],
+    ))
+    .unwrap();
+    assert!(output.contains("print *, Rows"), "{output}");
+}
+
+#[test]
+fn an_associate_alias_no_declaration_shares_a_name_with_still_governs() {
+    let other = b"module Other\nimplicit none\ninteger :: OtherCase\nend module Other\n";
+    let target = b"program p\nimplicit none\ndouble precision :: Points(3)\nassociate(Cls => Points)\nprint *, CLs\nend associate\nend program p\n";
+    let output = String::from_utf8(normalize(
+        target,
+        [
+            (Path::new("other.f90"), other.as_slice()),
+            (Path::new("target.f90"), target.as_slice()),
+        ],
+    ))
+    .unwrap();
+    assert!(output.contains("print *, Cls"), "{output}");
+}
+
+/// Scope resolution declines to answer for a member reached through an alias,
+/// because an alias has no entry in the type graph. The base pass infers the
+/// alias's type from its selector and does answer, and that answer stands.
+#[test]
+fn a_member_reached_through_an_associate_alias_resolves_from_the_selector() {
+    let module = b"module Shapes\nimplicit none\ntype TBox\ninteger :: Width\nend type TBox\nend module Shapes\n";
+    let target = b"program p\nuse Shapes\nimplicit none\ntype(TBox) :: Box\nassociate(Held => Box)\nprint *, Held%WIDTH\nend associate\nprint *, Box%WIDTH\nend program p\n";
+    let output = String::from_utf8(normalize(
+        target,
+        [
+            (Path::new("shapes.f90"), module.as_slice()),
+            (Path::new("target.f90"), target.as_slice()),
+        ],
+    ))
+    .unwrap();
+    assert!(output.contains("print *, Held%Width"), "{output}");
+    assert!(output.contains("print *, Box%Width"), "{output}");
+}

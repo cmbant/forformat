@@ -87,10 +87,11 @@ pub struct ProjectContext {
     pub sources: Vec<PathBuf>,
     /// Restrict component ownership to declarations proven in the target file.
     pub target_local_component_resolution: bool,
-    modules: HashMap<Vec<u8>, UnitFacts>,
-    module_ambiguities: HashSet<Vec<u8>>,
-    submodules: HashMap<(Vec<u8>, Vec<u8>), UnitFacts>,
-    submodule_ambiguities: HashSet<(Vec<u8>, Vec<u8>)>,
+    /// Every distinct definition registered under one module name. A checkout
+    /// that vendors two copies of a module keeps both: a query answers from all
+    /// of them and is ambiguous only where their answers actually differ.
+    modules: HashMap<Vec<u8>, Vec<UnitFacts>>,
+    submodules: HashMap<(Vec<u8>, Vec<u8>), Vec<UnitFacts>>,
     expanded_facts: HashMap<PathBuf, (u64, FileFacts)>,
     expanded_sources: HashMap<u64, Option<PathBuf>>,
 }
@@ -112,16 +113,25 @@ impl ProjectContext {
     /// Fold already-extracted facts in. INCLUDE fragments are analyzed on
     /// demand from the filesystem, without making their declarations globally
     /// visible: they are merged into the scope containing the INCLUDE statement.
+    ///
+    /// This reads files. Every relative INCLUDE in `facts` is resolved against
+    /// `path`'s directory and every absolute one as written, following the same
+    /// text-substitution rule a compiler applies, so a caller that filters which
+    /// sources reach the project does not thereby bound which files are opened.
+    /// Unreadable and unparsable fragments are skipped rather than reported.
+    /// Use [`ProjectContext::empty`] alone when no filesystem access is wanted.
     pub fn absorb(&mut self, path: &Path, facts: &FileFacts) {
         let expanded = expand_includes_with(path, facts, &mut |candidate| {
             fs::read(candidate)
                 .ok()
                 .and_then(|source| analyze_file_at(candidate, &source).ok())
         });
-        self.absorb_expanded(path, facts, &expanded);
+        self.absorb_expanded(path, facts, expanded);
     }
 
-    fn absorb_expanded(&mut self, path: &Path, facts: &FileFacts, expanded: &FileFacts) {
+    /// `expanded` is consumed: it is retained verbatim as this path's scope
+    /// facts, and every caller has already finished with it.
+    fn absorb_expanded(&mut self, path: &Path, facts: &FileFacts, expanded: FileFacts) {
         self.cases.merge(&facts.cases);
         // Included owner-qualified members are safe to add to the project type
         // graph; included root declarations remain in expanded scope facts.
@@ -139,7 +149,7 @@ impl ProjectContext {
         self.macros.merge(&expanded.macros);
         self.types.merge(&facts.types);
         self.types.merge_non_roots(&expanded.types);
-        self.register_modules(expanded);
+        self.register_modules(&expanded);
         let path = normalize_path(path);
         if let Some((previous_id, _)) = self.expanded_facts.get(&path) {
             if previous_id != &facts.source_id {
@@ -155,47 +165,30 @@ impl ProjectContext {
             Some(slot) => *slot = None,
         }
         self.expanded_facts
-            .insert(path.clone(), (facts.source_id, expanded.clone()));
+            .insert(path.clone(), (facts.source_id, expanded));
         self.sources.push(path);
     }
 
     fn register_modules(&mut self, facts: &FileFacts) {
-        for unit in facts.units.values() {
+        // Scope order rather than map order, so the registered sequence — and
+        // with it this context's identity — does not depend on hashing.
+        let mut scopes = facts.units.keys().copied().collect::<Vec<_>>();
+        scopes.sort_unstable();
+        for scope in scopes {
+            let unit = &facts.units[&scope];
             let Some(host) = unit.project_host.as_ref() else {
                 continue;
             };
-            match host {
-                HostUnit::Module(name) => {
-                    if self.module_ambiguities.contains(name) {
-                        continue;
-                    }
-                    match self.modules.get(name) {
-                        None => {
-                            self.modules.insert(name.clone(), unit.clone());
-                        }
-                        Some(existing) if existing == unit => {}
-                        Some(_) => {
-                            self.modules.remove(name);
-                            self.module_ambiguities.insert(name.clone());
-                        }
-                    }
-                }
-                HostUnit::Submodule { ancestor, name } => {
-                    let key = (ancestor.clone(), name.clone());
-                    if self.submodule_ambiguities.contains(&key) {
-                        continue;
-                    }
-                    match self.submodules.get(&key) {
-                        None => {
-                            self.submodules.insert(key, unit.clone());
-                        }
-                        Some(existing) if existing == unit => {}
-                        Some(_) => {
-                            self.submodules.remove(&key);
-                            self.submodule_ambiguities.insert(key);
-                        }
-                    }
-                }
+            let definitions = match host {
+                HostUnit::Module(name) => self.modules.entry(name.clone()).or_default(),
+                HostUnit::Submodule { ancestor, name } => self
+                    .submodules
+                    .entry((ancestor.clone(), name.clone()))
+                    .or_default(),
+            };
+            // Re-absorbing the same source must not register a second copy.
+            if !definitions.iter().any(|existing| existing == unit) {
+                definitions.push(unit.clone());
             }
         }
     }
@@ -223,20 +216,20 @@ impl ProjectContext {
     }
 
     fn expanded<'a>(&'a self, local: &'a FileFacts) -> &'a FileFacts {
-        let path = local
-            .source_path
-            .as_ref()
-            .map(|path| normalize_path(path))
-            .or_else(|| {
-                self.expanded_sources
-                    .get(&local.source_id)
-                    .and_then(|path| path.clone())
-            });
+        // Every name token of every query lands here, so borrow the stored
+        // path rather than rebuilding it: `analyze_file_with_path` normalized
+        // `source_path` when it produced these facts, and `absorb_expanded`
+        // keyed `expanded_facts` by that same normalized path.
+        let path = local.source_path.as_deref().or_else(|| {
+            self.expanded_sources
+                .get(&local.source_id)
+                .and_then(|path| path.as_deref())
+        });
         let Some(path) = path else {
             return local;
         };
         self.expanded_facts
-            .get(&path)
+            .get(path)
             .filter(|(source_id, _)| *source_id == local.source_id)
             .map(|(_, facts)| facts)
             .unwrap_or(local)
@@ -397,24 +390,34 @@ impl ProjectContext {
         self.component_type_from_type(local, owner, name, &mut HashSet::new())
     }
 
-    fn host_is_ambiguous(&self, host: &HostUnit) -> bool {
+    /// Every definition registered for one module name, in registration order.
+    fn module_units(&self, module: &[u8]) -> &[UnitFacts] {
+        self.modules
+            .get(module)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// Every definition registered for one host program unit. Empty when the
+    /// project never supplied that module or submodule.
+    fn host_units(&self, host: &HostUnit) -> &[UnitFacts] {
         match host {
-            HostUnit::Module(name) => self.module_ambiguities.contains(name),
+            HostUnit::Module(name) => self.module_units(name),
             HostUnit::Submodule { ancestor, name } => self
-                .submodule_ambiguities
-                .contains(&(ancestor.clone(), name.clone())),
+                .submodules
+                .get(&(ancestor.clone(), name.clone()))
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
         }
     }
 
-    fn host_unit(&self, host: &HostUnit) -> Option<&UnitFacts> {
-        if self.host_is_ambiguous(host) {
-            return None;
-        }
+    fn host_origin(host: &HostUnit) -> TypeOrigin {
         match host {
-            HostUnit::Module(name) => self.modules.get(name),
-            HostUnit::Submodule { ancestor, name } => {
-                self.submodules.get(&(ancestor.clone(), name.clone()))
-            }
+            HostUnit::Module(module) => TypeOrigin::Module(module.clone()),
+            HostUnit::Submodule { ancestor, name } => TypeOrigin::Submodule {
+                ancestor: ancestor.clone(),
+                name: name.clone(),
+            },
         }
     }
 
@@ -425,34 +428,41 @@ impl ProjectContext {
         visited: &mut HashSet<(HostUnit, Vec<u8>)>,
     ) -> Visibility<Vec<u8>> {
         let lower = name.to_ascii_lowercase();
-        if self.host_is_ambiguous(host) {
-            return Visibility::Ambiguous;
-        }
         if !visited.insert((host.clone(), lower.clone())) {
             return Visibility::Absent;
         }
-        let Some(unit) = self.host_unit(host) else {
-            return Visibility::Absent;
-        };
-        if unit.symbols.contains(&lower) {
+        let mut resolved = Visibility::Absent;
+        for unit in self.host_units(host) {
+            resolved.merge(self.unit_visible_symbol(unit, &lower, visited));
+        }
+        resolved
+    }
+
+    fn unit_visible_symbol(
+        &self,
+        unit: &UnitFacts,
+        lower: &[u8],
+        visited: &mut HashSet<(HostUnit, Vec<u8>)>,
+    ) -> Visibility<Vec<u8>> {
+        if unit.symbols.contains(lower) {
             return unit
                 .symbols
-                .get(&lower)
+                .get(lower)
                 .map(|spelling| Visibility::Value(spelling.to_vec()))
                 .unwrap_or(Visibility::Ambiguous);
         }
         let mut use_visited = HashSet::new();
-        match self.imported_symbol(&unit.imports, &lower, false, &mut use_visited) {
+        match self.imported_symbol(&unit.imports, lower, false, &mut use_visited) {
             Visibility::Absent => {}
             found => return found,
         }
-        if !unit.host_access.allows(&lower) {
+        if !unit.host_access.allows(lower) {
             return Visibility::Absent;
         }
         let Some(parent) = unit.semantic_host.as_ref() else {
             return Visibility::Absent;
         };
-        self.host_visible_symbol(parent, &lower, visited)
+        self.host_visible_symbol(parent, lower, visited)
     }
 
     fn host_visible_type_spelling(
@@ -462,34 +472,41 @@ impl ProjectContext {
         visited: &mut HashSet<(HostUnit, Vec<u8>)>,
     ) -> Visibility<Vec<u8>> {
         let lower = name.to_ascii_lowercase();
-        if self.host_is_ambiguous(host) {
-            return Visibility::Ambiguous;
-        }
         if !visited.insert((host.clone(), lower.clone())) {
             return Visibility::Absent;
         }
-        let Some(unit) = self.host_unit(host) else {
-            return Visibility::Absent;
-        };
-        if unit.types.contains(&lower) {
+        let mut resolved = Visibility::Absent;
+        for unit in self.host_units(host) {
+            resolved.merge(self.unit_visible_type_spelling(unit, &lower, visited));
+        }
+        resolved
+    }
+
+    fn unit_visible_type_spelling(
+        &self,
+        unit: &UnitFacts,
+        lower: &[u8],
+        visited: &mut HashSet<(HostUnit, Vec<u8>)>,
+    ) -> Visibility<Vec<u8>> {
+        if unit.types.contains(lower) {
             return unit
                 .types
-                .get(&lower)
+                .get(lower)
                 .map(|spelling| Visibility::Value(spelling.to_vec()))
                 .unwrap_or(Visibility::Ambiguous);
         }
         let mut use_visited = HashSet::new();
-        match self.imported_type(&unit.imports, &lower, &mut use_visited) {
+        match self.imported_type(&unit.imports, lower, &mut use_visited) {
             Visibility::Absent => {}
             found => return found,
         }
-        if !unit.host_access.allows(&lower) {
+        if !unit.host_access.allows(lower) {
             return Visibility::Absent;
         }
         let Some(parent) = unit.semantic_host.as_ref() else {
             return Visibility::Absent;
         };
-        self.host_visible_type_spelling(parent, &lower, visited)
+        self.host_visible_type_spelling(parent, lower, visited)
     }
 
     fn host_visible_type_identity(
@@ -499,46 +516,47 @@ impl ProjectContext {
         visited: &mut HashSet<(HostUnit, Vec<u8>)>,
     ) -> Visibility<ResolvedType> {
         let lower = name.to_ascii_lowercase();
-        if self.host_is_ambiguous(host) {
-            return Visibility::Ambiguous;
-        }
         if !visited.insert((host.clone(), lower.clone())) {
             return Visibility::Absent;
         }
-        let Some(unit) = self.host_unit(host) else {
-            return Visibility::Absent;
-        };
-        if unit.types.contains(&lower) {
-            let origin = match host {
-                HostUnit::Module(module) => TypeOrigin::Module(module.clone()),
-                HostUnit::Submodule { ancestor, name } => TypeOrigin::Submodule {
-                    ancestor: ancestor.clone(),
-                    name: name.clone(),
-                },
-            };
+        let mut resolved = Visibility::Absent;
+        for unit in self.host_units(host) {
+            resolved.merge(self.unit_visible_type_identity(host, unit, &lower, visited));
+        }
+        resolved
+    }
+
+    fn unit_visible_type_identity(
+        &self,
+        host: &HostUnit,
+        unit: &UnitFacts,
+        lower: &[u8],
+        visited: &mut HashSet<(HostUnit, Vec<u8>)>,
+    ) -> Visibility<ResolvedType> {
+        if unit.types.contains(lower) {
             return unit
                 .types
-                .get(&lower)
+                .get(lower)
                 .map(|_| {
                     Visibility::Value(ResolvedType {
-                        origin,
-                        name: lower,
+                        origin: Self::host_origin(host),
+                        name: lower.to_vec(),
                     })
                 })
                 .unwrap_or(Visibility::Ambiguous);
         }
         let mut use_visited = HashSet::new();
-        match self.imported_type_identity(&unit.imports, &lower, &mut use_visited) {
+        match self.imported_type_identity(&unit.imports, lower, &mut use_visited) {
             Visibility::Absent => {}
             found => return found,
         }
-        if !unit.host_access.allows(&lower) {
+        if !unit.host_access.allows(lower) {
             return Visibility::Absent;
         }
         let Some(parent) = unit.semantic_host.as_ref() else {
             return Visibility::Absent;
         };
-        self.host_visible_type_identity(parent, &lower, visited)
+        self.host_visible_type_identity(parent, lower, visited)
     }
 
     fn host_visible_variable_type_identity(
@@ -548,34 +566,42 @@ impl ProjectContext {
         visited: &mut HashSet<(HostUnit, Vec<u8>)>,
     ) -> Visibility<ResolvedType> {
         let lower = name.to_ascii_lowercase();
-        if self.host_is_ambiguous(host) {
-            return Visibility::Ambiguous;
-        }
         if !visited.insert((host.clone(), lower.clone())) {
             return Visibility::Absent;
         }
-        let Some(unit) = self.host_unit(host) else {
-            return Visibility::Absent;
-        };
-        if unit.variable_types.contains_key(&lower) {
-            let Some(type_name) = unit.variable_type(&lower) else {
+        let mut resolved = Visibility::Absent;
+        for unit in self.host_units(host) {
+            resolved.merge(self.unit_visible_variable_type_identity(host, unit, &lower, visited));
+        }
+        resolved
+    }
+
+    fn unit_visible_variable_type_identity(
+        &self,
+        host: &HostUnit,
+        unit: &UnitFacts,
+        lower: &[u8],
+        visited: &mut HashSet<(HostUnit, Vec<u8>)>,
+    ) -> Visibility<ResolvedType> {
+        if unit.variable_types.contains_key(lower) {
+            let Some(type_name) = unit.variable_type(lower) else {
                 return Visibility::Ambiguous;
             };
             let mut type_visited = HashSet::new();
             return self.host_visible_type_identity(host, type_name, &mut type_visited);
         }
         let mut use_visited = HashSet::new();
-        match self.imported_variable_type_identity(&unit.imports, &lower, &mut use_visited) {
+        match self.imported_variable_type_identity(&unit.imports, lower, &mut use_visited) {
             Visibility::Absent => {}
             found => return found,
         }
-        if !unit.host_access.allows(&lower) {
+        if !unit.host_access.allows(lower) {
             return Visibility::Absent;
         }
         let Some(parent) = unit.semantic_host.as_ref() else {
             return Visibility::Absent;
         };
-        self.host_visible_variable_type_identity(parent, &lower, visited)
+        self.host_visible_variable_type_identity(parent, lower, visited)
     }
 
     fn imported_symbol(
@@ -721,28 +747,36 @@ impl ProjectContext {
     ) -> Visibility<ResolvedType> {
         let module = module.to_ascii_lowercase();
         let name = name.to_ascii_lowercase();
-        if self.module_ambiguities.contains(&module) {
-            return Visibility::Ambiguous;
-        }
-        let Some(unit) = self.modules.get(&module) else {
-            return Visibility::Absent;
-        };
         if !visited.insert((module.clone(), name.clone())) {
             return Visibility::Absent;
         }
-        if unit.types.contains(&name) {
+        let mut resolved = Visibility::Absent;
+        for unit in self.module_units(&module) {
+            resolved.merge(self.unit_module_type_identity(&module, unit, &name, visited));
+        }
+        resolved
+    }
+
+    fn unit_module_type_identity(
+        &self,
+        module: &[u8],
+        unit: &UnitFacts,
+        name: &[u8],
+        visited: &mut HashSet<(Vec<u8>, Vec<u8>)>,
+    ) -> Visibility<ResolvedType> {
+        if unit.types.contains(name) {
             return unit
                 .types
-                .get(&name)
+                .get(name)
                 .map(|_| {
                     Visibility::Value(ResolvedType {
-                        origin: TypeOrigin::Module(module),
-                        name,
+                        origin: TypeOrigin::Module(module.to_vec()),
+                        name: name.to_vec(),
                     })
                 })
                 .unwrap_or(Visibility::Ambiguous);
         }
-        self.imported_type_identity(&unit.imports, &name, visited)
+        self.imported_type_identity(&unit.imports, name, visited)
     }
 
     fn module_export_type_identity(
@@ -753,16 +787,17 @@ impl ProjectContext {
     ) -> Visibility<ResolvedType> {
         let module = module.to_ascii_lowercase();
         let name = name.to_ascii_lowercase();
-        if self.module_ambiguities.contains(&module) {
-            return Visibility::Ambiguous;
-        }
-        let Some(unit) = self.modules.get(&module) else {
-            return Visibility::Absent;
-        };
-        if !unit.access.is_public(&name) {
+        if !visited.insert((module.clone(), name.clone())) {
             return Visibility::Absent;
         }
-        self.module_visible_type_identity(&module, &name, visited)
+        let mut resolved = Visibility::Absent;
+        for unit in self.module_units(&module) {
+            if !unit.access.is_public(&name) {
+                continue;
+            }
+            resolved.merge(self.unit_module_type_identity(&module, unit, &name, visited));
+        }
+        resolved
     }
 
     fn module_export_symbol(
@@ -773,26 +808,33 @@ impl ProjectContext {
     ) -> Visibility<Vec<u8>> {
         let module = module.to_ascii_lowercase();
         let name = name.to_ascii_lowercase();
-        if self.module_ambiguities.contains(&module) {
-            return Visibility::Ambiguous;
-        }
-        let Some(unit) = self.modules.get(&module) else {
-            return Visibility::Absent;
-        };
-        if !unit.access.is_public(&name) {
+        if !visited.insert((module.clone(), name.clone())) {
             return Visibility::Absent;
         }
-        if !visited.insert((module, name.clone())) {
-            return Visibility::Absent;
+        let mut resolved = Visibility::Absent;
+        for unit in self.module_units(&module) {
+            if !unit.access.is_public(&name) {
+                continue;
+            }
+            resolved.merge(self.unit_export_symbol(unit, &name, visited));
         }
-        if unit.symbols.contains(&name) {
+        resolved
+    }
+
+    fn unit_export_symbol(
+        &self,
+        unit: &UnitFacts,
+        name: &[u8],
+        visited: &mut HashSet<(Vec<u8>, Vec<u8>)>,
+    ) -> Visibility<Vec<u8>> {
+        if unit.symbols.contains(name) {
             return unit
                 .symbols
-                .get(&name)
+                .get(name)
                 .map(|spelling| Visibility::Value(spelling.to_vec()))
                 .unwrap_or(Visibility::Ambiguous);
         }
-        self.imported_symbol(&unit.imports, &name, false, visited)
+        self.imported_symbol(&unit.imports, name, false, visited)
     }
 
     fn module_export_type(
@@ -803,26 +845,33 @@ impl ProjectContext {
     ) -> Visibility<Vec<u8>> {
         let module = module.to_ascii_lowercase();
         let name = name.to_ascii_lowercase();
-        if self.module_ambiguities.contains(&module) {
-            return Visibility::Ambiguous;
-        }
-        let Some(unit) = self.modules.get(&module) else {
-            return Visibility::Absent;
-        };
-        if !unit.access.is_public(&name) {
+        if !visited.insert((module.clone(), name.clone())) {
             return Visibility::Absent;
         }
-        if !visited.insert((module, name.clone())) {
-            return Visibility::Absent;
+        let mut resolved = Visibility::Absent;
+        for unit in self.module_units(&module) {
+            if !unit.access.is_public(&name) {
+                continue;
+            }
+            resolved.merge(self.unit_export_type(unit, &name, visited));
         }
-        if unit.types.contains(&name) {
+        resolved
+    }
+
+    fn unit_export_type(
+        &self,
+        unit: &UnitFacts,
+        name: &[u8],
+        visited: &mut HashSet<(Vec<u8>, Vec<u8>)>,
+    ) -> Visibility<Vec<u8>> {
+        if unit.types.contains(name) {
             return unit
                 .types
-                .get(&name)
+                .get(name)
                 .map(|spelling| Visibility::Value(spelling.to_vec()))
                 .unwrap_or(Visibility::Ambiguous);
         }
-        self.imported_type(&unit.imports, &name, visited)
+        self.imported_type(&unit.imports, name, visited)
     }
 
     fn module_export_variable_type_identity(
@@ -833,50 +882,49 @@ impl ProjectContext {
     ) -> Visibility<ResolvedType> {
         let module = module.to_ascii_lowercase();
         let name = name.to_ascii_lowercase();
-        if self.module_ambiguities.contains(&module) {
-            return Visibility::Ambiguous;
-        }
-        let Some(unit) = self.modules.get(&module) else {
-            return Visibility::Absent;
-        };
-        if !unit.access.is_public(&name) {
-            return Visibility::Absent;
-        }
         if !visited.insert((module.clone(), name.clone())) {
             return Visibility::Absent;
         }
-        if unit.variable_types.contains_key(&name) {
-            let Some(type_name) = unit.variable_type(&name) else {
+        let mut resolved = Visibility::Absent;
+        for unit in self.module_units(&module) {
+            if !unit.access.is_public(&name) {
+                continue;
+            }
+            resolved.merge(self.unit_export_variable_type_identity(&module, unit, &name, visited));
+        }
+        resolved
+    }
+
+    fn unit_export_variable_type_identity(
+        &self,
+        module: &[u8],
+        unit: &UnitFacts,
+        name: &[u8],
+        visited: &mut HashSet<(Vec<u8>, Vec<u8>)>,
+    ) -> Visibility<ResolvedType> {
+        if unit.variable_types.contains_key(name) {
+            let Some(type_name) = unit.variable_type(name) else {
                 return Visibility::Ambiguous;
             };
             let mut type_visited = HashSet::new();
-            return self.module_visible_type_identity(&module, type_name, &mut type_visited);
+            return self.module_visible_type_identity(module, type_name, &mut type_visited);
         }
-        self.imported_variable_type_identity(&unit.imports, &name, visited)
+        self.imported_variable_type_identity(&unit.imports, name, visited)
     }
 
-    fn type_unit<'a>(
-        &'a self,
-        local: &'a FileFacts,
-        owner: &ResolvedType,
-    ) -> Option<&'a UnitFacts> {
+    fn type_units<'a>(&'a self, local: &'a FileFacts, owner: &ResolvedType) -> &'a [UnitFacts] {
         match &owner.origin {
-            TypeOrigin::Local(scope) => local.units.get(scope),
-            TypeOrigin::Module(module) => {
-                if self.module_ambiguities.contains(module) {
-                    None
-                } else {
-                    self.modules.get(module)
-                }
-            }
-            TypeOrigin::Submodule { ancestor, name } => {
-                let key = (ancestor.clone(), name.clone());
-                if self.submodule_ambiguities.contains(&key) {
-                    None
-                } else {
-                    self.submodules.get(&key)
-                }
-            }
+            TypeOrigin::Local(scope) => local
+                .units
+                .get(scope)
+                .map(std::slice::from_ref)
+                .unwrap_or_default(),
+            TypeOrigin::Module(module) => self.module_units(module),
+            TypeOrigin::Submodule { ancestor, name } => self
+                .submodules
+                .get(&(ancestor.clone(), name.clone()))
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
         }
     }
 
@@ -918,7 +966,24 @@ impl ProjectContext {
         if !visited.insert(owner.clone()) {
             return None;
         }
-        let unit = self.type_unit(local, owner)?;
+        let mut resolved = Visibility::Absent;
+        for unit in self.type_units(local, owner) {
+            resolved.merge(
+                self.member_spelling_from_unit(local, unit, owner, name, visited)
+                    .map_or(Visibility::Absent, Visibility::Value),
+            );
+        }
+        resolved.into_option()
+    }
+
+    fn member_spelling_from_unit(
+        &self,
+        local: &FileFacts,
+        unit: &UnitFacts,
+        owner: &ResolvedType,
+        name: &[u8],
+        visited: &mut HashSet<ResolvedType>,
+    ) -> Option<Vec<u8>> {
         if unit.components.contains(&owner.name, name) {
             return unit
                 .components
@@ -958,7 +1023,24 @@ impl ProjectContext {
         if !visited.insert(owner.clone()) {
             return None;
         }
-        let unit = self.type_unit(local, owner)?;
+        let mut resolved = Visibility::Absent;
+        for unit in self.type_units(local, owner) {
+            resolved.merge(
+                self.component_type_from_unit(local, unit, owner, name, visited)
+                    .map_or(Visibility::Absent, Visibility::Value),
+            );
+        }
+        resolved.into_option()
+    }
+
+    fn component_type_from_unit(
+        &self,
+        local: &FileFacts,
+        unit: &UnitFacts,
+        owner: &ResolvedType,
+        name: &[u8],
+        visited: &mut HashSet<ResolvedType>,
+    ) -> Option<ResolvedType> {
         if unit.components.contains(&owner.name, name) {
             if unit
                 .type_graph
@@ -1100,23 +1182,28 @@ where
         .map(|(path, source)| (path.to_path_buf(), source))
         .collect::<Vec<_>>();
     let mut analyzed = Vec::with_capacity(inputs.len());
+    // Index into `analyzed` rather than a second copy of the facts: only the
+    // sources some file actually INCLUDEs are ever cloned out of it.
     let mut lookup = HashMap::with_capacity(inputs.len());
     for (path, source) in &inputs {
         let facts = analyze_file_at(path, source)?;
-        lookup.insert(normalize_path(path), facts.clone());
+        lookup.insert(normalize_path(path), analyzed.len());
         analyzed.push((path.clone(), facts));
     }
 
     let mut context = ProjectContext::empty();
     for (path, facts) in &analyzed {
         let expanded = expand_includes_with(path, facts, &mut |candidate| {
-            lookup.get(&normalize_path(candidate)).cloned().or_else(|| {
-                fs::read(candidate)
-                    .ok()
-                    .and_then(|source| analyze_file_at(candidate, &source).ok())
-            })
+            lookup
+                .get(&normalize_path(candidate))
+                .map(|index| analyzed[*index].1.clone())
+                .or_else(|| {
+                    fs::read(candidate)
+                        .ok()
+                        .and_then(|source| analyze_file_at(candidate, &source).ok())
+                })
         });
-        context.absorb_expanded(path, facts, &expanded);
+        context.absorb_expanded(path, facts, expanded);
     }
     Ok(context)
 }

@@ -29,6 +29,16 @@ anonymous stdin identity are unaffected by `context_paths`. Context paths change
 not explicit formatting targets. `--project-context=<source-file>` remains the explicit form for
 stdin file identity and stale on-disk shadowing.
 
+A Fortran `INCLUDE` line in a source that project analysis reads is resolved from disk, relative to
+the directory of the including file, and its declarations are merged into the scope containing the
+`INCLUDE`. This resolution is deliberately **not** filtered by `context_paths`, `exclude`, or
+`extend-exclude`: the fragment is part of the text of a file already selected for analysis, exactly
+as a compiler would see it, so dropping it would mis-analyse that selected file rather than narrow
+the project. A fragment therefore contributes even when it lives outside every `--context-path` or
+matches an `--exclude` pattern, and an absolute include path is read as written. Only files a
+fragment is actually included by can see it; it never becomes a project-wide source in its own
+right. `--isolated` performs no project analysis at all and so resolves no includes.
+
 The policy order is repository discovery, tracked-source enumeration, `context_paths` filtering,
 then `exclude`/`extend-exclude` filtering, followed by project analysis. In Git, exclusions are
 repository-relative. Outside Git, each explicit context directory is resolved from the current

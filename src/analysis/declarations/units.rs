@@ -8,26 +8,39 @@ use std::{
     ops::Range,
 };
 
+/// What a PUBLIC/PRIVATE statement or attribute says about a name. Named
+/// rather than a bare `bool` because the two spellings read identically at
+/// a call site and only one of them is the module default.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Accessibility {
+    #[default]
+    Public,
+    Private,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct AccessFacts {
-    default_private: bool,
+    default_access: Accessibility,
     explicit_private: HashSet<Vec<u8>>,
     explicit_public: HashSet<Vec<u8>>,
 }
 
 impl AccessFacts {
-    pub(crate) fn set_default(&mut self, private: bool) {
-        self.default_private = private;
+    pub(crate) fn set_default(&mut self, access: Accessibility) {
+        self.default_access = access;
     }
 
-    pub(crate) fn mark(&mut self, name: &[u8], private: bool) {
+    pub(crate) fn mark(&mut self, name: &[u8], access: Accessibility) {
         let name = name.to_ascii_lowercase();
-        if private {
-            self.explicit_public.remove(&name);
-            self.explicit_private.insert(name);
-        } else {
-            self.explicit_private.remove(&name);
-            self.explicit_public.insert(name);
+        match access {
+            Accessibility::Private => {
+                self.explicit_public.remove(&name);
+                self.explicit_private.insert(name);
+            }
+            Accessibility::Public => {
+                self.explicit_private.remove(&name);
+                self.explicit_public.insert(name);
+            }
         }
     }
 
@@ -39,18 +52,18 @@ impl AccessFacts {
         if self.explicit_public.contains(&name) {
             return true;
         }
-        !self.default_private
+        self.default_access == Accessibility::Public
     }
 
     pub(crate) fn merge(&mut self, other: &Self) {
-        if other.default_private {
-            self.default_private = true;
+        if other.default_access == Accessibility::Private {
+            self.default_access = Accessibility::Private;
         }
         for name in &other.explicit_private {
-            self.mark(name, true);
+            self.mark(name, Accessibility::Private);
         }
         for name in &other.explicit_public {
-            self.mark(name, false);
+            self.mark(name, Accessibility::Public);
         }
     }
 }

@@ -17,6 +17,7 @@ use crate::{
     transform::{
         document::Document,
         edit::EditBuffer,
+        passes::provenance::{source_spans, spread_replacement},
         pipeline::{Changed, PassContext},
     },
 };
@@ -289,47 +290,6 @@ pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, Fo
 /// The group's joined text is concatenated from its pieces with nothing
 /// inserted between them, so intersecting a token's range with each piece
 /// recovers its provenance exactly.
-fn source_spans(
-    group: &crate::source::LogicalGroup,
-    statement: &crate::source::LogicalStatement,
-    token: &Token<'_>,
-) -> Vec<(usize, Range<usize>)> {
-    let start = statement.offset + token.span.start;
-    let end = statement.offset + token.span.end;
-    let mut spans = Vec::new();
-    for piece in &group.pieces {
-        let lo = start.max(piece.text.start);
-        let hi = end.min(piece.text.end);
-        if lo >= hi {
-            continue;
-        }
-        let origin = piece.bytes.start as usize + (lo - piece.text.start);
-        spans.push((piece.line, origin..origin + (hi - lo)));
-    }
-    spans
-}
-
-/// Distribute a canonical spelling across the spans its token occupies.
-///
-/// Every spelling this module produces names the same identifier, so the
-/// replacement is the same length as the token and can be cut at the same
-/// offsets the continuation cut the token at.  A replacement of a different
-/// length has no such correspondence and is left alone; none is produced today.
-fn spread_replacement<'a>(
-    spans: &'a [(usize, Range<usize>)],
-    token: &Token<'_>,
-    replacement: &'a [u8],
-) -> Option<impl Iterator<Item = (usize, Range<usize>, &'a [u8])> + 'a> {
-    (replacement.len() == token.text.len()).then(|| {
-        let mut taken = 0;
-        spans.iter().map(move |(line, span)| {
-            let piece = &replacement[taken..taken + span.len()];
-            taken += span.len();
-            (*line, span.clone(), piece)
-        })
-    })
-}
-
 /// Classify one identifier occurrence and return its canonical spelling.
 ///
 /// The order mirrors the normalization contract: macro names are already handled by the

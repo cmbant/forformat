@@ -16,7 +16,7 @@ pub use extract::extract;
 pub use facts::FileFacts;
 pub use index::{scoped_declared_names, DeclaredNameIndex, DeclaredSpelling};
 pub use types::TypeMaps;
-pub(crate) use units::{HostAccess, HostUnit, UnitFacts, UseAssociation, UseName};
+pub(crate) use units::{Accessibility, HostAccess, HostUnit, UnitFacts, UseAssociation, UseName};
 
 #[cfg(test)]
 mod tests;
