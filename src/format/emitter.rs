@@ -198,6 +198,19 @@ pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
         // `!$ ` prefix below.
         let prefix = conditional_compilation_prefix(original)
             .expect("conditional SourceBuffer line has a parsed sentinel prefix");
+        // Indent-only is a spelling-preserving mode. A contextual compact
+        // continuation has real Fortran body syntax (`&`) immediately after
+        // the sentinel, so inserting the canonical blank would rewrite a
+        // non-leading source byte. Keep the authored compact boundary and
+        // only apply the mode's ordinary leading/trailing whitespace policy.
+        if config.mode == FormatMode::IndentOnly
+            && prefix.kind == crate::source::syntax::ConditionalPrefixKind::CompactContinuation
+        {
+            out.write_all(trim_end_horizontal(trim_start(original)))
+                .map_err(FormatError::Write)?;
+            write_newline(buf, index, out)?;
+            return Ok(());
+        }
         source = trim_start(&original[prefix.body_start..]);
     }
 

@@ -45,6 +45,33 @@ fn standalone_compact_prefix_is_not_promoted_to_conditional_code() {
 }
 
 #[test]
+fn indent_only_preserves_contextual_compact_prefix_spelling() {
+    let source = b"program p
+!$ call f( &
+!$& arg = 1)   
+end program p
+";
+    let config = FormatConfig {
+        mode: FormatMode::IndentOnly,
+        ..FormatConfig::default()
+    };
+    let output = format_source(source, &config).unwrap().bytes;
+    let text = String::from_utf8(output.clone()).unwrap();
+
+    assert!(
+        text.lines().any(|line| line == "!$& arg = 1)"),
+        "contextual compact spelling changed in indent-only:
+{text}"
+    );
+    assert!(
+        !text.lines().any(|line| line.starts_with("!$ &")),
+        "indent-only canonicalized the compact boundary:
+{text}"
+    );
+    assert_eq!(format_source(&output, &config).unwrap().bytes, output);
+}
+
+#[test]
 fn hollerith_payload_ampersand_does_not_promote_following_compact_prefix() {
     let source = b"program p
 !$ x = 1H&
