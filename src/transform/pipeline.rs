@@ -170,6 +170,11 @@ pub fn normalize(
         config,
         |document, cx| {
             let mut stage = passes::line_rules::run(document, cx)?;
+            // How a reserved OpenMP directive is spelled is canonicalization,
+            // not presentation, so it is not gated on either whitespace policy
+            // or `--continuation-markers`; see
+            // [`passes::continuations::case_openmp_directives`].
+            stage = stage.or(passes::continuations::case_openmp_directives(document, cx)?);
             if normalize_whitespace && config.style.continuation_markers {
                 stage = stage.or(passes::continuations::run(document, cx)?);
             }

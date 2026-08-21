@@ -541,7 +541,11 @@ fn lexical_switches_are_independent() {
     .unwrap();
     assert!(continuation_off.contains("x = [a, b] ! comment"));
     assert!(continuation_off.contains("if (a .and. &\n   & b) then"));
-    assert!(continuation_off.contains("!$omp parallel"));
+    // Turning continuation-marker normalization off leaves the authored `&`
+    // alone, but directive *spelling* is a separate switch and keeps working:
+    // the two used to share one pass, which made `--continuation-markers=false`
+    // silently turn `--openmp-case` off as well.
+    assert!(continuation_off.contains("!$OMP PARALLEL"));
 }
 
 #[test]

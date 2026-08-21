@@ -1,10 +1,10 @@
 use super::continuation::leading_ampersand;
 use crate::{
-    config::{FormatConfig, FormatMode},
+    config::FormatConfig,
     error::FormatError,
     source::{
         syntax::{conditional_compilation_prefix, ConditionalPrefixKind},
-        Newline, PhysicalLineKind, SourceBuffer,
+        LexState, Newline, PhysicalLineKind, SourceBuffer,
     },
 };
 use std::io::Write;
@@ -86,19 +86,19 @@ pub fn emit_line_to<B: AsRef<[u8]>, W: Write>(
     replacement: Option<&[u8]>,
     out: &mut W,
 ) -> Result<(), FormatError> {
-    let mut quote = 0u8;
-    emit_line_to_with_quote(buf, index, place, style, replacement, &mut quote, out)
+    let mut lex = LexState::default();
+    emit_line_to_with_lex(buf, index, place, style, replacement, &mut lex, out)
 }
 
 /// Emit one physical line while carrying the redundant-whitespace transform's
-/// quote state across a logical continuation group.
-pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
+/// lexical state across a logical continuation group.
+pub fn emit_line_to_with_lex<B: AsRef<[u8]>, W: Write>(
     buf: &SourceBuffer<B>,
     index: usize,
     place: LinePlacement,
     style: &EmitStyle,
     replacement: Option<&[u8]>,
-    quote: &mut u8,
+    lex: &mut LexState,
     out: &mut W,
 ) -> Result<(), FormatError> {
     let LinePlacement {
@@ -130,7 +130,7 @@ pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
             out.write_all(trim_end_horizontal(replacement))
                 .map_err(FormatError::Write)?;
         } else {
-            out.write_all(trim_end_horizontal_protected(original, *quote))
+            out.write_all(trim_end_horizontal_protected(original, *lex))
                 .map_err(FormatError::Write)?;
         }
         write_newline(buf, index, out)?;
@@ -206,7 +206,7 @@ pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
         // the sentinel, so inserting the canonical blank would rewrite a
         // non-leading source byte. Keep the authored compact boundary and
         // only apply the mode's ordinary leading/trailing whitespace policy.
-        if config.mode == FormatMode::IndentOnly
+        if !config.mode.normalizes()
             && prefix.kind == crate::source::syntax::ConditionalPrefixKind::CompactContinuation
         {
             out.write_all(trim_end_horizontal(trim_start(original)))
@@ -269,14 +269,14 @@ pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
                 out.write_all(label).map_err(FormatError::Write)?;
                 out.write_all(b" ").map_err(FormatError::Write)?;
             }
-            write_body(rest, style, quote, out)?;
+            write_body(rest, style, lex, out)?;
         } else {
             write_spaces(out, clamp_indent(target, config.max_indent))?;
-            write_body(source, style, quote, out)?;
+            write_body(source, style, lex, out)?;
         }
     } else {
         write_spaces(out, clamp_indent(target, config.max_indent))?;
-        write_body(source, style, quote, out)?;
+        write_body(source, style, lex, out)?;
     }
     write_newline(buf, index, out)
 }
@@ -284,10 +284,10 @@ pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
 fn write_body<W: Write>(
     body: &[u8],
     style: &EmitStyle,
-    quote: &mut u8,
+    lex: &mut LexState,
     out: &mut W,
 ) -> Result<(), FormatError> {
-    let body = trim_end_horizontal_protected(body, *quote);
+    let body = trim_end_horizontal_protected(body, *lex);
     if style.remred {
         // The post-layout alignment passes that would own a protected gap
         // (`declaration_separator_alignment`, `trailing_comment_alignment`)
@@ -295,10 +295,10 @@ fn write_body<W: Write>(
         // through `engine::format` without ever running them. Protecting the
         // gap there would leave it un-owned and un-collapsed, breaking the
         // byte-exact indent-only contract.
-        let alignment_runs_after = style.config.mode == FormatMode::Full;
-        crate::transform::whitespace::reduce_to_with_quote_protected(
+        let alignment_runs_after = style.config.mode.aligns_after_layout();
+        crate::transform::whitespace::reduce_to_protected(
             body,
-            quote,
+            lex,
             alignment_runs_after && style.config.align_declarations,
             alignment_runs_after && style.config.align_comments,
             out,
@@ -321,14 +321,16 @@ fn trim_end_horizontal(mut s: &[u8]) -> &[u8] {
 /// Trailing blanks are invisible presentation everywhere except inside a
 /// character literal or a Hollerith payload, where they are payload bytes:
 /// `x = 3Hab ` promises three characters and trimming the third truncates the
-/// constant. `quote` is the literal delimiter carried in from earlier physical
-/// lines of the same continuation group.
-fn trim_end_horizontal_protected(s: &[u8], quote: u8) -> &[u8] {
+/// constant. `lex` is the state carried in from earlier physical lines of the
+/// same continuation group, so a region opened on one of them is still
+/// protected here — including a Hollerith payload, whose owed byte count no
+/// bare delimiter could have carried.
+fn trim_end_horizontal_protected(s: &[u8], lex: LexState) -> &[u8] {
     let body_start = match conditional_compilation_prefix(s) {
         Some(prefix) if prefix.kind == ConditionalPrefixKind::BlankSeparated => prefix.body_start,
         _ => 0,
     };
-    let mut state = crate::source::LexState::resuming_literal(quote);
+    let mut state = lex;
     let floor = match crate::source::regions::protected_trailing_floor(&mut state, &s[body_start..])
     {
         0 => 0,

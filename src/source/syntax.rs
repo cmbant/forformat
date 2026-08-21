@@ -37,9 +37,14 @@ pub(crate) enum ConditionalPrefixKind {
 
 /// Parsed free-form conditional-compilation prefix.
 ///
-/// `body_start` always points at the first byte that belongs to the Fortran
-/// body. For a compact continuation that byte is the `&` itself, because it is
-/// real Fortran continuation syntax rather than part of the sentinel.
+/// `body_start` is the offset just past the sentinel, which is where the
+/// Fortran body *begins*, not necessarily where its first nonblank byte is:
+/// `!$  x` reports the second space, because only the first one is the
+/// sentinel's separator and the rest is the body's own leading indentation. A
+/// caller that wants the first significant byte trims from here.
+///
+/// For a compact continuation the offset lands on the `&` itself, because that
+/// is real Fortran continuation syntax rather than part of the sentinel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ConditionalPrefix {
     pub body_start: usize,

@@ -5,7 +5,7 @@
 //! it is ordinary Fortran that only the OpenMP compiler sees, so its body stays
 //! with `--keyword-case` like any other statement.
 
-use forformat::{format_source, FormatConfig, KeywordCase, StyleConfig};
+use forformat::{format_source, FormatConfig, FormatMode, KeywordCase, StyleConfig};
 
 fn config(style: StyleConfig) -> FormatConfig {
     FormatConfig {
@@ -151,6 +151,66 @@ fn conditional_code_follows_keyword_case_under_either_openmp_policy() {
             "openmp_case={openmp_case}\n{preserved}"
         );
     }
+}
+
+/// Spelling a reserved directive is canonicalization, not presentation, so it
+/// belongs to every mode that normalizes at all — canonicalize-only included,
+/// even though that mode keeps the authored spacing around the words it
+/// re-spells.
+#[test]
+fn every_normalizing_mode_applies_the_openmp_case_policy() {
+    let source = b"program p\ninteger :: i\n!$omp   Parallel Do   Private(i)\ndo i = 1, 2\nend do\n!$OmP end parallel do\nend program p\n";
+    for mode in [
+        FormatMode::Full,
+        FormatMode::NormalizeOnly,
+        FormatMode::CanonicalizeOnly,
+    ] {
+        let config = FormatConfig {
+            mode,
+            ..FormatConfig::default()
+        };
+        let text = String::from_utf8(format_source(source, &config).unwrap().bytes).unwrap();
+        assert!(text.contains("PARALLEL DO"), "{mode:?}\n{text}");
+        assert!(text.contains("PRIVATE(i)"), "{mode:?}\n{text}");
+        assert!(text.contains("!$OMP END PARALLEL DO"), "{mode:?}\n{text}");
+    }
+
+    // And the mode that normalizes nothing still normalizes nothing.
+    let config = FormatConfig {
+        mode: FormatMode::IndentOnly,
+        ..FormatConfig::default()
+    };
+    let text = String::from_utf8(format_source(source, &config).unwrap().bytes).unwrap();
+    assert!(text.contains("!$omp   Parallel Do   Private(i)"), "{text}");
+}
+
+/// Canonicalize-only re-spells the words without touching the blanks between
+/// them: the two are different questions and only one of them is this mode's.
+#[test]
+fn canonicalize_only_cases_a_directive_without_respacing_it() {
+    let config = FormatConfig {
+        mode: FormatMode::CanonicalizeOnly,
+        ..FormatConfig::default()
+    };
+    let source = b"program p\ninteger :: i\n!$omp   Parallel Do   Private(i)\nend program p\n";
+    let text = String::from_utf8(format_source(source, &config).unwrap().bytes).unwrap();
+    assert!(text.contains("!$OMP   PARALLEL DO   PRIVATE(i)"), "{text}");
+}
+
+/// The sentinel *shape* work and the directive *spelling* work used to be one
+/// pass, so turning continuation-marker normalization off turned the case
+/// policy off with it.
+#[test]
+fn the_case_policy_survives_continuation_markers_being_off() {
+    let text = format(
+        SOURCE,
+        StyleConfig {
+            continuation_markers: false,
+            ..StyleConfig::default()
+        },
+    );
+    assert!(text.contains("!$OMP PARALLEL DO PRIVATE(i)"), "{text}");
+    assert!(text.contains("!$OMP END PARALLEL DO"), "{text}");
 }
 
 #[test]

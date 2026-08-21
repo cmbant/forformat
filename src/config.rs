@@ -33,7 +33,19 @@ pub enum FormatMode {
     Full,
 }
 
+/// Each predicate below names one question the pipeline asks of the mode, and
+/// is the only place that question is answered.  Several of them currently
+/// select the same single variant, and that is deliberate rather than
+/// redundant: they mean different things, so a fifth mode would answer them
+/// differently, and a caller written as `mode == FormatMode::Full` would have
+/// silently picked whichever meaning it happened to be next to.  Ask the
+/// question, not the variant.
 impl FormatMode {
+    /// Whether the normalization pipeline runs at all.
+    ///
+    /// The mode that says no is the byte-exact findent path (I6): it goes
+    /// straight to the layout engine, needs no analysis and no project context,
+    /// and rewrites no byte that is not leading or trailing whitespace.
     pub fn normalizes(self) -> bool {
         matches!(
             self,
@@ -41,8 +53,19 @@ impl FormatMode {
         )
     }
 
+    /// Whether the layout engine chooses this mode's columns.
     pub fn lays_out(self) -> bool {
         matches!(self, FormatMode::IndentOnly | FormatMode::Full)
+    }
+
+    /// Whether the post-layout alignment passes run after the emitter.
+    ///
+    /// The whitespace reducer protects an authored gap before a `::` or a
+    /// trailing `!` only when one of those passes will afterwards decide its
+    /// real column.  Protecting it in a mode where nothing follows would leave
+    /// the gap merely un-collapsed, which is not what `--ws-remred` means.
+    pub fn aligns_after_layout(self) -> bool {
+        matches!(self, FormatMode::Full)
     }
 
     /// Whether presentation whitespace belongs to the formatter in this mode.

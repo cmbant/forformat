@@ -7,7 +7,6 @@
 use crate::{
     analysis::{analyze_file, FileFacts, ProjectContext},
     cli::{ContextPath, Invocation},
-    config::FormatMode,
     error::FormatError,
     format_source,
     source::SourceForm,
@@ -430,7 +429,7 @@ fn format_one(
     context: &ProjectContext,
     config: &crate::config::FormatConfig,
 ) -> Result<FormatResult, WorkflowError> {
-    let result = if config.mode == FormatMode::IndentOnly {
+    let result = if !config.mode.normalizes() {
         format_source(&source.bytes, config)?
     } else {
         crate::format::full::format_with_context_and_local(
@@ -1209,7 +1208,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
             write_all_stdout(source)?;
             return Ok(0);
         }
-        if invocation.config.mode == FormatMode::IndentOnly {
+        if !invocation.config.mode.normalizes() {
             let formatted = format_source(source, &invocation.config)?;
             let mut declines = DeclineReporter::default();
             declines.report(&formatted.meta, None, root.as_deref());
@@ -1381,7 +1380,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         .collect();
 
     let mut analysis_needed = vec![false; loaded.len()];
-    if invocation.config.mode != FormatMode::IndentOnly {
+    if invocation.config.mode.normalizes() {
         for &index in target_indices.iter().chain(project_indices.iter()) {
             analysis_needed[index] = true;
         }
@@ -1392,7 +1391,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         .filter_map(|(index, needed)| (*needed).then_some(index))
         .collect::<Vec<_>>();
     let facts = analyze_sources(&loaded, &analysis_indices)?;
-    let stdin_local = if stdin_mode && invocation.config.mode != FormatMode::IndentOnly {
+    let stdin_local = if stdin_mode && invocation.config.mode.normalizes() {
         Some(analyze_file(
             stdin_source
                 .as_deref()
@@ -1402,7 +1401,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         None
     };
 
-    let context = if invocation.isolated || invocation.config.mode == FormatMode::IndentOnly {
+    let context = if invocation.isolated || !invocation.config.mode.normalizes() {
         isolated_context(&invocation.config)
     } else {
         let stdin_project_source = project_scope
@@ -1431,7 +1430,7 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
         let source = stdin_source
             .as_deref()
             .expect("stdin mode must have read stdin");
-        let formatted = if invocation.config.mode == FormatMode::IndentOnly {
+        let formatted = if !invocation.config.mode.normalizes() {
             format_source(source, &invocation.config)?
         } else {
             crate::format::full::format_with_context_and_local(

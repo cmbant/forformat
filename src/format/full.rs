@@ -31,11 +31,12 @@ use super::{
 };
 use crate::{
     analysis::{analyze_file, scoped_declared_names, ProjectContext, ScopeTree},
-    config::{FormatConfig, FormatMode},
+    config::FormatConfig,
     error::FormatError,
     source::{
+        regions::StreamLexStates,
         syntax::{conditional_compilation_prefix, openmp_directive_prefix, SourceStream},
-        LexState, LogicalGroup, PhysicalLineKind, SourceBuffer,
+        LogicalGroup, PhysicalLineKind, SourceBuffer,
     },
     transform::{document::Document, pipeline},
     FormatMeta, FormatResult,
@@ -58,7 +59,7 @@ pub fn format_with_context(
     project: &ProjectContext,
     config: &FormatConfig,
 ) -> Result<FormatResult, FormatError> {
-    if config.mode == FormatMode::IndentOnly {
+    if !config.mode.normalizes() {
         return engine::format(source, config);
     }
     let local = analyze_file(source)?;
@@ -76,7 +77,7 @@ pub(crate) fn format_with_context_and_local(
     local: &crate::analysis::FileFacts,
     config: &FormatConfig,
 ) -> Result<FormatResult, FormatError> {
-    if config.mode == FormatMode::IndentOnly {
+    if !config.mode.normalizes() {
         return engine::format(source, config);
     }
     let (document, meta) = format_document_with_context_and_local(source, project, local, config)?;
@@ -93,7 +94,7 @@ pub(crate) fn format_to_with_context<W: std::io::Write>(
     config: &FormatConfig,
     out: &mut W,
 ) -> Result<FormatMeta, FormatError> {
-    if config.mode == FormatMode::IndentOnly {
+    if !config.mode.normalizes() {
         return engine::format_to(source, config, out);
     }
     let local = analyze_file(source)?;
@@ -268,22 +269,55 @@ fn reflow_with_context_inner(
     // rather than re-deriving them keeps labels, OpenMP sentinels and
     // `--align-paren` in agreement with the pass that will actually place the
     // text; the engine emits one line per physical line.
-    //
-    // The authored document laid out, kept for the sentinel reflow path, which
-    // asks about the group's *authored* lines and so needs a measurement that
-    // does not advance with the rounds.  Statements are asked about the round's
-    // own layout instead; see `needs_reflow`.
-    let mut unwrapped =
-        Document::from_bytes(&engine::format(&document.to_lf_bytes(), config)?.bytes);
-    crate::transform::passes::layout_post::declaration_separator_alignment(&mut unwrapped, config)?;
-    crate::transform::passes::layout_post::trailing_comment_alignment(&mut unwrapped, config)?;
-    let unwrapped_width = |line: usize| unwrapped.lines.get(line).map_or(0, |text| text.len());
 
     let mut spans: Vec<std::ops::Range<usize>> = analysis
         .groups
         .iter()
         .map(|group| group.lines.clone())
         .collect();
+    // Which groups take the directive path rather than the statement path.
+    // Asked once, and asked before `unwrapped` is built, because it is also the
+    // answer to whether `unwrapped` is needed at all.
+    let sentinel: Vec<bool> = analysis
+        .groups
+        .iter()
+        .map(|group| prepare_sentinel_reflow(document, &analysis.buffer, group).is_some())
+        .collect();
+
+    // The authored document laid out, kept for the sentinel reflow path, which
+    // asks about the group's *authored* lines and so needs a measurement that
+    // does not advance with the rounds.  Statements are asked about the round's
+    // own layout instead; see `needs_reflow`.
+    //
+    // It costs a whole engine pass plus two post-layout passes, and the great
+    // majority of files contain no directive at all, so it is built only when
+    // some group will actually ask for it.
+    let unwrapped = sentinel
+        .iter()
+        .any(|sentinel| *sentinel)
+        .then(|| -> Result<Document, FormatError> {
+            let mut unwrapped =
+                Document::from_bytes(&engine::format(&document.to_lf_bytes(), config)?.bytes);
+            crate::transform::passes::layout_post::declaration_separator_alignment(
+                &mut unwrapped,
+                config,
+            )?;
+            crate::transform::passes::layout_post::trailing_comment_alignment(
+                &mut unwrapped,
+                config,
+            )?;
+            Ok(unwrapped)
+        })
+        .transpose()?;
+    // Only the sentinel path reads this, and `unwrapped` is `Some` exactly when
+    // that path is reachable, so the fallback is unreachable rather than a
+    // silent zero-width answer.
+    let unwrapped_width = |line: usize| {
+        unwrapped
+            .as_ref()
+            .map_or(0, |unwrapped| unwrapped.lines.get(line).map_or(0, Vec::len))
+    };
+
     // Which groups the discovery below is even allowed to flag: the rest reach
     // `emit_group` only to be copied, so flagging them would claim progress
     // that no round can act on.  None of these conditions depends on the
@@ -292,7 +326,8 @@ fn reflow_with_context_inner(
         .groups
         .iter()
         .zip(&plans)
-        .map(|(group, plan)| {
+        .zip(&sentinel)
+        .map(|((group, plan), sentinel)| {
             // A group `--refactor-end` rewrites is never wrapped. The engine
             // emits the replacement in place of the *first* physical line's
             // body, trailing `&` and all, so a break chosen here would be
@@ -304,7 +339,7 @@ fn reflow_with_context_inner(
                     replacement: None,
                     ..
                 }
-            ) && prepare_sentinel_reflow(document, &analysis.buffer, group).is_none()
+            ) && !sentinel
                 && eligible(&analysis.buffer, group)
                 && group.statements.len() == 1
         })
@@ -328,6 +363,7 @@ fn reflow_with_context_inner(
     let mut needs_reflow = vec![false; analysis.groups.len()];
     let mut measured = document.to_lf_bytes();
     let mut emitted: Option<(Vec<Vec<u8>>, ReflowResult)> = None;
+    let mut converged = false;
 
     for _ in 0..MAX_REFLOW_ROUNDS {
         // What the `::` run will *be*, on the other hand, is a property of the
@@ -634,6 +670,7 @@ fn reflow_with_context_inner(
             .as_ref()
             .is_some_and(|(previous, _)| *previous == lines)
         {
+            converged = true;
             break;
         }
         let mut probe = document.clone();
@@ -643,41 +680,42 @@ fn reflow_with_context_inner(
         emitted = Some((lines, declined));
     }
 
+    // Exhausting the rounds means the last round still disagreed with the one
+    // before it, so the emitted layout is not known to be a fixed point and I1
+    // may not hold for this file. The sticky `needs_reflow` argument above says
+    // that cannot happen; this is where that argument is checked rather than
+    // assumed. A release build still emits the last round's definite layout —
+    // a formatter that looped or refused would be worse than one that is merely
+    // not idempotent — but a debug build, and so every test and every fuzz
+    // corpus run, turns the silence into a failure.
+    debug_assert!(
+        converged,
+        "wrapping did not converge in {MAX_REFLOW_ROUNDS} rounds; the output may not be a fixed point (I1)"
+    );
     let (lines, declined) = emitted.expect("the loop runs at least one round");
     document.set_lines(lines);
     Ok(declined)
 }
 
-#[derive(Default)]
-struct CommentLexStreams {
-    ordinary: LexState,
-    conditional: LexState,
-}
-
-impl CommentLexStreams {
-    fn select_mut(&mut self, stream: SourceStream) -> &mut LexState {
-        match stream {
-            SourceStream::Ordinary => &mut self.ordinary,
-            SourceStream::Conditional => &mut self.conditional,
-        }
+/// Find an inline comment in one physical line while keeping conditional and
+/// ordinary protected regions independent. The returned offset is in the
+/// original physical line, not the sentinel-stripped body.
+fn stream_comment_start(
+    streams: &mut StreamLexStates,
+    line: &[u8],
+    stream: SourceStream,
+) -> Option<usize> {
+    let prefix = stream
+        .is_conditional()
+        .then(|| conditional_compilation_prefix(line))
+        .flatten();
+    let body_start = prefix.map_or(0, |prefix| prefix.body_start);
+    let body = &line[body_start..];
+    let lex = streams.select_mut(stream);
+    if !crate::source::regions::resumes_protected_region(lex, body) {
+        return None;
     }
-
-    /// Find an inline comment in one physical line while keeping conditional
-    /// and ordinary protected regions independent. The returned offset is in
-    /// the original physical line, not the sentinel-stripped body.
-    fn comment_start(&mut self, line: &[u8], stream: SourceStream) -> Option<usize> {
-        let prefix = stream
-            .is_conditional()
-            .then(|| conditional_compilation_prefix(line))
-            .flatten();
-        let body_start = prefix.map_or(0, |prefix| prefix.body_start);
-        let body = &line[body_start..];
-        let lex = self.select_mut(stream);
-        if lex.in_literal() && !body.trim_ascii_start().starts_with(b"&") {
-            return None;
-        }
-        crate::source::regions::line_comment_start(lex, body).map(|start| body_start + start)
-    }
+    crate::source::regions::line_comment_start(lex, body).map(|start| body_start + start)
 }
 
 /// Return the final inline comment, if there is exactly one and it is on the
@@ -692,20 +730,11 @@ fn detach_final_inline_comment<B: AsRef<[u8]>>(
     // One lexical state per source stream: a `!` in a continued literal is
     // protected independently of conditional-compilation lines interleaved in
     // the other stream.
-    let mut streams = CommentLexStreams::default();
+    let mut streams = StreamLexStates::default();
     let mut comments = Vec::new();
     for index in group.lines.clone() {
         let line = &document.lines[index];
-        let stream = if buffer
-            .lines
-            .get(index)
-            .is_some_and(|line| line.is_conditional_compilation())
-        {
-            SourceStream::Conditional
-        } else {
-            SourceStream::Ordinary
-        };
-        if let Some(start) = streams.comment_start(line, stream) {
+        if let Some(start) = stream_comment_start(&mut streams, line, buffer.stream(index)) {
             comments.push((index, start));
         }
     }
@@ -1003,12 +1032,12 @@ fn body_as_emitted(
 ) -> Vec<u8> {
     if project && remred {
         let mut reduced = Vec::with_capacity(body.len());
-        let mut quote = 0;
+        let mut lex = crate::source::LexState::default();
         crate::transform::whitespace::reduce_line_into_protected(
             &body,
-            &mut quote,
-            config.mode == FormatMode::Full && config.align_declarations,
-            config.mode == FormatMode::Full && config.align_comments,
+            &mut lex,
+            config.mode.aligns_after_layout() && config.align_declarations,
+            config.mode.aligns_after_layout() && config.align_comments,
             &mut |byte| reduced.push(byte),
         );
         body = reduced;
@@ -1031,21 +1060,12 @@ fn copy_group_without_final_comment<B: AsRef<[u8]>>(
     lines: &mut Vec<Vec<u8>>,
 ) {
     let final_line = group.lines.end.saturating_sub(1);
-    let mut streams = CommentLexStreams::default();
+    let mut streams = StreamLexStates::default();
     for index in group.lines.clone() {
         let Some(line) = document.lines.get(index) else {
             continue;
         };
-        let stream = if buffer
-            .lines
-            .get(index)
-            .is_some_and(|line| line.is_conditional_compilation())
-        {
-            SourceStream::Conditional
-        } else {
-            SourceStream::Ordinary
-        };
-        let comment = streams.comment_start(line, stream);
+        let comment = stream_comment_start(&mut streams, line, buffer.stream(index));
         if index == final_line {
             if let Some(comment) = comment {
                 lines.push(line[..comment].trim_ascii_end().to_vec());

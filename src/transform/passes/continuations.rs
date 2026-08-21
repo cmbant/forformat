@@ -17,9 +17,62 @@ use crate::{
 };
 
 /// Step 12-13 driver.
+///
+/// Directive *casing* is deliberately not here: see
+/// [`case_openmp_directives`], which the pipeline runs separately because it is
+/// canonicalization rather than whitespace policy.
 pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
     let changed = normalize_continuations(document, cx)?;
     Ok(changed.or(normalize_openmp_continuation_sentinels(document, cx)?))
+}
+
+/// Spell reserved OpenMP directives — the sentinel word and the directive words
+/// after it — according to `--openmp-case`, touching nothing else on the line.
+///
+/// This is separate from the sentinel *shape* normalization in
+/// [`normalize_openmp_continuation_sentinels`] because the two answer different
+/// questions and are reached by different modes. Repeating a sentinel across a
+/// continuation, removing a body-leading `&` and inserting the canonical blank
+/// after the sentinel are all presentation: they belong to whitespace and
+/// continuation-marker policy, and canonicalize-only does not run them. How a
+/// reserved word is *spelled* is not presentation — it is exactly what
+/// canonicalization means — so it runs in every normalizing mode, and it does
+/// not stop because `--continuation-markers=false` turned the other pass off.
+///
+/// `!$ ` conditional-compilation lines are ordinary Fortran and are not reached
+/// here at all: `openmp_directive_prefix` answers `None` for them, so their
+/// keywords stay with `--keyword-case` like any other statement's.
+pub fn case_openmp_directives(
+    document: &mut Document,
+    cx: &PassContext,
+) -> Result<Changed, FormatError> {
+    let mut changed = Changed::No;
+    let mut updated = document.lines.clone();
+    for line in &mut updated {
+        let Some(prefix) = openmp_directive_prefix(line) else {
+            continue;
+        };
+        let indent_end = line
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(0);
+        let mut rebuilt = line[..indent_end].to_vec();
+        rebuilt.extend_from_slice(&crate::transform::passes::line_rules::apply_case(
+            &line[indent_end..prefix.sentinel_end],
+            cx.config.style.openmp_keyword_case(),
+        ));
+        // From the sentinel's end rather than the body's start, so the blank
+        // between them is carried through untouched instead of canonicalized.
+        rebuilt.extend_from_slice(&case_openmp_body(&line[prefix.sentinel_end..], cx));
+        if rebuilt != *line {
+            *line = rebuilt;
+            changed = changed.or(Changed::Text);
+        }
+    }
+    if changed != Changed::No {
+        document.set_lines(updated);
+    }
+    Ok(changed)
 }
 
 /// Step 12: normalize continuation markers.
@@ -57,7 +110,7 @@ pub fn normalize_continuations(
     let mut state = LexState::default();
     let mut open_stream: Option<SourceStream> = None;
     for (index, original_line) in original.iter().enumerate() {
-        let stream = source_stream(cx, index);
+        let stream = cx.analysis.buffer.stream(index);
         let passed_over =
             !carries_statement(cx, index) || open_stream.is_some_and(|open| open != stream);
         let incoming_protected = state.in_literal() || state.in_hollerith();
@@ -141,13 +194,10 @@ pub fn normalize_openmp_continuation_sentinels(
             .position(|byte| !byte.is_ascii_whitespace())
             .unwrap_or(0);
         let mut rebuilt = current[..indent_end].to_vec();
-        // The sentinel word is a keyword too, so it follows a case setting
-        // rather than a hard-coded spelling. Only the separating blank after it
-        // is canonical.
-        rebuilt.extend_from_slice(&crate::transform::passes::line_rules::apply_case(
-            &current[indent_end..prefix.sentinel_end],
-            cx.config.style.openmp_keyword_case(),
-        ));
+        // The sentinel word keeps whatever spelling `case_openmp_directives`
+        // gave it; only the separating blank after it is this pass's to
+        // canonicalize.
+        rebuilt.extend_from_slice(&current[indent_end..prefix.sentinel_end]);
         rebuilt.push(b' ');
         rebuilt.extend_from_slice(&normalized_body);
         if rebuilt != current {
@@ -188,7 +238,7 @@ fn statement_neighbours(cx: &PassContext) -> (Vec<Option<usize>>, Vec<Option<usi
     let mut ordinary = None;
     let mut conditional = None;
     for (index, slot) in previous.iter_mut().enumerate() {
-        let nearest = match source_stream(cx, index) {
+        let nearest = match cx.analysis.buffer.stream(index) {
             SourceStream::Ordinary => &mut ordinary,
             SourceStream::Conditional => &mut conditional,
         };
@@ -201,7 +251,7 @@ fn statement_neighbours(cx: &PassContext) -> (Vec<Option<usize>>, Vec<Option<usi
     let mut ordinary = None;
     let mut conditional = None;
     for (index, slot) in next.iter_mut().enumerate().rev() {
-        let nearest = match source_stream(cx, index) {
+        let nearest = match cx.analysis.buffer.stream(index) {
             SourceStream::Ordinary => &mut ordinary,
             SourceStream::Conditional => &mut conditional,
         };
@@ -219,21 +269,6 @@ fn carries_statement(cx: &PassContext, index: usize) -> bool {
         .lines
         .get(index)
         .is_some_and(|line| line.kind == PhysicalLineKind::Code)
-}
-
-/// Which continuation stream a physical line belongs to.
-fn source_stream(cx: &PassContext, index: usize) -> SourceStream {
-    if cx
-        .analysis
-        .buffer
-        .lines
-        .get(index)
-        .is_some_and(|line| line.is_conditional_compilation())
-    {
-        SourceStream::Conditional
-    } else {
-        SourceStream::Ordinary
-    }
 }
 
 fn lexical_prefix_end(line: &[u8]) -> Option<usize> {
@@ -459,8 +494,8 @@ fn case_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
 }
 
 fn normalize_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
-    let cased = case_openmp_body(body, cx);
-    let spaced = crate::transform::passes::line_rules::normalize_delimiter_spacing(&cased, cx);
+    // Casing is [`case_openmp_directives`]'s, and it has already run.
+    let spaced = crate::transform::passes::line_rules::normalize_delimiter_spacing(body, cx);
     normalize_openmp_clause_separators(&spaced)
 }
 
@@ -514,7 +549,10 @@ fn normalize_openmp_clause_separators(body: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_continuations, normalize_openmp_continuation_sentinels, run};
+    use super::{
+        case_openmp_directives, normalize_continuations, normalize_openmp_continuation_sentinels,
+        run,
+    };
     use crate::{
         analysis::{FileFacts, ProjectContext, ScopeTree},
         config::{FormatConfig, FormatMode, KeywordCase},
@@ -592,7 +630,36 @@ mod tests {
         openmp_case: bool,
     ) -> Result<Changed, crate::error::FormatError> {
         let context = cx_cased(document, local, project, keyword_case, openmp_case);
-        normalize_openmp_continuation_sentinels(document, &context)
+        // The pipeline's order: spelling first, then sentinel shape. These
+        // tests assert what the two produce together, which is what a caller
+        // in full mode sees.
+        let cased = case_openmp_directives(document, &context)?;
+        Ok(cased.or(normalize_openmp_continuation_sentinels(document, &context)?))
+    }
+
+    /// The two halves are separate passes because separate modes reach them, so
+    /// neither may quietly do the other's job.
+    #[test]
+    fn the_sentinel_shape_pass_does_not_case_and_the_case_pass_does_not_respace() {
+        let source = b"!$omp Parallel Do   private(i) &\n!$omp & map(to:X)\n";
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+
+        let mut shape = Document::from_bytes(source);
+        let context = cx_cased(&shape, &local, &project, KeywordCase::Lower, true);
+        normalize_openmp_continuation_sentinels(&mut shape, &context).unwrap();
+        assert_eq!(
+            String::from_utf8(shape.to_bytes()).unwrap(),
+            "!$omp Parallel Do   private(i) &\n!$omp map(to:X)\n",
+        );
+
+        let mut cased = Document::from_bytes(source);
+        let context = cx_cased(&cased, &local, &project, KeywordCase::Lower, true);
+        case_openmp_directives(&mut cased, &context).unwrap();
+        assert_eq!(
+            String::from_utf8(cased.to_bytes()).unwrap(),
+            "!$OMP PARALLEL DO   PRIVATE(i) &\n!$OMP & MAP(TO:X)\n",
+        );
     }
 
     #[test]

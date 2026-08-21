@@ -235,6 +235,12 @@ follows `--keyword-case` like any other statement and `--openmp-case` never touc
 Both settings also apply to a directive the wrapper has split, which repeats the sentinel on each
 physical line in the spelling normalization chose.
 
+Directive spelling is canonicalization rather than presentation, so `--openmp-case` applies in every
+normalizing mode, canonicalize-only included, and is independent of `--continuation-markers`.
+Repeating the sentinel across a split directive, dropping a body-leading `&`, and the canonical blank
+after the sentinel are the presentation half, and those follow the whitespace and continuation-marker
+policy as usual.
+
 `--normalize-semicolons` keeps exactly one `;` between each adjacent pair of non-empty statements
 and drops the rest, so `;;call a();;; call b();;` becomes `call a(); call b()`. Semicolons inside
 character literals, Hollerith payloads, preprocessor lines, and `findentfix` comments are part of
@@ -275,8 +281,8 @@ or disable the transformation. `--refactor-procedures` is an accepted compatibil
 `--refactor-end`. The configuration key is `refactor_end`.
 
 END completion is also available in canonicalize-only mode. In that mode the scope-aware END text is
-replaced in place while retaining the authored leading indentation, trailing horizontal whitespace,
-comment gap, and line terminator.
+replaced in place while retaining the authored leading indentation, comment gap, and line terminator.
+Whitespace left at end of line is removed, as it is in every mode.
 
 ## Wrapping
 
