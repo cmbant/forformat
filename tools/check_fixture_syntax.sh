@@ -2,7 +2,9 @@
 # G3: compile self-contained fixtures before and after full formatting.
 set -eu
 
-BIN=${1:-${CARGO_TARGET_DIR:-target}/debug/forformat}
+. "$(dirname "$0")/target_dir.sh"
+
+BIN=${1:-$(cargo_target_dir)/debug/forformat}
 FIXTURES=${2:-tests/fixtures}
 
 if ! command -v gfortran >/dev/null 2>&1; then

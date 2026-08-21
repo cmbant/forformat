@@ -9,7 +9,9 @@
 # script exists to protect. Pass the mode explicitly.
 set -eu
 
-rust_forformat=${1:-${CARGO_TARGET_DIR:-target}/debug/forformat}
+. "$(dirname "$0")/target_dir.sh"
+
+rust_forformat=${1:-$(cargo_target_dir)/debug/forformat}
 oracle=${FINDENT_ORACLE:-/opt/findent/src/findent}
 fixture_root=${FINDENT_TEST_ROOT:-/opt/findent/test}
 

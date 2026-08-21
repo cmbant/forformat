@@ -1,8 +1,19 @@
 #!/bin/sh
 set -eu
 
-target_dir=${CARGO_TARGET_DIR:-target}
-package_dir="$target_dir/package"
+. "$(dirname "$0")/target_dir.sh"
+
+target_dir=$(cargo_target_dir)
+
+# `cargo package` verifies by compiling the unpacked crate, and with no
+# --target-dir it does that in the *workspace's* target directory. That build
+# overwrites the workspace's own fingerprint for this package and repoints it at
+# the unpacked copy's sources, which never change again: every later `cargo
+# build` here then reports "Finished ... up to date" and serves a stale binary
+# until `cargo clean -p forformat`. Give the packaging run its own directory so
+# it cannot reach the artifacts the rest of the bar is checking.
+packaging_dir="$target_dir/packaging"
+package_dir="$packaging_dir/package"
 
 # Everything version-specific comes from cargo, so a version bump is a one-line
 # change in Cargo.toml. `cargo pkgid` prints `…#forformat@<version>`.
@@ -10,7 +21,7 @@ version=$(cargo pkgid | sed 's/.*[#@]//')
 test -n "$version"
 crate="forformat-$version"
 
-cargo package --locked --allow-dirty >/dev/null
+cargo package --locked --allow-dirty --target-dir "$packaging_dir" >/dev/null
 archive="$package_dir/$crate.crate"
 test -f "$archive"
 package_root="$package_dir/$crate"
@@ -18,7 +29,7 @@ test -f "$package_root/Cargo.toml"
 package_target_dir="$package_root/target"
 first_hash=$(sha256sum "$archive" | awk '{print $1}')
 
-cargo package --locked --allow-dirty >/dev/null
+cargo package --locked --allow-dirty --target-dir "$packaging_dir" >/dev/null
 test -f "$archive"
 second_hash=$(sha256sum "$archive" | awk '{print $1}')
 test "$first_hash" = "$second_hash"

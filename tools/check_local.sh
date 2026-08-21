@@ -5,7 +5,8 @@
 set -eu
 
 cd "$(dirname "$0")/.."
-target_dir=${CARGO_TARGET_DIR:-target}
+. "$(dirname "$0")/target_dir.sh"
+target_dir=$(cargo_target_dir)
 
 echo "== cargo fmt --check =="
 cargo fmt --check
