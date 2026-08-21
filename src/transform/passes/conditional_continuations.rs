@@ -34,11 +34,8 @@ pub fn run(document: &mut Document) -> Changed {
             }
             Some(ConditionalPrefix::Compact { sentinel_end }) if continuation => {
                 line.insert(sentinel_end, b' ');
-                continuation = advance_conditional_state(
-                    &mut state,
-                    &line[sentinel_end + 1..],
-                    continuation,
-                );
+                continuation =
+                    advance_conditional_state(&mut state, &line[sentinel_end + 1..], continuation);
             }
             Some(ConditionalPrefix::Compact { .. }) | None => {}
         }
@@ -124,9 +121,8 @@ mod tests {
 
     #[test]
     fn compact_prefix_is_canonicalized_only_for_an_open_conditional_continuation() {
-        let mut document = Document::from_bytes(
-            b"!$& standalone\n!$ x = a &\n!$& b\n!$ x = 1\n!$& closed\n",
-        );
+        let mut document =
+            Document::from_bytes(b"!$& standalone\n!$ x = a &\n!$& b\n!$ x = 1\n!$& closed\n");
         assert_eq!(run(&mut document), Changed::Text);
         assert_eq!(
             document.lines,
@@ -151,8 +147,7 @@ mod tests {
 
     #[test]
     fn conditional_state_steps_over_other_streams_and_comment_lines() {
-        let mut document =
-            Document::from_bytes(b"!$ x = a &\ny = 2\n! ordinary comment\n!$& b\n");
+        let mut document = Document::from_bytes(b"!$ x = a &\ny = 2\n! ordinary comment\n!$& b\n");
         assert_eq!(run(&mut document), Changed::Text);
         assert_eq!(document.lines[3], b"!$ & b".to_vec());
     }
@@ -168,9 +163,8 @@ mod tests {
 
     #[test]
     fn malformed_literal_continuation_does_not_consume_protected_state() {
-        let mut document = Document::from_bytes(
-            b"!$ text = 'ab &\n!$ malformed without leading marker\n!$&cd'\n",
-        );
+        let mut document =
+            Document::from_bytes(b"!$ text = 'ab &\n!$ malformed without leading marker\n!$&cd'\n");
         assert_eq!(run(&mut document), Changed::Text);
         assert_eq!(
             document.lines[2],
