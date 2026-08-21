@@ -34,10 +34,7 @@ use crate::{
     config::{FormatConfig, FormatMode},
     error::FormatError,
     source::{
-        syntax::{
-            conditional_compilation_prefix, openmp_directive_prefix, OpenMpDirectiveSentinel,
-            SourceStream,
-        },
+        syntax::{conditional_compilation_prefix, openmp_directive_prefix, SourceStream},
         LexState, LogicalGroup, PhysicalLineKind, SourceBuffer,
     },
     transform::{document::Document, pipeline},
@@ -120,7 +117,12 @@ fn format_document_with_context_and_local(
     let config = resolved.as_ref().unwrap_or(config);
     pipeline::normalize(&mut document, project, local, config)?;
 
-    if config.mode == FormatMode::NormalizeOnly {
+    if !config.mode.lays_out() {
+        // The no-layout modes skip layout, but trailing whitespace is not layout:
+        // it is invisible in every mode, so every mode removes it. The rest of
+        // step 20 — the blank-line tail and the EOF newline — stays with the
+        // layout path this return is skipping.
+        crate::transform::passes::layout_post::trim_trailing_horizontal(&mut document);
         return Ok((document, FormatMeta::default()));
     }
 
@@ -745,39 +747,49 @@ fn restore_conditional_prefix(line: Vec<u8>, conditional: bool) -> Vec<u8> {
     restored
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReflowSentinel {
-    Conditional,
-    OpenMp(OpenMpDirectiveSentinel),
+/// The sentinel prefix a repeated directive line carries, in the spelling this
+/// document has already settled on, plus its one separating blank.
+///
+/// Normalization applies `--keyword-case` to the sentinel word before wrapping
+/// ever runs, so re-deriving a canonical spelling here would fight it and cost
+/// the fixed point: one run would emit `!$OMP` and the next, reading the
+/// normalized `!$omp`, would emit that. The conditional sentinel has no letters
+/// and so has only the one spelling.
+fn sentinel_spelling(line: &[u8], sentinel_end: usize) -> Vec<u8> {
+    let start = line
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t'))
+        .unwrap_or(0);
+    let mut spelling = line[start..sentinel_end].to_vec();
+    spelling.push(b' ');
+    spelling
 }
 
-impl ReflowSentinel {
-    fn canonical(self) -> &'static [u8] {
-        match self {
-            Self::Conditional => b"!$ ",
-            Self::OpenMp(sentinel) => sentinel.canonical(),
-        }
-    }
-}
-
-fn reflow_sentinel(line: &[u8], conditional: bool) -> Option<(usize, ReflowSentinel)> {
+fn reflow_sentinel(line: &[u8], conditional: bool) -> Option<(usize, Vec<u8>)> {
     if conditional {
         let prefix = conditional_compilation_prefix(line)?;
-        return Some((prefix.body_start, ReflowSentinel::Conditional));
+        return Some((prefix.body_start, b"!$ ".to_vec()));
     }
-    openmp_directive_prefix(line)
-        .map(|prefix| (prefix.body_start, ReflowSentinel::OpenMp(prefix.sentinel)))
+    openmp_directive_prefix(line).map(|prefix| {
+        (
+            prefix.body_start,
+            sentinel_spelling(line, prefix.sentinel_end),
+        )
+    })
 }
 
-fn canonical_reflow_sentinel(line: &[u8]) -> Option<(usize, ReflowSentinel)> {
+fn canonical_reflow_sentinel(line: &[u8]) -> Option<(usize, Vec<u8>)> {
     if let Some(prefix) = openmp_directive_prefix(line) {
-        return Some((prefix.body_start, ReflowSentinel::OpenMp(prefix.sentinel)));
+        return Some((
+            prefix.body_start,
+            sentinel_spelling(line, prefix.sentinel_end),
+        ));
     }
     conditional_compilation_prefix(line)
         .filter(|prefix| {
             prefix.kind == crate::source::syntax::ConditionalPrefixKind::BlankSeparated
         })
-        .map(|prefix| (prefix.body_start, ReflowSentinel::Conditional))
+        .map(|prefix| (prefix.body_start, b"!$ ".to_vec()))
 }
 
 fn prepare_sentinel_reflow<B: AsRef<[u8]>>(
@@ -814,7 +826,7 @@ fn prepare_sentinel_reflow<B: AsRef<[u8]>>(
     }
 
     let mut joined = line[..indent_end].to_vec();
-    joined.extend_from_slice(sentinel.canonical());
+    joined.extend_from_slice(&sentinel);
     joined.extend_from_slice(body);
     Some(joined)
 }
@@ -831,7 +843,7 @@ fn wrap_sentinel_line(line: &[u8], line_length: usize) -> Result<Vec<Vec<u8>>, D
     let indent = &line[..indent_end];
     let (body_start, sentinel) = canonical_reflow_sentinel(line).ok_or(Decline::NoSafeBreak)?;
     let mut prefix = indent.to_vec();
-    prefix.extend_from_slice(sentinel.canonical());
+    prefix.extend_from_slice(&sentinel);
     if line.len() <= line_length {
         return Ok(vec![line.to_vec()]);
     }
@@ -1474,12 +1486,16 @@ end module project_names\n";
 
     #[test]
     fn openmp_wrapping_repeats_reserved_sentinels_and_keeps_macro_case() {
-        for (sentinel, canonical) in [
+        // Every physical line the wrapper produces has to repeat the sentinel in
+        // the spelling normalization chose, not a canonical constant: a wrapped
+        // line that disagreed with the normalized one broke the fixed point.
+        for (authored, expected) in [
             ("!$OMP", b"!$OMP".as_slice()),
             ("!$OMPX", b"!$OMPX".as_slice()),
+            ("!$omp", b"!$OMP".as_slice()),
         ] {
             let source = format!(
-                "{sentinel} PARALLEL DO DEFAULT(SHARED), private(worker), SCHEDULE(STATIC), REDUCTION(+:total)\n"
+                "{authored} PARALLEL DO DEFAULT(SHARED), private(worker), SCHEDULE(STATIC), REDUCTION(+:total)\n"
             );
             let mut project = ProjectContext::empty();
             project.define(&[crate::config::MacroDefine {
@@ -1502,8 +1518,8 @@ end module project_names\n";
                 .filter(|line| !line.is_empty())
             {
                 assert!(
-                    line.starts_with(canonical),
-                    "invalid {sentinel} sentinel: {line:?}"
+                    line.starts_with(expected),
+                    "invalid {authored} sentinel: {line:?}"
                 );
                 assert!(line.len() <= 42, "overlong OpenMP line: {line:?}");
             }
@@ -1513,6 +1529,78 @@ end module project_names\n";
             assert!(output
                 .windows(b"private".len())
                 .any(|window| window == b"private"));
+
+            let again = format_with_context(&output, &project, &config)
+                .unwrap()
+                .bytes;
+            assert_eq!(again, output, "wrapped {authored} is not a fixed point");
+        }
+    }
+
+    /// The OpenMP case policy reaches the wrapped directive too, in both of its
+    /// settings and for `preserve` as well.
+    #[test]
+    fn wrapped_openmp_sentinels_follow_the_openmp_case_policy() {
+        for (case, openmp_case, expected) in [
+            (crate::config::KeywordCase::Lower, true, b"!$OMP".as_slice()),
+            (crate::config::KeywordCase::Upper, true, b"!$OMP".as_slice()),
+            (
+                crate::config::KeywordCase::Preserve,
+                true,
+                b"!$OMP".as_slice(),
+            ),
+            (
+                crate::config::KeywordCase::Lower,
+                false,
+                b"!$omp".as_slice(),
+            ),
+            (
+                crate::config::KeywordCase::Upper,
+                false,
+                b"!$OMP".as_slice(),
+            ),
+            (
+                crate::config::KeywordCase::Preserve,
+                false,
+                b"!$OmP".as_slice(),
+            ),
+        ] {
+            let source =
+                b"!$OmP PARALLEL DO DEFAULT(SHARED), SCHEDULE(STATIC), REDUCTION(+:total)\n";
+            let style = crate::config::StyleConfig {
+                keyword_case: case,
+                openmp_case,
+                ..crate::config::StyleConfig::default()
+            };
+            let config = FormatConfig {
+                mode: FormatMode::Full,
+                style,
+                wrap: crate::config::WrapConfig {
+                    enabled: true,
+                    line_length: 42,
+                },
+                ..FormatConfig::default()
+            };
+            let project = ProjectContext::empty();
+            let output = format_with_context(source, &project, &config)
+                .unwrap()
+                .bytes;
+            for line in output
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+            {
+                assert!(
+                    line.starts_with(expected),
+                    "{case:?}/openmp_case={openmp_case}: {line:?}"
+                );
+            }
+            let again = format_with_context(&output, &project, &config)
+                .unwrap()
+                .bytes;
+            assert_eq!(
+                again, output,
+                "{case:?}/openmp_case={openmp_case} is not a fixed point"
+            );
         }
     }
 }

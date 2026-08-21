@@ -2,7 +2,10 @@ use super::continuation::leading_ampersand;
 use crate::{
     config::{FormatConfig, FormatMode},
     error::FormatError,
-    source::{syntax::conditional_compilation_prefix, Newline, PhysicalLineKind, SourceBuffer},
+    source::{
+        syntax::{conditional_compilation_prefix, ConditionalPrefixKind},
+        Newline, PhysicalLineKind, SourceBuffer,
+    },
 };
 use std::io::Write;
 
@@ -127,7 +130,7 @@ pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
             out.write_all(trim_end_horizontal(replacement))
                 .map_err(FormatError::Write)?;
         } else {
-            out.write_all(trim_end_horizontal(original))
+            out.write_all(trim_end_horizontal_protected(original, *quote))
                 .map_err(FormatError::Write)?;
         }
         write_newline(buf, index, out)?;
@@ -284,7 +287,7 @@ fn write_body<W: Write>(
     quote: &mut u8,
     out: &mut W,
 ) -> Result<(), FormatError> {
-    let body = trim_end_horizontal(body);
+    let body = trim_end_horizontal_protected(body, *quote);
     if style.remred {
         // The post-layout alignment passes that would own a protected gap
         // (`declaration_separator_alignment`, `trailing_comment_alignment`)
@@ -311,6 +314,31 @@ fn trim_end_horizontal(mut s: &[u8]) -> &[u8] {
         s = &s[..s.len() - 1];
     }
     s
+}
+
+/// [`trim_end_horizontal`] for a line that carries code.
+///
+/// Trailing blanks are invisible presentation everywhere except inside a
+/// character literal or a Hollerith payload, where they are payload bytes:
+/// `x = 3Hab ` promises three characters and trimming the third truncates the
+/// constant. `quote` is the literal delimiter carried in from earlier physical
+/// lines of the same continuation group.
+fn trim_end_horizontal_protected(s: &[u8], quote: u8) -> &[u8] {
+    let body_start = match conditional_compilation_prefix(s) {
+        Some(prefix) if prefix.kind == ConditionalPrefixKind::BlankSeparated => prefix.body_start,
+        _ => 0,
+    };
+    let mut state = crate::source::LexState::resuming_literal(quote);
+    let floor = match crate::source::regions::protected_trailing_floor(&mut state, &s[body_start..])
+    {
+        0 => 0,
+        floor => body_start + floor,
+    };
+    let mut end = s.len();
+    while end > floor && matches!(s[end - 1], b' ' | b'\t') {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 fn write_near_openmp_comment<W: Write>(rest: &[u8], out: &mut W) -> Result<(), FormatError> {

@@ -103,7 +103,9 @@ pub fn normalize_continuations(
 /// `!$OMPX`) on each physical line with valid `&` markers, and the available
 /// width has to account for the sentinel. `--openmp=0` disables OpenMP
 /// *indentation* while directive *text* normalization stays on: two concerns,
-/// two config fields, never one flag.
+/// two config fields, never one flag. `--openmp-case` is the third: it decides
+/// the *spelling* of the sentinel and the directive words, and reaches nothing
+/// else on the line.
 ///
 /// Port target: `normalize_openmp_continuation_sentinels`,
 /// `prepare_sentinel_reflow`, `wrap_sentinel_line`.
@@ -139,7 +141,14 @@ pub fn normalize_openmp_continuation_sentinels(
             .position(|byte| !byte.is_ascii_whitespace())
             .unwrap_or(0);
         let mut rebuilt = current[..indent_end].to_vec();
-        rebuilt.extend_from_slice(prefix.sentinel.canonical());
+        // The sentinel word is a keyword too, so it follows a case setting
+        // rather than a hard-coded spelling. Only the separating blank after it
+        // is canonical.
+        rebuilt.extend_from_slice(&crate::transform::passes::line_rules::apply_case(
+            &current[indent_end..prefix.sentinel_end],
+            cx.config.style.openmp_keyword_case(),
+        ));
+        rebuilt.push(b' ');
         rebuilt.extend_from_slice(&normalized_body);
         if rebuilt != current {
             current = rebuilt;
@@ -323,7 +332,17 @@ fn openmp_body(line: &[u8]) -> Option<&[u8]> {
     openmp_directive_prefix(line).map(|prefix| &line[prefix.body_start..])
 }
 
-fn uppercase_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
+/// Spell the recognized OpenMP directive words in `body` according to
+/// [`StyleConfig::openmp_keyword_case`].
+///
+/// Directive words get their own switch rather than following `--keyword-case`
+/// because uppercase directives over lowercase Fortran is a convention in its
+/// own right; `--openmp-case=false` hands them back to `--keyword-case`, which
+/// is how `preserve` reaches them. Words this table does not recognize — clause
+/// arguments, user identifiers, macros — are never re-cased here.
+///
+/// [`StyleConfig::openmp_keyword_case`]: crate::config::StyleConfig::openmp_keyword_case
+fn case_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
     const KEYWORDS: &[&[u8]] = &[
         b"omp",
         b"do",
@@ -423,7 +442,10 @@ fn uppercase_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
                         .iter()
                         .any(|keyword| word.eq_ignore_ascii_case(keyword))
                 {
-                    result.extend(word.iter().map(u8::to_ascii_uppercase));
+                    result.extend_from_slice(&crate::transform::passes::line_rules::apply_case(
+                        word,
+                        cx.config.style.openmp_keyword_case(),
+                    ));
                 } else {
                     result.extend_from_slice(word);
                 }
@@ -437,8 +459,8 @@ fn uppercase_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
 }
 
 fn normalize_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
-    let upper = uppercase_openmp_body(body, cx);
-    let spaced = crate::transform::passes::line_rules::normalize_delimiter_spacing(&upper, cx);
+    let cased = case_openmp_body(body, cx);
+    let spaced = crate::transform::passes::line_rules::normalize_delimiter_spacing(&cased, cx);
     normalize_openmp_clause_separators(&spaced)
 }
 
@@ -495,7 +517,7 @@ mod tests {
     use super::{normalize_continuations, normalize_openmp_continuation_sentinels, run};
     use crate::{
         analysis::{FileFacts, ProjectContext, ScopeTree},
-        config::{FormatConfig, FormatMode},
+        config::{FormatConfig, FormatMode, KeywordCase},
         transform::document::Document,
         transform::pipeline::{Changed, PassContext},
     };
@@ -505,10 +527,26 @@ mod tests {
         local: &'a FileFacts,
         project: &'a ProjectContext,
     ) -> PassContext<'a> {
+        cx_cased(document, local, project, KeywordCase::Lower, true)
+    }
+
+    fn cx_cased<'a>(
+        document: &Document,
+        local: &'a FileFacts,
+        project: &'a ProjectContext,
+        keyword_case: KeywordCase,
+        openmp_case: bool,
+    ) -> PassContext<'a> {
         let analysis = Box::leak(Box::new(document.analyze().unwrap()));
         let scopes = Box::leak(Box::new(ScopeTree::build(analysis)));
+        let style = crate::config::StyleConfig {
+            keyword_case,
+            openmp_case,
+            ..crate::config::StyleConfig::default()
+        };
         let config = Box::leak(Box::new(FormatConfig {
             mode: FormatMode::Full,
+            style,
             ..FormatConfig::default()
         }));
         PassContext {
@@ -543,7 +581,17 @@ mod tests {
         local: &FileFacts,
         project: &ProjectContext,
     ) -> Result<Changed, crate::error::FormatError> {
-        let context = cx(document, local, project);
+        normalize_openmp_cased(document, local, project, KeywordCase::Lower, true)
+    }
+
+    fn normalize_openmp_cased(
+        document: &mut Document,
+        local: &FileFacts,
+        project: &ProjectContext,
+        keyword_case: KeywordCase,
+        openmp_case: bool,
+    ) -> Result<Changed, crate::error::FormatError> {
+        let context = cx_cased(document, local, project, keyword_case, openmp_case);
         normalize_openmp_continuation_sentinels(document, &context)
     }
 
@@ -743,6 +791,8 @@ mod tests {
             };
             assert!(document.lines[0].starts_with(canonical));
             assert!(document.lines[1].starts_with(canonical));
+            // `private` is a `-D` macro name here, and macro names outrank
+            // every case rule (I4) including the OpenMP one.
             assert!(!document.lines[0]
                 .windows(b"PRIVATE".len())
                 .any(|w| w == b"PRIVATE"));
@@ -752,6 +802,71 @@ mod tests {
                 Changed::No
             );
             assert_eq!(document.lines, before);
+        }
+    }
+
+    /// `openmp_case` is the near-universal "uppercase directives over lowercase
+    /// Fortran" convention, so it holds the sentinel and the directive words at
+    /// upper case whatever `--keyword-case` says.
+    #[test]
+    fn openmp_directives_are_uppercase_whatever_the_keyword_case_is() {
+        for case in [
+            KeywordCase::Lower,
+            KeywordCase::Upper,
+            KeywordCase::Preserve,
+        ] {
+            let source = b"!$omp Parallel Do private(i)\n!$OMP END parallel do\n";
+            let mut document = Document::from_bytes(source);
+            let local = FileFacts::default();
+            let project = ProjectContext::empty();
+            normalize_openmp_cased(&mut document, &local, &project, case, true).unwrap();
+            assert_eq!(
+                String::from_utf8(document.to_bytes()).unwrap(),
+                "!$OMP PARALLEL DO PRIVATE(i)\n!$OMP END PARALLEL DO\n",
+                "{case:?}"
+            );
+
+            // The spelling this pass settles on has to be a fixed point of it.
+            let before = document.lines.clone();
+            normalize_openmp_cased(&mut document, &local, &project, case, true).unwrap();
+            assert_eq!(document.lines, before, "{case:?}");
+        }
+    }
+
+    /// Turning `openmp_case` off hands directive words back to `--keyword-case`
+    /// like any other keyword. `preserve` in particular then has to leave the
+    /// authored spelling of both the sentinel and the directive words alone.
+    #[test]
+    fn openmp_directive_words_follow_the_keyword_case_setting() {
+        for (case, expected) in [
+            (
+                KeywordCase::Lower,
+                "!$omp parallel do private(i)\n!$omp end parallel do\n",
+            ),
+            (
+                KeywordCase::Upper,
+                "!$OMP PARALLEL DO PRIVATE(i)\n!$OMP END PARALLEL DO\n",
+            ),
+            (
+                KeywordCase::Preserve,
+                "!$omp Parallel Do private(i)\n!$OMP END parallel do\n",
+            ),
+        ] {
+            let source = b"!$omp Parallel Do private(i)\n!$OMP END parallel do\n";
+            let mut document = Document::from_bytes(source);
+            let local = FileFacts::default();
+            let project = ProjectContext::empty();
+            normalize_openmp_cased(&mut document, &local, &project, case, false).unwrap();
+            assert_eq!(
+                String::from_utf8(document.to_bytes()).unwrap(),
+                expected,
+                "{case:?}"
+            );
+
+            // The spelling this pass settles on has to be a fixed point of it.
+            let before = document.lines.clone();
+            normalize_openmp_cased(&mut document, &local, &project, case, false).unwrap();
+            assert_eq!(document.lines, before, "{case:?}");
         }
     }
 }

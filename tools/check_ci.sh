@@ -9,8 +9,8 @@ cd "$(dirname "$0")/.."
 echo "== cargo fmt --check =="
 cargo fmt --check
 
-echo "== cargo clippy --locked --all-targets -- -D warnings =="
-cargo clippy --locked --all-targets -- -D warnings
+echo "== cargo clippy --locked --all-targets -- -D warnings (/tmp/forformat-lint) =="
+CARGO_TARGET_DIR=/tmp/forformat-lint cargo clippy --locked --all-targets -- -D warnings
 
 echo "== cargo test --locked --all-targets =="
 cargo test --locked --all-targets

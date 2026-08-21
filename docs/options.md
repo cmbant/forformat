@@ -72,11 +72,15 @@ forformat --stdout src/module.f90 --context-path=src --context-path=modules
 | `--normalize-only` | `mode = "normalize-only"` | normalization only; no layout or wrapping | no |
 | `--canonicalize-only` | `mode = "canonicalize-only"` | canonical transformations without whitespace or layout normalization | no |
 
-Mode switches are valueless on the command line. In TOML use the single `mode` key.
+Mode switches are valueless on the command line. In TOML use the single `mode` key. Mode is one
+setting rather than a combination, so when more than one mode switch is given the last one wins
+outright and no part of an earlier mode survives.
 
 Canonicalize-only preserves indentation, incidental horizontal whitespace, comments, blank-line
-structure, continuation layout, trailing whitespace, and each physical line's original LF/CRLF
-terminator. Canonical replacements may still contain whitespace that is intrinsic to the replacement
+structure, continuation layout, and each physical line's original LF/CRLF terminator. It does not
+preserve whitespace at end of line: that is invisible rather than a formatting choice, so every mode
+removes it — see [Whitespace and alignment](#whitespace-and-alignment). Canonical replacements may
+still contain whitespace that is intrinsic to the replacement
 spelling: for example `enddo` becomes `end do`, `endmodule` becomes `end module`, and `go to` may
 become `goto`. Other enabled canonicalization transforms, such as safely redundant-parenthesis
 removal, may also change syntax without being whitespace formatting. This is therefore a promise not
@@ -195,6 +199,7 @@ canonicalization controls that do not amount to presentation-only whitespace/lay
 | CLI / TOML key | Values | Default | Effect |
 | --- | --- | --- | --- |
 | `--keyword-case` / `keyword_case` | `lower`, `upper`, `preserve` | `lower` | recognized keyword/intrinsic spelling |
+| `--openmp-case` / `openmp_case` | boolean | true | uppercase reserved OpenMP sentinels and directive words |
 | `--relational-symbols` / `relational_symbols` | boolean | true | `.eq.` etc. become symbolic operators |
 | `--array-brackets` / `array_brackets` | boolean | true | `(/ ... /)` becomes `[ ... ]` where safe |
 | `--compact-multiplicative` / `compact_multiplicative` | boolean | true | compact binary `*`, `/`, and `**` |
@@ -202,6 +207,7 @@ canonicalization controls that do not amount to presentation-only whitespace/lay
 | `--split-compound-keywords` / `split_compound_keywords` | boolean | true | `endif` becomes `end if` and similar |
 | `--strip-empty-args` / `strip_empty_args` | boolean | true | remove empty subroutine definition `()` |
 | `--remove-redundant-parens` / `remove_redundant_parens` | boolean | true | remove safely redundant nested parentheses |
+| `--normalize-semicolons` / `normalize_semicolons` | boolean | true | drop semicolons that separate no pair of statements |
 | `--remove-terminal-return` / `remove_terminal_return` | boolean | true | remove a bare terminal procedure `return` |
 | `--program-unit-spacing` / `program_unit_spacing` | boolean | true | canonical blank-line separators around program units |
 | `--max-blank-lines` / `max_blank_lines` | integer or `preserve` | `2` | cap consecutive blank lines |
@@ -213,6 +219,29 @@ canonicalization controls that do not amount to presentation-only whitespace/lay
 `--max-blank-lines=0` can remove separators inserted by `--program-unit-spacing=true`, because the
 blank-line cap runs afterward. Canonicalize-only does not perform either blank-line transformation.
 
+`--openmp-case` governs the reserved OpenMP directive sentinel and the directive words after it.
+Uppercase directives over otherwise lowercase Fortran is the near-universal convention, so it
+defaults to true and `!$omp parallel do private(i)` becomes `!$OMP PARALLEL DO PRIVATE(i)` whatever
+`--keyword-case` says. Setting `--openmp-case=false` hands directives back to `--keyword-case`,
+which is also how `--keyword-case=preserve` reaches them: pass both to leave an authored `!$OmP`
+exactly as written.
+
+Both settings draw the same boundaries. Clause arguments, user identifiers, and macro names inside a
+directive are never re-cased. Unreserved sentinels such as `!$acc` are ordinary comments to this
+formatter and keep their authored spelling under every setting. A conditional-compilation `!$ ` line
+is not a directive at all — it is ordinary Fortran that only an OpenMP compiler sees — so its body
+follows `--keyword-case` like any other statement and `--openmp-case` never touches it.
+
+Both settings also apply to a directive the wrapper has split, which repeats the sentinel on each
+physical line in the spelling normalization chose.
+
+`--normalize-semicolons` keeps exactly one `;` between each adjacent pair of non-empty statements
+and drops the rest, so `;;call a();;; call b();;` becomes `call a(); call b()`. Semicolons inside
+character literals, Hollerith payloads, preprocessor lines, and `findentfix` comments are part of
+their statement rather than separators and are never removed, and a separator that genuinely divides
+two statements across a continuation is kept. The surrounding spacing is left alone; this is a
+token-level rather than a whitespace transformation, so it stays active in canonicalize-only mode.
+
 ### Whitespace and alignment
 
 | CLI | Configuration | Default | Meaning |
@@ -220,6 +249,13 @@ blank-line cap runs afterward. Canonicalize-only does not perform either blank-l
 | `--reduce-whitespace[=N]` | `reduce_whitespace = N/BOOL` | `0` | reduce redundant body whitespace; bare means enabled |
 | `--align-declarations=BOOL` | `align_declarations = BOOL` | true | align/shrink declaration `::` runs |
 | `--align-comments=BOOL` | `align_comments = BOOL` | false | align/shrink trailing-comment runs |
+
+Whitespace at end of line is removed in **every** mode, including `--indent-only` and
+`--canonicalize-only`, and is not governed by any switch: it is invisible, so it is never the
+formatting choice that those modes exist to preserve. Interior whitespace is a different matter and
+is preserved wherever the mode preserves presentation. The one exception is whitespace that is not
+really trailing: blanks inside a character literal or a Hollerith payload are payload bytes — `3Hab `
+promises three characters — and are kept in every mode.
 
 `--reduce-whitespace` is an emission/layout control rather than a normalize-only text pass: it
 applies when the layout emitter runs (full and indent-only modes), and is inactive in normalize-only
@@ -262,7 +298,13 @@ joined form fits, or receive a completely fresh set of breaks at the active line
 Groups that the existing wrapper cannot safely reflow, including protected/comment-bearing shapes,
 retain their authored continuation layout. `--rewrap=false` restores the normal overflow-only policy.
 Rewrap never enables wrapping: if wrapping is disabled by `--no-wrap` or `--wrap=false`, in any CLI
-order or through TOML, the rewrap policy is simply inactive.
+order or through TOML, the rewrap policy is simply inactive. Turning wrapping off is a coherent
+policy within full mode, so that combination is accepted rather than rejected.
+
+Asking a mode that never wraps to rewrap is a different matter and is an error:
+`--rewrap` together with `--indent-only`, `--normalize-only`, or `--canonicalize-only` is rejected in
+any order, and so is the equivalent pair of TOML keys, rather than accepted as a flag that quietly
+does nothing. `--rewrap=false` asks for nothing and is accepted in every mode.
 
 ## Preprocessor definitions
 

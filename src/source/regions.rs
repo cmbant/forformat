@@ -74,6 +74,19 @@ impl LexState {
         Self::default()
     }
 
+    /// A state resuming inside a character literal opened on an earlier
+    /// physical line, for a caller that carries only the delimiter byte.
+    ///
+    /// The emitter is the one such caller: it threads a bare `quote` through a
+    /// continuation group rather than a whole `LexState`, so a Hollerith
+    /// payload that spans physical lines is not represented here.
+    pub fn resuming_literal(quote: u8) -> Self {
+        Self {
+            quote,
+            hollerith: 0,
+        }
+    }
+
     /// True while a character literal is still open at the end of the last
     /// scanned slice.  Wrapping must decline to reflow such a statement (I5).
     pub fn in_literal(&self) -> bool {
@@ -322,6 +335,64 @@ pub fn line_code_spans<F: FnMut(usize, &[u8])>(state: &mut LexState, line: &[u8]
             f(region.range.start, &line[region.range]);
         }
     });
+}
+
+/// The offset before which a line's trailing horizontal whitespace is payload
+/// rather than presentation.
+///
+/// Trailing blanks are normally invisible and always safe to drop, but a blank
+/// inside a character literal or a Hollerith payload is a byte of the constant:
+/// `x = 3Hab ` promises three characters, and trimming the third leaves a `3H`
+/// that no longer has three, which is a different program and not a valid one.
+/// Blanks in code, or in a comment, carry nothing at end of line.
+///
+/// Returns the end offset of the last protected region on the line, or 0 when
+/// nothing on it is protected. `state` is carried so a literal or payload
+/// continued from an earlier physical line is still protected here.
+pub fn protected_trailing_floor(state: &mut LexState, line: &[u8]) -> usize {
+    let mut floor = 0;
+    scan_group_line(state, line, |region| {
+        if matches!(
+            region.kind,
+            RegionKind::StringLiteral | RegionKind::Hollerith
+        ) {
+            floor = floor.max(region.range.end);
+        }
+    });
+    floor
+}
+
+/// One lexical state per source stream, for a caller that walks whole physical
+/// lines rather than one statement.
+///
+/// Conditional-compilation code and ordinary code carry independent
+/// protected-region state, because a literal continued in one stream steps over
+/// the other stream's physical lines without being closed by them.
+#[derive(Debug, Default)]
+pub struct StreamLexStates {
+    ordinary: LexState,
+    conditional: LexState,
+}
+
+impl StreamLexStates {
+    /// [`protected_trailing_floor`] for `line`, advancing whichever stream's
+    /// state the line belongs to.
+    ///
+    /// A compact `!$&` prefix is contextual, and this walker has no statement
+    /// context to resolve it with, so it is left to the ordinary stream exactly
+    /// as [`stepped_over_by_continuation`] leaves it.
+    pub fn protected_trailing_floor(&mut self, line: &[u8]) -> usize {
+        let body_start = match conditional_compilation_prefix(line) {
+            Some(prefix) if prefix.kind == ConditionalPrefixKind::BlankSeparated => {
+                prefix.body_start
+            }
+            _ => return protected_trailing_floor(&mut self.ordinary, line),
+        };
+        match protected_trailing_floor(&mut self.conditional, &line[body_start..]) {
+            0 => 0,
+            floor => body_start + floor,
+        }
+    }
 }
 
 /// Scan one line of a continuation group, then decide whether lexical state

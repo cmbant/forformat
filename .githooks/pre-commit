@@ -31,7 +31,9 @@ if ! cargo fmt --check; then
     exit 1
 fi
 
-if ! cargo clippy --locked --all-targets -- -D warnings; then
+# Keep Clippy's metadata-only artifacts outside the normal target directory;
+# cargo test needs codegen artifacts from that directory.
+if ! CARGO_TARGET_DIR=/tmp/forformat-lint cargo clippy --locked --all-targets -- -D warnings; then
     echo >&2
     echo "pre-commit: clippy failed. Fix the lints above and restage." >&2
     exit 1

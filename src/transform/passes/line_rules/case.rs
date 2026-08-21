@@ -38,7 +38,7 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
     let continued_entity_list = (context.continued_declaration || context.continued_separator)
         && context.open_groups.is_empty()
         && !context.continued_initializer;
-    let normalize_whitespace = cx.config.style.normalize_whitespace;
+    let normalize_whitespace = cx.config.mode.normalizes_whitespace();
     let mut edits = EditBuffer::new(line);
     if !is_format_statement(&tokens) && !context.continued_format {
         for pair in tokens.windows(2) {

@@ -15,21 +15,50 @@ pub(crate) struct ConfigArguments {
 /// `IndentOnly` is the findent 4.3.7 contract and stays byte-exact forever
 /// (I6).  `NormalizeOnly` runs the text passes without the structural layout,
 /// which is how a single normalization rule can be tested independently of
-/// structural layout.
+/// structural layout.  `CanonicalizeOnly` is `NormalizeOnly` minus presentation
+/// whitespace: token and spelling canonicalization without reflowing the
+/// author's spacing.
+///
+/// The four modes are one field on purpose.  Canonicalization used to be
+/// `NormalizeOnly` plus a separate `style.normalize_whitespace = false`, which
+/// made `--canonicalize-only --normalize-only` depend on argument order — the
+/// second option reset the whitespace half of the first.  Whether whitespace is
+/// presentation the formatter owns is a property of the mode, so it is answered
+/// by [`FormatMode::normalizes_whitespace`] and cannot disagree with `mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FormatMode {
     IndentOnly,
     NormalizeOnly,
+    CanonicalizeOnly,
     Full,
 }
 
 impl FormatMode {
     pub fn normalizes(self) -> bool {
-        matches!(self, FormatMode::NormalizeOnly | FormatMode::Full)
+        matches!(
+            self,
+            FormatMode::NormalizeOnly | FormatMode::CanonicalizeOnly | FormatMode::Full
+        )
     }
 
     pub fn lays_out(self) -> bool {
         matches!(self, FormatMode::IndentOnly | FormatMode::Full)
+    }
+
+    /// Whether presentation whitespace belongs to the formatter in this mode.
+    ///
+    /// Only canonicalization says no: it keeps the authored spacing and line
+    /// structure while still canonicalizing tokens and spellings.  This governs
+    /// interior whitespace only — whitespace at end of line is invisible rather
+    /// than a formatting choice, and every mode removes it.
+    pub fn normalizes_whitespace(self) -> bool {
+        !matches!(self, FormatMode::CanonicalizeOnly)
+    }
+
+    /// Whether the reflow wrapper runs, and therefore whether `rewrap` can mean
+    /// anything.
+    pub fn wraps(self) -> bool {
+        matches!(self, FormatMode::Full)
     }
 }
 
@@ -73,11 +102,16 @@ pub enum KeywordCase {
 /// Opinionated full-mode normalization choices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StyleConfig {
-    /// Whether presentation whitespace belongs to normalization. The
-    /// `--canonicalize-only` preset turns this off while keeping token/spelling
-    /// canonicalization active.
-    pub normalize_whitespace: bool,
     pub keyword_case: KeywordCase,
+    /// Uppercase reserved OpenMP sentinels (`!$OMP`, `!$OMPX`) and the
+    /// directive keywords that follow them, independently of `keyword_case`.
+    ///
+    /// `!$OMP PARALLEL DO` in otherwise lowercase source is the near-universal
+    /// convention, so this defaults on and a directive does not follow
+    /// `keyword_case` unless it is turned off.  It governs reserved directives
+    /// only: a conditional-compilation `!$ ` line is ordinary Fortran wearing a
+    /// sentinel, so its body follows `keyword_case` like any other statement.
+    pub openmp_case: bool,
     pub relational_symbols: bool,
     pub array_brackets: bool,
     pub compact_multiplicative: bool,
@@ -85,6 +119,8 @@ pub struct StyleConfig {
     pub split_compound_keywords: bool,
     pub strip_empty_args: bool,
     pub remove_redundant_parens: bool,
+    /// Drop semicolons that separate no pair of non-empty statements.
+    pub normalize_semicolons: bool,
     pub remove_terminal_return: bool,
     pub program_unit_spacing: bool,
     pub max_blank_lines: Option<usize>,
@@ -93,11 +129,28 @@ pub struct StyleConfig {
     pub continuation_markers: bool,
 }
 
+impl StyleConfig {
+    /// Case policy for a reserved OpenMP sentinel and its directive keywords.
+    ///
+    /// `openmp_case` is a switch rather than its own [`KeywordCase`] because
+    /// there is only one convention worth naming separately: uppercase
+    /// directives over lowercase Fortran.  Turning it off hands directives back
+    /// to `keyword_case`, which is also how `--keyword-case=preserve` reaches
+    /// them.
+    pub fn openmp_keyword_case(&self) -> KeywordCase {
+        if self.openmp_case {
+            KeywordCase::Upper
+        } else {
+            self.keyword_case
+        }
+    }
+}
+
 impl Default for StyleConfig {
     fn default() -> Self {
         Self {
-            normalize_whitespace: true,
             keyword_case: KeywordCase::Lower,
+            openmp_case: true,
             relational_symbols: true,
             array_brackets: true,
             compact_multiplicative: true,
@@ -105,6 +158,7 @@ impl Default for StyleConfig {
             split_compound_keywords: true,
             strip_empty_args: true,
             remove_redundant_parens: true,
+            normalize_semicolons: true,
             remove_terminal_return: true,
             program_unit_spacing: true,
             max_blank_lines: Some(2),
@@ -454,24 +508,54 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_mode_and_rewrap_load_from_toml() {
-        let config = config_from_text(
-            "canonicalize-rewrap",
-            "mode = 'canonicalize-only'\nrewrap = true\n",
-        );
-        assert_eq!(config.mode, FormatMode::NormalizeOnly);
-        assert!(!config.style.normalize_whitespace);
+    fn canonicalize_mode_loads_from_toml() {
+        let config = config_from_text("canonicalize", "mode = 'canonicalize-only'\n");
+        assert_eq!(config.mode, FormatMode::CanonicalizeOnly);
+        assert!(!config.mode.normalizes_whitespace());
+        assert!(config.mode.normalizes());
+        assert!(!config.mode.lays_out());
+    }
+
+    #[test]
+    fn rewrap_loads_from_toml_alongside_full_mode() {
+        let config = config_from_text("full-rewrap", "mode = 'full'\nrewrap = true\n");
+        assert_eq!(config.mode, FormatMode::Full);
         assert!(config.rewrap);
         assert!(config.wrap.enabled);
+    }
+
+    #[test]
+    fn rewrap_is_rejected_by_a_mode_that_cannot_wrap() {
+        // The wrapper is full-mode only, so a configuration that asks a
+        // no-layout mode to repack continuations is contradictory rather than
+        // silently inert.
+        let path = std::env::temp_dir().join(format!(
+            "forformat-canonicalize-rewrap-{}.toml",
+            std::process::id()
+        ));
+        fs::write(&path, "mode = 'canonicalize-only'\nrewrap = true\n").unwrap();
+        let config_args = config_args(&path, Some(&path)).unwrap();
+        let _ = fs::remove_file(&path);
+
+        let mut args = vec!["forformat".to_string(), "--no-config".to_string()];
+        args.extend(config_args.args);
+        let Err(error) = parse(args) else {
+            panic!("rewrap in a no-layout mode should be rejected");
+        };
+        assert!(
+            error.to_string().contains("--rewrap requires full mode"),
+            "{error}"
+        );
     }
 
     #[test]
     fn style_keys_load_from_the_standalone_toml_shape() {
         let config = config_from_text(
             "style-options",
-            "keyword_case = 'upper'\nrelational_symbols = false\ncompact_multiplicative = false\narray-brackets = false\njoin-goto = false\nsplit-compound-keywords = false\nstrip_empty_args = false\nremove-redundant-parens = false\nremove_terminal_return = false\nprogram-unit-spacing = false\nmax_blank_lines = 'preserve'\ndelimiter-spacing = false\ncomment_spacing = false\ncontinuation-markers = false\n",
+            "keyword_case = 'upper'\nopenmp-case = false\nrelational_symbols = false\ncompact_multiplicative = false\narray-brackets = false\njoin-goto = false\nsplit-compound-keywords = false\nstrip_empty_args = false\nremove-redundant-parens = false\nnormalize-semicolons = false\nremove_terminal_return = false\nprogram-unit-spacing = false\nmax_blank_lines = 'preserve'\ndelimiter-spacing = false\ncomment_spacing = false\ncontinuation-markers = false\n",
         );
         assert_eq!(config.style.keyword_case, KeywordCase::Upper);
+        assert!(!config.style.openmp_case);
         assert!(!config.style.relational_symbols);
         assert!(!config.style.compact_multiplicative);
         assert!(!config.style.array_brackets);
@@ -479,6 +563,7 @@ mod tests {
         assert!(!config.style.split_compound_keywords);
         assert!(!config.style.strip_empty_args);
         assert!(!config.style.remove_redundant_parens);
+        assert!(!config.style.normalize_semicolons);
         assert!(!config.style.remove_terminal_return);
         assert!(!config.style.program_unit_spacing);
         assert_eq!(config.style.max_blank_lines, None);

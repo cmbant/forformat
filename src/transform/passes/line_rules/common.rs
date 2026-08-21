@@ -449,7 +449,11 @@ fn modern_operator(token: &[u8]) -> Option<&'static [u8]> {
     }
 }
 
-fn apply_case(bytes: &[u8], case: KeywordCase) -> Vec<u8> {
+/// Spell `bytes` according to the configured keyword case.
+///
+/// `Preserve` is a real setting, not a default: a caller that rewrites keyword
+/// spelling must route it through here rather than hard-coding a case.
+pub(crate) fn apply_case(bytes: &[u8], case: KeywordCase) -> Vec<u8> {
     match case {
         KeywordCase::Lower => bytes.to_ascii_lowercase(),
         KeywordCase::Upper => bytes.to_ascii_uppercase(),

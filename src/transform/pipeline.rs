@@ -92,7 +92,7 @@ pub fn normalize(
     local: &FileFacts,
     config: &FormatConfig,
 ) -> Result<(), FormatError> {
-    let normalize_whitespace = config.style.normalize_whitespace;
+    let normalize_whitespace = config.mode.normalizes_whitespace();
     if !normalize_whitespace {
         document.preserve_original_line_endings();
     }
@@ -144,16 +144,20 @@ pub fn normalize(
     )?);
 
     // Redundant statement separators are syntax normalization rather than a
-    // wrapping policy. Run them after structural lexical cleanup, and rebuild
-    // the statement view afterwards because deleting separators changes source
-    // offsets even though it does not change the non-empty statements.
-    changed = changed.or(with_context(
-        document,
-        project,
-        local,
-        config,
-        passes::semicolons::run,
-    )?);
+    // wrapping policy, so this stays active when presentation whitespace is
+    // preserved: `x = 1;;` and `x = 1;` are spelling choices, not layout. Run
+    // it after structural lexical cleanup, and rebuild the statement view
+    // afterwards because deleting separators changes source offsets even
+    // though it does not change the non-empty statements.
+    if config.style.normalize_semicolons {
+        changed = changed.or(with_context(
+            document,
+            project,
+            local,
+            config,
+            passes::semicolons::run,
+        )?);
+    }
 
     // Step 11 consumes statement/scope data, so rebuild after the lexical,
     // parenthesis, and separator edits above. Steps 12-13 read only

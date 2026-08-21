@@ -85,19 +85,16 @@ pub(crate) fn conditional_compilation_body_start(line: &[u8]) -> Option<usize> {
 }
 
 /// Which reserved free-form OpenMP directive sentinel introduced a line.
+///
+/// This says which sentinel was parsed, never how to spell it: the sentinel
+/// word is a keyword and follows `--keyword-case`, so a caller that re-emits
+/// one copies the spelling the document already settled on rather than a
+/// canonical constant. A constant here is what previously made a wrapped
+/// directive disagree with the normalized one and cost the fixed point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpenMpDirectiveSentinel {
     Omp,
     Ompx,
-}
-
-impl OpenMpDirectiveSentinel {
-    pub(crate) fn canonical(self) -> &'static [u8] {
-        match self {
-            Self::Omp => b"!$OMP ",
-            Self::Ompx => b"!$OMPX ",
-        }
-    }
 }
 
 /// Parsed free-form OpenMP directive prefix.

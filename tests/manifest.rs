@@ -45,6 +45,7 @@ fn checked_in_manifest_covers_success_and_rejection_paths() {
         let mode = match case.mode.as_str() {
             "" | "indent-only" => forformat::FormatMode::IndentOnly,
             "normalize-only" => forformat::FormatMode::NormalizeOnly,
+            "canonicalize-only" => forformat::FormatMode::CanonicalizeOnly,
             "full" => forformat::FormatMode::Full,
             other => panic!("unknown manifest mode {other} in case {}", case.name),
         };

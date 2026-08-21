@@ -132,6 +132,16 @@ impl DraftInvocation {
                 "--query-format cannot be combined with --project-context, --context-path, or --isolated".into(),
             ));
         }
+        // Rewrap repacks continuations through the reflow wrapper, and only
+        // full mode runs it. Staying silent would make the flag a no-op that
+        // looks like it worked; `--no-wrap` is different and stays inert,
+        // because turning wrapping off inside full mode is a coherent policy
+        // rather than a request the mode cannot answer.
+        if self.config.rewrap && !self.config.mode.wraps() {
+            return Err(FormatError::InvalidOption(
+                "--rewrap requires full mode: --indent-only, --normalize-only, and --canonicalize-only do not run the wrapper".into(),
+            ));
+        }
         if (self.config.last_indent || self.config.last_usable)
             && (self.all || self.all_files || !self.paths.is_empty() || self.check || self.diff)
         {
