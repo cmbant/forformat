@@ -44,21 +44,50 @@ jobs:
 
           for path in \
             src/transform/passes/line_rules/mod.rs \
-            src/transform/passes/mod.rs \
-            src/transform/pipeline.rs
+            src/transform/passes/mod.rs
           do
             patch="/tmp/$(basename "$path").patch"
             git diff "$base" "$main" -- "$path" > "$patch"
-            if ! git apply --3way "$patch"; then
-              echo "three-way apply failed for $path" >&2
-              git status --short
-              git diff --cc -- "$path"
-              exit 1
-            fi
+            git apply --3way "$patch"
           done
+
+          pipeline=src/transform/pipeline.rs
+          git diff "$base" "$main" -- "$pipeline" > /tmp/pipeline.patch
+          set +e
+          git apply --3way /tmp/pipeline.patch
+          pipeline_status=$?
+          set -e
+          if [[ $pipeline_status -ne 0 ]]; then
+            python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/transform/pipeline.rs')
+          text = path.read_text()
+          assert text.count('<<<<<<< ours\n') == 1
+          assert text.count('=======\n') == 1
+          assert text.count('>>>>>>> theirs\n') == 1
+          start = text.index('<<<<<<< ours\n')
+          middle = text.index('=======\n', start)
+          end_marker = '>>>>>>> theirs\n'
+          end = text.index(end_marker, middle) + len(end_marker)
+          ours = text[start + len('<<<<<<< ours\n'):middle]
+          theirs = text[middle + len('=======\n'):text.index(end_marker, middle)]
+          ours = ours.replace(
+              'let mut changed = if config.style.continuation_markers {',
+              'let mut changed = if normalize_whitespace && config.style.continuation_markers {',
+          )
+          assert 'normalize_whitespace && config.style.continuation_markers' in ours
+          combined = theirs.rstrip() + '\n\n' + ours
+          text = text[:start] + combined + text[end:]
+          assert '<<<<<<<' not in text and '>>>>>>>' not in text
+          path.write_text(text)
+          PY
+            git add "$pipeline"
+          fi
 
           cargo fmt --all
           git diff --check
+          cargo check --locked
 
       - name: Commit integrated tree
         shell: bash
