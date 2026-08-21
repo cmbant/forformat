@@ -1,9 +1,10 @@
 //! Detection of fixed- versus free-form Fortran input.
 //!
-//! The raw detector is a byte-for-byte port of findent 4.3.7's
-//! `determine_fix_or_free` path. Path-aware detection keeps the filename prior
-//! but adds a conservative confirmation pass before accepting free form, so a
-//! strong fixed-form signature can veto a weak or suffix-only free verdict.
+//! The automatic detector accumulates positive source-form evidence instead of
+//! returning on the first suggestive line. Named sources also keep the filename
+//! prior that avoids false-fixed results on ordinary modern `.f90` sources.
+//! The original findent 4.3.7 `determine_fix_or_free` port remains below as a
+//! compatibility baseline for focused regression tests.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceForm {
@@ -19,106 +20,90 @@ enum PreprocessorKind {
     Other,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct FormEvidence {
+    strong_free: bool,
+    strong_fixed: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CppActivity {
+    Active,
+    Inactive,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CppFrame {
+    parent: CppActivity,
+    condition: Option<bool>,
+    in_else: bool,
+}
+
+impl CppFrame {
+    fn activity(self) -> CppActivity {
+        match self.parent {
+            CppActivity::Inactive => CppActivity::Inactive,
+            CppActivity::Unknown => CppActivity::Unknown,
+            CppActivity::Active => match self.condition {
+                Some(value) if value != self.in_else => CppActivity::Active,
+                Some(_) => CppActivity::Inactive,
+                None => CppActivity::Unknown,
+            },
+        }
+    }
+}
+
 /// Determine the source form of a named file.
 ///
-/// findent reads standard input, so its detector has only the bytes to go on
-/// and answers FIXED whenever no line is decisive — which is exactly what a
-/// free-form file that opens with a comment block and indents its first
-/// statements past column six looks like. Across the five corpus checkouts
-/// that misfires on 24 `.f90` sources (Q-E's `Modules/expint.f90` among them):
-/// findent itself reports `fixed` for every one.
-///
-/// A modern suffix therefore remains a strong free-form prior, while bare
-/// `.f`/`.F` still goes through findent's detector. Before a free verdict is
-/// returned, an allocation-free confirmation scan looks for syntax that is
-/// unambiguously or very strongly fixed-form. This catches false free results
-/// without reintroducing the known `.f90` false-fixed cases.
+/// Modern suffixes remain a strong free-form prior because content alone is
+/// genuinely ambiguous for many valid free-form files whose statements begin
+/// in column seven. Strong contradictory fixed-form evidence always wins.
 pub fn detect_path(path: &std::path::Path, source: &[u8]) -> SourceForm {
-    let ambiguous_suffix = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("f"));
-    let candidate = if ambiguous_suffix {
-        detect(source)
-    } else {
+    let evidence = collect_evidence(source);
+    if evidence.strong_fixed {
+        return SourceForm::Fixed;
+    }
+    if has_modern_free_suffix(path) || evidence.strong_free {
         SourceForm::Free
-    };
-    if candidate == SourceForm::Free && has_strong_fixed_form_evidence(source) {
-        SourceForm::Fixed
     } else {
-        candidate
+        SourceForm::Fixed
     }
 }
 
-/// Determine the source form using findent's fixed/free format detector.
+/// Determine the source form using source bytes only.
 ///
-/// Prefer [`detect_path`] whenever a filename is available; this is the raw
-/// port, for input that arrives without one.
+/// Anonymous input is formatted when the bytes contain positive free-form
+/// evidence and no strong fixed-form evidence. Genuinely ambiguous input still
+/// defaults to fixed so automatic mode cannot silently reinterpret it.
 pub fn detect(source: &[u8]) -> SourceForm {
-    let mut preprocessor = PreprocessorKind::Other;
-    let mut p_more = false;
-    let mut skip = false;
-
-    // findent examines at most 4000 physical lines and defaults to fixed at
-    // EOF. `split_inclusive` avoids inventing a final empty getline after a
-    // source that ends in a newline.
-    for raw_line in source.split_inclusive(|byte| *byte == b'\n').take(4000) {
-        let mut line = raw_line.strip_suffix(b"\n").unwrap_or(raw_line);
-        // findent's input reader removes CR from DOS line endings before the
-        // detector sees the line; its rtrim only removes spaces and tabs.
-        line = line.strip_suffix(b"\r").unwrap_or(line);
-
-        if !p_more {
-            preprocessor = preprocessor_kind(line);
-        }
-        p_more = match preprocessor {
-            PreprocessorKind::Coco | PreprocessorKind::Fypp => line.last() == Some(&b'&'),
-            PreprocessorKind::Cpp | PreprocessorKind::Other => line.last() == Some(&b'\\'),
-        };
-        if p_more {
-            skip = true;
-            continue;
-        }
-        if skip {
-            skip = false;
-            continue;
-        }
-
-        // The original guard runs before ltab2sp and treats a leading control
-        // byte (except a tab) as UNSURE. It therefore cannot decide the form.
-        if line
-            .first()
-            .is_some_and(|byte| *byte != b'\t' && *byte < 32)
-        {
-            continue;
-        }
-        let normalized = ltab2sp(line);
-        match classify_line(&normalized) {
-            Classification::Free => return SourceForm::Free,
-            Classification::Fixed => return SourceForm::Fixed,
-            Classification::Unsure => {}
-        }
+    let evidence = collect_evidence(source);
+    if evidence.strong_fixed {
+        SourceForm::Fixed
+    } else if evidence.strong_free {
+        SourceForm::Free
+    } else {
+        SourceForm::Fixed
     }
-    SourceForm::Fixed
 }
 
-/// Check a provisional free-form verdict for signatures that free form cannot
-/// plausibly explain. This is intentionally stricter than `detect`: the raw
-/// detector must stay findent-compatible, while this pass is only allowed to
-/// veto a free candidate when the evidence is strong.
-///
-/// The pass is allocation-free and examines the same maximum 4000 physical
-/// lines as the raw detector. In the common case it is a handful of byte tests
-/// per line and can exit as soon as a fixed signature is seen.
-fn has_strong_fixed_form_evidence(source: &[u8]) -> bool {
+fn has_modern_free_suffix(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| !extension.eq_ignore_ascii_case("f"))
+}
+
+fn collect_evidence(source: &[u8]) -> FormEvidence {
+    let mut evidence = FormEvidence::default();
     let mut previous_code = None;
     let mut previous_free_continuation = false;
     let mut continued_directive = None;
-    let mut cpp_conditional_depth = 0usize;
+    let mut cpp_stack = Vec::new();
 
-    for raw_line in source.split_inclusive(|byte| *byte == b'\n').take(4000) {
+    for raw_line in source.split_inclusive(|byte| *byte == b'\n') {
         let mut line = raw_line.strip_suffix(b"\n").unwrap_or(raw_line);
         line = line.strip_suffix(b"\r").unwrap_or(line);
+        line = rtrim(line);
 
         if let Some(kind) = continued_directive {
             continued_directive = preprocessor_line_continues(kind, line).then_some(kind);
@@ -126,38 +111,189 @@ fn has_strong_fixed_form_evidence(source: &[u8]) -> bool {
         }
 
         let preprocessor = preprocessor_kind(line);
-        if preprocessor != PreprocessorKind::Other {
+        let is_preprocessor_line = match preprocessor {
+            PreprocessorKind::Cpp => is_cpp_directive_line(line),
+            PreprocessorKind::Coco | PreprocessorKind::Fypp => true,
+            PreprocessorKind::Other => false,
+        };
+
+        // A source line that is already lexically incomplete without
+        // continuation makes any legal nonblank/nonzero column-6 marker strong
+        // fixed-form evidence. Actual preprocessor directives are excluded:
+        // they disappear before Fortran parsing and may be indented through
+        // column six without becoming source continuation lines.
+        if !is_preprocessor_line
+            && cpp_activity(&cpp_stack) == CppActivity::Active
+            && !previous_free_continuation
+            && previous_code.is_some_and(line_requires_continuation)
+            && fixed_continuation_signature(line, previous_code)
+        {
+            evidence.strong_fixed = true;
+        }
+
+        if is_preprocessor_line {
             if preprocessor == PreprocessorKind::Cpp {
-                update_cpp_conditional_depth(line, &mut cpp_conditional_depth);
+                update_cpp_activity(line, &mut cpp_stack);
             }
             continued_directive =
                 preprocessor_line_continues(preprocessor, line).then_some(preprocessor);
             continue;
         }
 
-        // We cannot know which CPP branch is active without evaluating macros.
-        // Evidence inside any conditional region therefore cannot safely veto
-        // a free-form candidate. Directives and skipped regions also leave the
-        // surrounding free-form continuation state untouched.
-        if cpp_conditional_depth > 0 {
+        if cpp_activity(&cpp_stack) != CppActivity::Active {
             continue;
         }
 
-        line = rtrim(line);
-        if line.is_empty() || line.first() == Some(&b'!') {
+        if line.is_empty() {
             continue;
         }
 
+        let free_comment = trim_left(line).first() == Some(&b'!');
         if !previous_free_continuation
             && (fixed_comment_signature(line) || fixed_continuation_signature(line, previous_code))
         {
-            return true;
+            evidence.strong_fixed = true;
+        }
+        if !free_comment && strong_free_form_signature(line) {
+            evidence.strong_free = true;
+        }
+
+        // Comments may appear between physical lines of a free continuation;
+        // they do not terminate or replace the surrounding continuation state.
+        if free_comment {
+            continue;
         }
 
         previous_free_continuation = free_line_continues(line);
         previous_code = Some(line);
     }
-    false
+
+    evidence
+}
+
+fn cpp_activity(stack: &[CppFrame]) -> CppActivity {
+    stack
+        .last()
+        .copied()
+        .map(CppFrame::activity)
+        .unwrap_or(CppActivity::Active)
+}
+
+fn update_cpp_activity(line: &[u8], stack: &mut Vec<CppFrame>) {
+    let Some((keyword, rest)) = cpp_directive(line) else {
+        return;
+    };
+    match keyword {
+        b"if" => {
+            let parent = cpp_activity(stack);
+            let condition = if preprocessor_line_continues(PreprocessorKind::Cpp, line) {
+                None
+            } else {
+                literal_cpp_condition(rest)
+            };
+            stack.push(CppFrame {
+                parent,
+                condition,
+                in_else: false,
+            });
+        }
+        b"ifdef" | b"ifndef" => {
+            let parent = cpp_activity(stack);
+            stack.push(CppFrame {
+                parent,
+                condition: None,
+                in_else: false,
+            });
+        }
+        b"else" => {
+            if let Some(frame) = stack.last_mut() {
+                frame.in_else = !frame.in_else;
+            }
+        }
+        b"elif" => {
+            if let Some(frame) = stack.last_mut() {
+                frame.condition = None;
+                frame.in_else = false;
+            }
+        }
+        b"endif" => {
+            let _ = stack.pop();
+        }
+        _ => {}
+    }
+}
+
+fn cpp_directive(line: &[u8]) -> Option<(&[u8], &[u8])> {
+    let line = trim_left(line);
+    let rest = line.strip_prefix(b"#")?;
+    let rest = trim_left(rest);
+    let keyword_len = rest
+        .iter()
+        .position(|byte| !byte.is_ascii_alphabetic())
+        .unwrap_or(rest.len());
+    Some((&rest[..keyword_len], trim_left(&rest[keyword_len..])))
+}
+
+fn is_cpp_directive_line(line: &[u8]) -> bool {
+    let trimmed = trim_left(line);
+    let Some(rest) = trimmed.strip_prefix(b"#") else {
+        return false;
+    };
+
+    // Away from the fixed-form continuation column, preserve the detector's
+    // historical broad `#...` treatment. Exactly in column six, however, `#`
+    // is also a legal fixed continuation marker, so only actual CPP directive
+    // spellings may bypass the fixed-form evidence scan.
+    if line.len() - trimmed.len() != 5 {
+        return true;
+    }
+
+    let rest = trim_left(rest);
+    if rest.is_empty() || rest.first().is_some_and(u8::is_ascii_digit) {
+        return true;
+    }
+    let keyword_len = rest
+        .iter()
+        .position(|byte| !byte.is_ascii_alphabetic())
+        .unwrap_or(rest.len());
+    matches!(
+        &rest[..keyword_len],
+        b"if"
+            | b"ifdef"
+            | b"ifndef"
+            | b"elif"
+            | b"elifdef"
+            | b"elifndef"
+            | b"else"
+            | b"endif"
+            | b"include"
+            | b"define"
+            | b"undef"
+            | b"line"
+            | b"error"
+            | b"warning"
+            | b"pragma"
+            | b"import"
+            | b"embed"
+            | b"assert"
+            | b"unassert"
+            | b"ident"
+            | b"sccs"
+            | b"region"
+            | b"endregion"
+    )
+}
+
+fn literal_cpp_condition(rest: &[u8]) -> Option<bool> {
+    let token_len = rest
+        .iter()
+        .position(|byte| byte.is_ascii_whitespace())
+        .unwrap_or(rest.len());
+    match &rest[..token_len] {
+        b"0" => Some(false),
+        b"1" => Some(true),
+        _ => None,
+    }
 }
 
 fn preprocessor_line_continues(kind: PreprocessorKind, line: &[u8]) -> bool {
@@ -165,24 +301,6 @@ fn preprocessor_line_continues(kind: PreprocessorKind, line: &[u8]) -> bool {
         PreprocessorKind::Cpp => line.last() == Some(&b'\\'),
         PreprocessorKind::Coco | PreprocessorKind::Fypp => line.last() == Some(&b'&'),
         PreprocessorKind::Other => false,
-    }
-}
-
-fn update_cpp_conditional_depth(line: &[u8], depth: &mut usize) {
-    let line = trim_left(line);
-    let Some(rest) = line.strip_prefix(b"#") else {
-        return;
-    };
-    let rest = trim_left(rest);
-    let keyword_len = rest
-        .iter()
-        .position(|byte| !byte.is_ascii_alphabetic())
-        .unwrap_or(rest.len());
-    let keyword = &rest[..keyword_len];
-    if keyword == b"if" || keyword == b"ifdef" || keyword == b"ifndef" {
-        *depth = depth.saturating_add(1);
-    } else if keyword == b"endif" {
-        *depth = depth.saturating_sub(1);
     }
 }
 
@@ -197,16 +315,18 @@ fn fixed_comment_signature(line: &[u8]) -> bool {
         b'*' => true,
         b'c' | b'C' | b'd' | b'D' => {
             let tail = &line[1..];
-            // Fixed-form directive sentinels such as C$OMP/D$OMP are invalid
-            // as ordinary free-form source.
             if tail.first() == Some(&b'$') {
                 return true;
             }
             let body = trim_left(tail);
-            // `C text` / `D text` is fixed-form comment/debug syntax. Keep
-            // assignments such as `C = 1` free-form by requiring an
-            // alphanumeric first character after the separating whitespace.
-            body.len() < tail.len() && body.first().is_some_and(u8::is_ascii_alphanumeric)
+            if body.len() < tail.len() && body.first().is_some_and(u8::is_ascii_alphanumeric) {
+                return true;
+            }
+            // Decorative legacy comments such as C-----, C==== and D***** are
+            // common and cannot be valid free-form statements. Require at
+            // least two punctuation characters so assignments such as C=-1
+            // and pointer assignments such as C=>D remain free lookalikes.
+            body.len() >= 2 && body.iter().all(u8::is_ascii_punctuation)
         }
         _ => false,
     }
@@ -225,28 +345,68 @@ fn fixed_continuation_signature(line: &[u8], previous_code: Option<&[u8]>) -> bo
         return false;
     }
 
-    // Column-6 `&` without a preceding free-form trailing `&` is the clearest
-    // fixed-form continuation signature.
     if marker == b'&' {
         return true;
     }
 
     if marker.is_ascii_digit() {
-        // `     1continue` cannot be a free-form statement label because a
-        // label must be separated from its statement. If whitespace follows
-        // the digit, only use it when the preceding line is lexically
-        // incomplete without continuation; that avoids rejecting valid free
-        // lines such as `     1 continue`.
         if line[6].is_ascii_whitespace() {
             return previous_code.is_some_and(line_requires_continuation);
         }
-        // A multi-digit free-form label may legitimately occupy column 6 and
-        // extend into column 7. That is ambiguous with fixed continuation
-        // layout unless the preceding line is lexically incomplete.
         if free_statement_label_extends_past_column_six(line) {
             return previous_code.is_some_and(line_requires_continuation);
         }
         return true;
+    }
+
+    // An alphabetic marker is indistinguishable from an ordinary free-form
+    // statement indented exactly five spaces ("     print ...") unless the
+    // preceding line itself proves that continuation is required. The same is
+    // true for `!`, which is an indented free-form comment.
+    if marker.is_ascii_alphabetic() || marker == b'!' {
+        return previous_code.is_some_and(line_requires_continuation);
+    }
+
+    // Other nonblank/nonzero characters cannot start a valid standalone
+    // free-form Fortran statement in column six, so they are strong fixed
+    // continuation evidence when followed by a statement field.
+    true
+}
+
+fn strong_free_form_signature(line: &[u8]) -> bool {
+    // Tabs in the fixed label/continuation field have compiler-specific legacy
+    // meanings, so do not use byte-column evidence on those lines.
+    if line.iter().take(6).any(|byte| *byte == b'\t') {
+        return false;
+    }
+
+    for index in 0..=4 {
+        if line.len() <= index {
+            break;
+        }
+        if !line[..index]
+            .iter()
+            .all(|byte| *byte == b' ' || byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let byte = line[index];
+        if (byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'%'))
+            && (index > 0 || !matches!(byte, b'c' | b'C' | b'd' | b'D'))
+        {
+            return true;
+        }
+        if byte == b'&' {
+            return true;
+        }
+    }
+
+    let code = rtrim(free_code_prefix(line));
+    if code.last() == Some(&b'&') {
+        let index = code.len() - 1;
+        if index != 5 {
+            return true;
+        }
     }
     false
 }
@@ -314,6 +474,74 @@ fn preprocessor_kind(line: &[u8]) -> PreprocessorKind {
     }
 }
 
+fn rtrim(mut line: &[u8]) -> &[u8] {
+    while line
+        .last()
+        .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
+    {
+        line = &line[..line.len() - 1];
+    }
+    line
+}
+
+fn trim_left(mut line: &[u8]) -> &[u8] {
+    while line
+        .first()
+        .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
+    {
+        line = &line[1..];
+    }
+    line
+}
+
+/// Exact findent 4.3.7 `determine_fix_or_free` compatibility baseline.
+///
+/// Automatic policy deliberately does not use its first-decisive-line/EOF
+/// result directly; retaining it makes the historical behavior independently
+/// testable.
+#[cfg(test)]
+fn detect_findent_compatible(source: &[u8]) -> SourceForm {
+    let mut preprocessor = PreprocessorKind::Other;
+    let mut p_more = false;
+    let mut skip = false;
+
+    for raw_line in source.split_inclusive(|byte| *byte == b'\n').take(4000) {
+        let mut line = raw_line.strip_suffix(b"\n").unwrap_or(raw_line);
+        line = line.strip_suffix(b"\r").unwrap_or(line);
+
+        if !p_more {
+            preprocessor = preprocessor_kind(line);
+        }
+        p_more = match preprocessor {
+            PreprocessorKind::Coco | PreprocessorKind::Fypp => line.last() == Some(&b'&'),
+            PreprocessorKind::Cpp | PreprocessorKind::Other => line.last() == Some(&b'\\'),
+        };
+        if p_more {
+            skip = true;
+            continue;
+        }
+        if skip {
+            skip = false;
+            continue;
+        }
+
+        if line
+            .first()
+            .is_some_and(|byte| *byte != b'\t' && *byte < 32)
+        {
+            continue;
+        }
+        let normalized = ltab2sp(line);
+        match classify_line(&normalized) {
+            Classification::Free => return SourceForm::Free,
+            Classification::Fixed => return SourceForm::Fixed,
+            Classification::Unsure => {}
+        }
+    }
+    SourceForm::Fixed
+}
+
+#[cfg(test)]
 fn ltab2sp(line: &[u8]) -> Vec<u8> {
     let Some(tab) = line.iter().take(6).position(|byte| *byte == b'\t') else {
         return rtrim(line).to_vec();
@@ -336,26 +564,7 @@ fn ltab2sp(line: &[u8]) -> Vec<u8> {
     rtrim(&converted).to_vec()
 }
 
-fn rtrim(mut line: &[u8]) -> &[u8] {
-    while line
-        .last()
-        .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
-    {
-        line = &line[..line.len() - 1];
-    }
-    line
-}
-
-fn trim_left(mut line: &[u8]) -> &[u8] {
-    while line
-        .first()
-        .is_some_and(|byte| *byte == b' ' || *byte == b'\t')
-    {
-        line = &line[1..];
-    }
-    line
-}
-
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Classification {
     Free,
@@ -363,10 +572,8 @@ enum Classification {
     Unsure,
 }
 
+#[cfg(test)]
 fn classify_line(line: &[u8]) -> Classification {
-    // Every flex rule here has a trailing `\\n`; because `.*` cannot cross
-    // that newline, every successful rule consumes the entire physical line.
-    // Thus all matches tie on length and first-rule order is the flex result.
     if line.starts_with(b"??") {
         return Classification::Unsure;
     }
@@ -446,6 +653,7 @@ fn classify_line(line: &[u8]) -> Classification {
     Classification::Unsure
 }
 
+#[cfg(test)]
 fn ampersand_with_trailing_blanks(line: &[u8], first: usize, last: usize) -> bool {
     line.iter().enumerate().any(|(index, byte)| {
         index >= first
@@ -457,6 +665,7 @@ fn ampersand_with_trailing_blanks(line: &[u8], first: usize, last: usize) -> boo
     })
 }
 
+#[cfg(test)]
 fn ckey(line: &[u8]) -> bool {
     [
         b"call".as_slice(),
@@ -485,17 +694,14 @@ fn ckey(line: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{detect, detect_path, SourceForm};
+    use super::{detect, detect_findent_compatible, detect_path, SourceForm};
     use std::path::Path;
 
     #[test]
-    fn modern_suffixes_default_to_free_when_layout_is_ambiguous() {
-        // Reduced from Q-E `Modules/expint.f90`: a comment block, then a
-        // statement indented past column six. Nothing in it is decisive, so
-        // findent's EOF default calls it fixed — `findent -q` agrees — and 24
-        // free-form corpus sources would be skipped if the suffix were ignored.
+    fn modern_suffixes_supply_free_evidence_when_content_is_ambiguous() {
         let ambiguous = b"!\n! Copyright\n!\n      FUNCTION EXPINT(n, x)\n      END FUNCTION\n";
         assert_eq!(detect(ambiguous), SourceForm::Fixed);
+        assert_eq!(detect_findent_compatible(ambiguous), SourceForm::Fixed);
         assert_eq!(
             detect_path(Path::new("expint.f90"), ambiguous),
             SourceForm::Free
@@ -504,7 +710,6 @@ mod tests {
             detect_path(Path::new("expint.F90"), ambiguous),
             SourceForm::Free
         );
-        // `.f`/`.F` really can be either, so those still go to the detector.
         assert_eq!(
             detect_path(Path::new("dlasrt2.f"), ambiguous),
             SourceForm::Fixed
@@ -513,62 +718,105 @@ mod tests {
             detect_path(Path::new("legacy.F"), ambiguous),
             SourceForm::Fixed
         );
-        assert_eq!(
-            detect_path(Path::new("modern.f"), b"module m\nend module m\n"),
-            SourceForm::Free
-        );
     }
 
     #[test]
-    fn free_candidate_is_confirmed_against_later_fixed_evidence() {
-        // The first line starts with a findent ckey and therefore makes the raw
-        // detector return FREE immediately, even though it is a valid fixed-form
-        // column-1 comment. The later C-comment supplies corroborating fixed
-        // evidence for the path-aware confirmation pass.
-        let source = b"CALL THIS ROUTINE ONLY ON UNIX\nC legacy implementation\n      END\n";
+    fn stdin_uses_positive_free_evidence_instead_of_findent_first_match() {
+        let source = b"! leading comment\nmodule m\ncontains\nsubroutine s\nend subroutine s\nend module m\n";
         assert_eq!(detect(source), SourceForm::Free);
+
+        let ambiguous = b"! leading comment\n      function f()\n      end function f\n";
+        assert_eq!(detect(ambiguous), SourceForm::Fixed);
+    }
+
+    #[test]
+    fn fixed_evidence_overrides_free_evidence_and_suffixes() {
+        let source = b"CALL THIS ROUTINE ONLY ON UNIX\nC legacy implementation\n      END\n";
+        assert_eq!(detect_findent_compatible(source), SourceForm::Free);
+        assert_eq!(detect(source), SourceForm::Fixed);
         assert_eq!(
-            detect_path(Path::new("legacy.f"), source),
+            detect_path(Path::new("legacy.f90"), source),
             SourceForm::Fixed
         );
     }
 
     #[test]
-    fn modern_suffix_can_be_overridden_by_strong_fixed_evidence() {
-        assert_eq!(
-            detect_path(
-                Path::new("legacy.F90"),
-                b"C legacy fixed-form comment\n      PROGRAM P\n      END\n"
-            ),
-            SourceForm::Fixed
-        );
-        assert_eq!(
-            detect_path(
-                Path::new("legacy.f90"),
-                b"      X = A +\n     &  B\n      END\n"
-            ),
-            SourceForm::Fixed
-        );
-        assert_eq!(
-            detect_path(
-                Path::new("legacy.f90"),
-                b"      X = A +\n     1  B\n      END\n"
-            ),
-            SourceForm::Fixed
-        );
-        assert_eq!(
-            detect_path(
-                Path::new("legacy.f90"),
-                b"      x = 1 +\n     12 * y\n      END\n"
-            ),
-            SourceForm::Fixed
-        );
+    fn modern_suffix_can_be_overridden_by_fixed_continuations() {
+        for source in [
+            b"      X = A +\n     &  B\n      END\n".as_slice(),
+            b"      X = A +\n     1  B\n      END\n".as_slice(),
+            b"      x = 1 +\n     12 * y\n      END\n".as_slice(),
+            b"      x = 1\n     + + y\n      END\n".as_slice(),
+        ] {
+            assert_eq!(
+                detect_path(Path::new("legacy.f90"), source),
+                SourceForm::Fixed
+            );
+        }
     }
 
     #[test]
-    fn confirmation_does_not_reject_valid_free_form_lookalikes() {
+    fn column_six_hash_is_fixed_unless_it_starts_a_cpp_directive() {
         assert_eq!(
-            detect_path(Path::new("modern.F90"), b"C = 1\ncall foo()\n"),
+            detect_path(
+                Path::new("legacy.f90"),
+                b"      x = 1\n     #+ 2\n      end\n"
+            ),
+            SourceForm::Fixed
+        );
+
+        for source in [
+            b"     #define VALUE 1\nmodule m\nend module m\n".as_slice(),
+            b"     #if 1\nmodule m\n     #endif\nend module m\n".as_slice(),
+            b"     # 1 \"source.f90\"\nmodule m\nend module m\n".as_slice(),
+        ] {
+            assert_eq!(
+                detect_path(Path::new("modern.f90"), source),
+                SourceForm::Free
+            );
+        }
+    }
+
+    #[test]
+    fn every_printable_nonblank_nonzero_column_six_marker_is_detected_when_required() {
+        for marker in 0x21u8..=0x7e {
+            if marker == b'0' {
+                continue;
+            }
+            let mut source = b"      x = 1 +\n     ".to_vec();
+            source.push(marker);
+            source.extend_from_slice(b" y\n      end\n");
+            assert_eq!(
+                detect_path(Path::new("legacy.f90"), &source),
+                SourceForm::Fixed,
+                "marker {:?}",
+                marker as char
+            );
+        }
+    }
+
+    #[test]
+    fn decorative_fixed_comments_are_strong_evidence() {
+        for banner in [
+            b"C----------------\n".as_slice(),
+            b"C================\n".as_slice(),
+            b"D****************\n".as_slice(),
+        ] {
+            let mut source = banner.to_vec();
+            source.extend_from_slice(b"      PROGRAM P\n      END\n");
+            assert_eq!(
+                detect_path(Path::new("legacy.F90"), &source),
+                SourceForm::Fixed
+            );
+        }
+        assert_eq!(detect(b"C=-1\nend\n"), SourceForm::Free);
+        assert_eq!(detect(b"C=>D\nend\n"), SourceForm::Free);
+    }
+
+    #[test]
+    fn free_form_lookalikes_remain_free() {
+        assert_eq!(
+            detect_path(Path::new("modern.F90"), b"C = 1\ncall foo()\nend\n"),
             SourceForm::Free
         );
         assert_eq!(
@@ -586,79 +834,94 @@ mod tests {
             detect_path(Path::new("modern.F90"), b"     1 continue\nend\n"),
             SourceForm::Free
         );
+        assert_eq!(detect(b"     print *, 1\nend\n"), SourceForm::Free);
     }
 
     #[test]
-    fn confirmation_accepts_free_labels_that_cross_column_six() {
+    fn free_labels_that_cross_column_six_are_not_fixed_continuations() {
         for source in [
             b"program p\n    111  call foo()\nend program p\n".as_slice(),
             b"program p\n   1011  format(i0)\nend program p\n".as_slice(),
             b"program p\n  98765  continue\nend program p\n".as_slice(),
         ] {
-            assert_eq!(
-                detect_path(Path::new("labeled.f90"), source),
-                SourceForm::Free
-            );
+            assert_eq!(detect(source), SourceForm::Free);
         }
     }
 
     #[test]
-    fn confirmation_ignores_cpp_conditional_regions() {
-        let source = b"#if 0\nC legacy fixed-form text in disabled branch\n#endif\nprogram p\nend program p\n";
-        assert_eq!(
-            detect_path(Path::new("conditional.F90"), source),
-            SourceForm::Free
-        );
+    fn cpp_literal_conditions_contribute_only_active_branch_evidence() {
+        let inactive =
+            b"#if 0\nC legacy fixed-form text in disabled branch\n#endif\nmodule m\nend module m\n";
+        assert_eq!(detect(inactive), SourceForm::Free);
 
-        let nested = b"#ifdef OUTER\n#if 1\n     & fixed-looking inactive text\n#endif\n#endif\nmodule m\nend module m\n";
-        assert_eq!(
-            detect_path(Path::new("nested.F90"), nested),
-            SourceForm::Free
-        );
+        let active =
+            b"#if 1\nC legacy fixed-form text in active branch\n#endif\nmodule m\nend module m\n";
+        assert_eq!(detect(active), SourceForm::Fixed);
+
+        let active_else = b"#if 0\nC ignored\n#else\nmodule m\n#endif\n";
+        assert_eq!(detect(active_else), SourceForm::Free);
     }
 
     #[test]
-    fn confirmation_skips_continued_preprocessor_directives() {
+    fn cpp_unknown_conditions_are_conservative_and_nest() {
+        let unknown = b"#ifdef MAYBE\nmodule m\n#else\nC legacy text\n#endif\n";
+        assert_eq!(detect(unknown), SourceForm::Fixed);
+
+        let nested = b"#if 1\n#ifdef MAYBE\nC ignored unknown branch\n#endif\nmodule m\n#endif\n";
+        assert_eq!(detect(nested), SourceForm::Free);
+    }
+
+    #[test]
+    fn continued_preprocessor_directives_are_skipped() {
         let source =
             b"#define CONT \\\n     &\nprogram p\ninteger :: x\nx = 1 CONT\n+ 2\nend program p\n";
-        assert_eq!(
-            detect_path(Path::new("macro.F90"), source),
-            SourceForm::Free
-        );
+        assert_eq!(detect(source), SourceForm::Free);
     }
 
     #[test]
-    fn fixed_comments_and_unsure_input_default_to_fixed() {
+    fn evidence_scan_is_not_limited_to_findents_first_4000_lines() {
+        let mut source = Vec::new();
+        for _ in 0..4001 {
+            source.extend_from_slice(b"! comment\n");
+        }
+        source.extend_from_slice(b"module m\nend module m\n");
+        assert_eq!(detect_findent_compatible(&source), SourceForm::Fixed);
+        assert_eq!(detect(&source), SourceForm::Free);
+    }
+
+    #[test]
+    fn ambiguous_and_fixed_only_input_stays_fixed() {
         assert_eq!(detect(b"* comment\n"), SourceForm::Fixed);
         assert_eq!(detect(b"C comment\n"), SourceForm::Fixed);
         assert_eq!(detect(b"      x = 1\n"), SourceForm::Fixed);
         assert_eq!(detect(b"! comment\n\n"), SourceForm::Fixed);
+        assert_eq!(detect(b"call foo()\n"), SourceForm::Fixed);
     }
 
     #[test]
-    fn free_form_signals_include_continuations_and_module_headers() {
-        assert_eq!(detect(b"program p\nx = 1 &\n & y\nend\n"), SourceForm::Free);
-        assert_eq!(detect(b"MODULE m\nend module m\n"), SourceForm::Free);
-    }
-
-    #[test]
-    fn control_characters_are_unsure_and_do_not_block_later_evidence() {
-        assert_eq!(detect(b"\x0c\nMODULE m\n"), SourceForm::Free);
-    }
-
-    #[test]
-    fn tab_indented_code_is_handled_by_ltab2sp() {
-        assert_eq!(detect(b"\tprogram p\n"), SourceForm::Fixed);
-    }
-
-    #[test]
-    fn preprocessor_continuations_are_skipped() {
+    fn findent_baseline_is_preserved_for_oracle_coverage() {
         assert_eq!(
-            detect(b"#if defined(X)\\\nMODULE m\n#endif\n"),
+            detect_findent_compatible(b"program p\nx = 1 &\n & y\nend\n"),
+            SourceForm::Free
+        );
+        assert_eq!(
+            detect_findent_compatible(b"MODULE m\nend module m\n"),
+            SourceForm::Free
+        );
+        assert_eq!(
+            detect_findent_compatible(b"\x0c\nMODULE m\n"),
+            SourceForm::Free
+        );
+        assert_eq!(
+            detect_findent_compatible(b"\tprogram p\n"),
             SourceForm::Fixed
         );
         assert_eq!(
-            detect(b"#if defined(X)\nMODULE m\n#endif\n"),
+            detect_findent_compatible(b"#if defined(X)\\\nMODULE m\n#endif\n"),
+            SourceForm::Fixed
+        );
+        assert_eq!(
+            detect_findent_compatible(b"#if defined(X)\nMODULE m\n#endif\n"),
             SourceForm::Free
         );
     }

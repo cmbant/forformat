@@ -19,15 +19,16 @@ The Rust release intentionally diverges from legacy findent in three ways:
 - Unknown options fail with status 2, making misspelled options visible.
 - `FINDENT_FLAGS` is not read; configuration comes only from the command line or library API.
 
-Input format detection follows findent's own `determine_fix_or_free` and is enabled by default, so
-`-iauto` and `--input-format=auto` are accepted as the default rather than rejected. A source the
-detector calls fixed-form is left byte-identical and reported on stderr; `-ifree` forces free-form
-handling, and `--query-format` reports the detector's path-aware verdict without formatting. For
-modern free-form suffixes such as `.f90`, the path-aware detector deliberately gives the suffix a
-free-form prior: it may report `free` even when findent's content-only detector reports `fixed` for
-an otherwise ambiguous file. This prevents valid modern free-form sources from being skipped by
-automatic detection. Bare `.f`/`.F` files remain content-detected, with strong fixed-form evidence
-able to override a provisional free-form result.
+Automatic input detection is enabled by default but deliberately does not use findent's
+first-decisive-line `determine_fix_or_free` verdict as policy. Instead it accumulates positive fixed-
+and free-form evidence, with strong fixed evidence winning. Named sources also use their suffix as
+evidence: modern suffixes such as `.f90` and `.F90` are a strong free-form prior, while `.f` and
+`.F` remain content-driven. Anonymous stdin is accepted as free when its bytes contain clear
+free-form evidence and remains conservatively fixed when the content is ambiguous. Literal `#if 0`
+and `#if 1` branches are accounted for; macro-dependent CPP branches remain unknown. A test-only
+compatibility baseline retains the exact findent 4.3.7 detector, including its 4,000-line limit and
+fixed-at-EOF fallback. `-ifree` forces free-form handling, and `--query-format` reports the automatic
+detector's verdict without formatting.
 
 The accepted format is free-form only. The parser is deliberately a shallow structural classifier,
 not a full Fortran semantic parser. Unknown or incomplete statements are emitted conservatively.
