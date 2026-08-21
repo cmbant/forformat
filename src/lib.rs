@@ -69,7 +69,7 @@ pub struct FormatMeta {
 /// apply to it. This is also the context used by the isolated and stdin CLI
 /// routes, so all single-buffer entry points share the same macro behavior.
 pub fn format_source(source: &[u8], config: &FormatConfig) -> Result<FormatResult, FormatError> {
-    if config.mode == config::FormatMode::IndentOnly {
+    if !config.mode.normalizes() {
         return format::engine::format(source, config);
     }
     let mut context = analysis::ProjectContext::empty();
@@ -100,7 +100,7 @@ pub fn format_to<W: std::io::Write>(
     config: &FormatConfig,
     out: &mut W,
 ) -> Result<FormatMeta, FormatError> {
-    if config.mode == config::FormatMode::IndentOnly {
+    if !config.mode.normalizes() {
         return format::engine::format_to(source, config, out);
     }
     let mut context = analysis::ProjectContext::empty();
@@ -119,7 +119,7 @@ pub fn format_to_owned<W: std::io::Write>(
     config: &FormatConfig,
     out: &mut W,
 ) -> Result<FormatMeta, FormatError> {
-    if config.mode == config::FormatMode::IndentOnly {
+    if !config.mode.normalizes() {
         return format::engine::format_to_owned(source, config, out);
     }
     let mut context = analysis::ProjectContext::empty();

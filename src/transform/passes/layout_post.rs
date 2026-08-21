@@ -12,7 +12,7 @@ mod unit_spacing;
 pub(crate) use alignment::declaration_separator_info;
 pub use alignment::{declaration_separator_alignment, trailing_comment_alignment};
 pub use blank_lines::limit_blank_lines;
-pub use output::output_whitespace;
+pub use output::{output_whitespace, trim_trailing_horizontal};
 pub use unit_spacing::program_unit_spacing;
 
 #[cfg(test)]

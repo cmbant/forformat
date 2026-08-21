@@ -1,8 +1,10 @@
 use super::continuation::leading_ampersand;
 use crate::{
-    config::{FormatConfig, FormatMode},
+    config::FormatConfig,
     error::FormatError,
-    source::{syntax::conditional_compilation_prefix, Newline, PhysicalLineKind, SourceBuffer},
+    source::{
+        syntax::conditional_compilation_prefix, LexState, Newline, PhysicalLineKind, SourceBuffer,
+    },
 };
 use std::io::Write;
 
@@ -83,19 +85,19 @@ pub fn emit_line_to<B: AsRef<[u8]>, W: Write>(
     replacement: Option<&[u8]>,
     out: &mut W,
 ) -> Result<(), FormatError> {
-    let mut quote = 0u8;
-    emit_line_to_with_quote(buf, index, place, style, replacement, &mut quote, out)
+    let mut lex = LexState::default();
+    emit_line_to_with_lex(buf, index, place, style, replacement, &mut lex, out)
 }
 
 /// Emit one physical line while carrying the redundant-whitespace transform's
-/// quote state across a logical continuation group.
-pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
+/// lexical state across a logical continuation group.
+pub fn emit_line_to_with_lex<B: AsRef<[u8]>, W: Write>(
     buf: &SourceBuffer<B>,
     index: usize,
     place: LinePlacement,
     style: &EmitStyle,
     replacement: Option<&[u8]>,
-    quote: &mut u8,
+    lex: &mut LexState,
     out: &mut W,
 ) -> Result<(), FormatError> {
     let LinePlacement {
@@ -122,12 +124,14 @@ pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
     if !style.apply_indent {
         let leading = leading_len(original);
         if let Some(replacement) = replacement {
+            let body = trim_end_horizontal(replacement);
+            crate::source::regions::advance_group_line(lex, body);
             out.write_all(&original[..leading])
                 .map_err(FormatError::Write)?;
-            out.write_all(trim_end_horizontal(replacement))
-                .map_err(FormatError::Write)?;
+            out.write_all(body).map_err(FormatError::Write)?;
         } else {
-            out.write_all(trim_end_horizontal(original))
+            let body_start = conditional_body_start(original, line.omp && config.openmp);
+            out.write_all(trim_end_horizontal_protected(original, body_start, lex))
                 .map_err(FormatError::Write)?;
         }
         write_newline(buf, index, out)?;
@@ -203,10 +207,16 @@ pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
         // the sentinel, so inserting the canonical blank would rewrite a
         // non-leading source byte. Keep the authored compact boundary and
         // only apply the mode's ordinary leading/trailing whitespace policy.
-        if config.mode == FormatMode::IndentOnly
+        if !config.mode.normalizes()
             && prefix.kind == crate::source::syntax::ConditionalPrefixKind::CompactContinuation
         {
-            out.write_all(trim_end_horizontal(trim_start(original)))
+            // The trailing rule is the protected one here like everywhere
+            // else: the bytes go out with their authored prefix attached, but
+            // the scan behind them runs on the body, which is what the group's
+            // state tracks and the only reading under which a payload blank on
+            // a compact continuation is visible as payload.
+            let trimmed = trim_end_horizontal_protected(original, prefix.body_start, lex);
+            out.write_all(trim_start(trimmed))
                 .map_err(FormatError::Write)?;
             write_newline(buf, index, out)?;
             return Ok(());
@@ -266,14 +276,14 @@ pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
                 out.write_all(label).map_err(FormatError::Write)?;
                 out.write_all(b" ").map_err(FormatError::Write)?;
             }
-            write_body(rest, style, quote, out)?;
+            write_body(rest, style, lex, out)?;
         } else {
             write_spaces(out, clamp_indent(target, config.max_indent))?;
-            write_body(source, style, quote, out)?;
+            write_body(source, style, lex, out)?;
         }
     } else {
         write_spaces(out, clamp_indent(target, config.max_indent))?;
-        write_body(source, style, quote, out)?;
+        write_body(source, style, lex, out)?;
     }
     write_newline(buf, index, out)
 }
@@ -281,10 +291,18 @@ pub fn emit_line_to_with_quote<B: AsRef<[u8]>, W: Write>(
 fn write_body<W: Write>(
     body: &[u8],
     style: &EmitStyle,
-    quote: &mut u8,
+    lex: &mut LexState,
     out: &mut W,
 ) -> Result<(), FormatError> {
-    let body = trim_end_horizontal(body);
+    // Exactly one writer may advance the group's state over this line. The
+    // `--ws-remred` reducer below is one, so the trim scan gets a snapshot
+    // there and the real state here; with the reducer off, nothing else would
+    // advance it at all, and the next physical line of a continued literal
+    // would be lexed as though the literal had never opened.
+    let mut scanned = *lex;
+    // The sentinel, if there was one, was stripped before this call: `source`
+    // is the Fortran body and the canonical `!$ ` is written separately.
+    let body = trim_end_horizontal_protected(body, 0, &mut scanned);
     if style.remred {
         // The post-layout alignment passes that would own a protected gap
         // (`declaration_separator_alignment`, `trailing_comment_alignment`)
@@ -292,18 +310,33 @@ fn write_body<W: Write>(
         // through `engine::format` without ever running them. Protecting the
         // gap there would leave it un-owned and un-collapsed, breaking the
         // byte-exact indent-only contract.
-        let alignment_runs_after = style.config.mode == FormatMode::Full;
-        crate::transform::whitespace::reduce_to_with_quote_protected(
+        let alignment_runs_after = style.config.mode.aligns_after_layout();
+        crate::transform::whitespace::reduce_to_protected(
             body,
-            quote,
+            lex,
             alignment_runs_after && style.config.align_declarations,
             alignment_runs_after && style.config.align_comments,
             out,
         )
         .map_err(FormatError::Write)
     } else {
+        *lex = scanned;
         out.write_all(body).map_err(FormatError::Write)
     }
+}
+
+/// Where the Fortran body of `line` begins, for the paths that write the line
+/// with its authored sentinel attached.
+///
+/// `conditional` is the caller's already-made decision that this line is
+/// conditional-compilation *code* rather than a comment: with `--openmp` off an
+/// exact `!$` sentinel is an ordinary comment, and its trailing blanks carry
+/// nothing.
+fn conditional_body_start(line: &[u8], conditional: bool) -> usize {
+    if !conditional {
+        return 0;
+    }
+    conditional_compilation_prefix(line).map_or(0, |prefix| prefix.body_start)
 }
 
 fn trim_end_horizontal(mut s: &[u8]) -> &[u8] {
@@ -311,6 +344,44 @@ fn trim_end_horizontal(mut s: &[u8]) -> &[u8] {
         s = &s[..s.len() - 1];
     }
     s
+}
+
+/// [`trim_end_horizontal`] for a line that carries code, advancing `lex` over
+/// it.
+///
+/// Trailing blanks are invisible presentation everywhere except inside a
+/// character literal or a Hollerith payload, where they are payload bytes:
+/// `x = 3Hab ` promises three characters and trimming the third truncates the
+/// constant. `lex` is the state carried in from earlier physical lines of the
+/// same continuation group, so a region opened on one of them is still
+/// protected here — including a Hollerith payload, whose owed byte count no
+/// bare delimiter could have carried.
+///
+/// The scan that answers that question is also the scan the *next* physical
+/// line needs, so it advances `lex` rather than a copy. A caller that has
+/// another writer advancing the same state — [`write_body`] under
+/// `--ws-remred` — must hand this one a snapshot instead.
+///
+/// `body_start` is where the Fortran begins: zero for an ordinary line, and
+/// past the sentinel for a conditional-compilation one, because the group's
+/// state tracks the body and a `!` scanned as code opens a comment that hides
+/// the whole line. Only the caller can supply it — telling a compact `!$&`
+/// prefix from a near-miss comment needs the statement context this emitter
+/// has and [`crate::source::regions`]'s raw line walkers do not.
+fn trim_end_horizontal_protected<'a>(
+    s: &'a [u8],
+    body_start: usize,
+    lex: &mut LexState,
+) -> &'a [u8] {
+    let floor = match crate::source::regions::protected_trailing_floor(lex, &s[body_start..]) {
+        0 => 0,
+        floor => body_start + floor,
+    };
+    let mut end = s.len();
+    while end > floor && matches!(s[end - 1], b' ' | b'\t') {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 fn write_near_openmp_comment<W: Write>(rest: &[u8], out: &mut W) -> Result<(), FormatError> {

@@ -14,7 +14,11 @@ use crate::{
     config::FormatConfig,
     error::FormatError,
     source::{
-        regions::{comment_start, line_comment_start, stepped_over_by_continuation},
+        regions::{
+            comment_start, line_comment_start, resumes_protected_region,
+            stepped_over_by_continuation, StreamLexStates, StreamStates,
+        },
+        subscripts::{scan_multiple_subscripts, MultipleSubscriptState},
         syntax::{
             conditional_compilation_prefix, is_directive_comment, ConditionalPrefix,
             ConditionalPrefixKind, SourceStream,
@@ -198,18 +202,6 @@ fn set_comment_column(
     *updated.get_mut(line_index).expect("run line in range") = line;
 }
 
-#[derive(Default)]
-struct MultipleSubscriptState {
-    open_depth: usize,
-    active_depths: Vec<usize>,
-}
-
-struct MultipleSubscriptScan {
-    triplet_colons: Vec<usize>,
-    active_depths: Vec<usize>,
-    end_depth: usize,
-}
-
 fn canonical_conditional_prefix(line: &[u8]) -> Option<ConditionalPrefix> {
     conditional_compilation_prefix(line)
         .filter(|prefix| prefix.kind == ConditionalPrefixKind::BlankSeparated)
@@ -223,40 +215,12 @@ fn stream_for_prefix(prefix: Option<ConditionalPrefix>) -> SourceStream {
     }
 }
 
+/// What declaration alignment carries from one physical line to the next: the
+/// lexical state, plus the multiple-subscript items still open at this depth.
 #[derive(Default)]
 struct DeclarationStreamState {
     lex: LexState,
     multiple_subscript: MultipleSubscriptState,
-}
-
-#[derive(Default)]
-struct DeclarationStreams {
-    ordinary: DeclarationStreamState,
-    conditional: DeclarationStreamState,
-}
-
-impl DeclarationStreams {
-    fn select_mut(&mut self, stream: SourceStream) -> &mut DeclarationStreamState {
-        match stream {
-            SourceStream::Ordinary => &mut self.ordinary,
-            SourceStream::Conditional => &mut self.conditional,
-        }
-    }
-}
-
-#[derive(Default)]
-struct LexStreams {
-    ordinary: LexState,
-    conditional: LexState,
-}
-
-impl LexStreams {
-    fn select_mut(&mut self, stream: SourceStream) -> &mut LexState {
-        match stream {
-            SourceStream::Ordinary => &mut self.ordinary,
-            SourceStream::Conditional => &mut self.conditional,
-        }
-    }
 }
 
 /// The `::` a standalone physical line offers for alignment, scanned from a
@@ -282,9 +246,7 @@ fn declaration_separator_info_in(
     lex: &mut LexState,
     multiple_subscript: &mut MultipleSubscriptState,
 ) -> Option<(usize, usize, usize)> {
-    let carrying_statement = *lex != LexState::default()
-        || multiple_subscript.open_depth > 0
-        || !multiple_subscript.active_depths.is_empty();
+    let carrying_statement = *lex != LexState::default() || multiple_subscript.carrying();
     if carrying_statement && stepped_over_by_continuation(line) {
         return None;
     }
@@ -334,57 +296,11 @@ fn declaration_separator_info_in(
     Some((index, index - before, after - index - 2))
 }
 
-/// Scan one physical line using absolute delimiter depth, carrying active `@`
-/// items from earlier continuation lines. A comma at the active depth ends the
-/// item; closing delimiters discard deeper items. This is the same state model
-/// used by delimiter normalization, so post-layout alignment cannot reinterpret
-/// a continued multiple-subscript `::` as a declaration separator.
-fn scan_multiple_subscripts(
-    tokens: &[crate::source::Token<'_>],
-    open_depth: usize,
-    continued_multiple_subscripts: &[usize],
-) -> MultipleSubscriptScan {
-    let mut active_depths = continued_multiple_subscripts.to_vec();
-    let mut triplet_colons = Vec::new();
-    let mut depth = open_depth;
-
-    for (index, token) in tokens.iter().enumerate() {
-        match token.kind {
-            TokenKind::LParen | TokenKind::LBracket => {
-                depth += 1;
-            }
-            TokenKind::RParen | TokenKind::RBracket => {
-                depth = depth.saturating_sub(1);
-                active_depths.retain(|active| *active <= depth);
-            }
-            TokenKind::Comma => {
-                active_depths.retain(|active| *active < depth);
-            }
-            TokenKind::Operator if token.text == b"@" => {
-                active_depths.retain(|active| *active != depth);
-                active_depths.push(depth);
-            }
-            TokenKind::Operator
-                if matches!(token.text, b":" | b"::") && active_depths.contains(&depth) =>
-            {
-                triplet_colons.push(index);
-            }
-            _ => {}
-        }
-    }
-
-    MultipleSubscriptScan {
-        triplet_colons,
-        active_depths,
-        end_depth: depth,
-    }
-}
-
 fn declaration_separator_columns(
     lines: &[Vec<u8>],
     cpp_lines: &[bool],
 ) -> Vec<Option<(usize, usize, usize)>> {
-    let mut streams = DeclarationStreams::default();
+    let mut streams = StreamStates::<DeclarationStreamState>::default();
     lines
         .iter()
         .zip(cpp_lines)
@@ -399,7 +315,7 @@ fn declaration_separator_columns(
             // Preserve the same conservative editor-buffer behavior as
             // SourceBuffer: malformed/inactive code between the halves of a
             // protected literal is transparent unless it resumes with `&`.
-            if stream.lex.in_literal() && !body.trim_ascii_start().starts_with(b"&") {
+            if !resumes_protected_region(&stream.lex, body) {
                 return None;
             }
             declaration_separator_info_in(body, &mut stream.lex, &mut stream.multiple_subscript)
@@ -431,7 +347,7 @@ fn column_info(
     cpp_lines: &[bool],
     mut info: impl FnMut(&[u8], &mut LexState) -> Option<(usize, usize, usize)>,
 ) -> Vec<Option<(usize, usize, usize)>> {
-    let mut streams = LexStreams::default();
+    let mut streams = StreamLexStates::default();
     lines
         .iter()
         .zip(cpp_lines)
@@ -445,7 +361,7 @@ fn column_info(
             let body_start = prefix.map_or(0, |prefix| prefix.body_start);
             let body = &line[body_start..];
             let lex = streams.select_mut(stream_for_prefix(prefix));
-            if lex.in_literal() && !body.trim_ascii_start().starts_with(b"&") {
+            if !resumes_protected_region(lex, body) {
                 return None;
             }
             info(body, lex).map(|(column, before, after)| (body_start + column, before, after))

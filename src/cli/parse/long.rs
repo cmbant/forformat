@@ -194,28 +194,26 @@ where
                 draft.extend_exclude.push(pattern);
             }
         }
+        // The four mode options write one field, so the last one on the command
+        // line wins outright and no combination of them can leave half of one
+        // mode behind.
         OptionId::IndentOnly => {
             reject_value(name, &value)?;
             draft.config.mode = FormatMode::IndentOnly;
-            draft.config.style.normalize_whitespace = true;
         }
         OptionId::Full => {
             reject_value(name, &value)?;
             draft.config.mode = FormatMode::Full;
-            draft.config.style.normalize_whitespace = true;
         }
         OptionId::NormalizeOnly => {
             reject_value(name, &value)?;
             draft.config.mode = FormatMode::NormalizeOnly;
-            draft.config.style.normalize_whitespace = true;
         }
         OptionId::CanonicalizeOnly => {
             reject_value(name, &value)?;
-            // Canonicalization-only is a normalize-only preset: it takes the
-            // existing no-layout return path while line rules suppress
-            // whitespace-only edits.
-            draft.config.mode = FormatMode::NormalizeOnly;
-            draft.config.style.normalize_whitespace = false;
+            // Canonicalization takes the same no-layout return path as
+            // normalize-only while line rules suppress whitespace-only edits.
+            draft.config.mode = FormatMode::CanonicalizeOnly;
         }
         OptionId::Wrap => {
             draft.config.wrap.enabled = value
@@ -265,6 +263,9 @@ where
                 ],
             )?;
         }
+        OptionId::OpenmpCase => {
+            draft.config.style.openmp_case = parse_bool(&cursor.required_long(&mut value)?)?
+        }
         OptionId::RelationalSymbols => {
             draft.config.style.relational_symbols = parse_bool(&cursor.required_long(&mut value)?)?
         }
@@ -287,6 +288,10 @@ where
         }
         OptionId::RemoveRedundantParens => {
             draft.config.style.remove_redundant_parens =
+                parse_bool(&cursor.required_long(&mut value)?)?
+        }
+        OptionId::NormalizeSemicolons => {
+            draft.config.style.normalize_semicolons =
                 parse_bool(&cursor.required_long(&mut value)?)?
         }
         OptionId::RemoveTerminalReturn => {

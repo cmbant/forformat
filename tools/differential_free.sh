@@ -1,9 +1,15 @@
 #!/bin/sh
 # Differential smoke runner for the retained free-form legacy fixtures.
 # The oracle is deliberately optional: normal Rust builds do not depend on it.
+#
+# findent only ever indents, so the oracle contract is the `--indent-only`
+# contract. forformat's default mode is full, which additionally normalizes
+# keyword case, blank-line separators and terminal RETURN; comparing that
+# against findent measures the feature set, not the compatibility that this
+# script exists to protect. Pass the mode explicitly.
 set -eu
 
-rust_forformat=${1:-target/debug/forformat}
+rust_forformat=${1:-${CARGO_TARGET_DIR:-target}/debug/forformat}
 oracle=${FINDENT_ORACLE:-/opt/findent/src/findent}
 fixture_root=${FINDENT_TEST_ROOT:-/opt/findent/test}
 
@@ -32,7 +38,8 @@ for fixture in progfree.f progfree1.f progfree-dos.f; do
     # here is intentional and matches the shell test driver’s argv contract.
     set -- $flags
     env -u FINDENT_FLAGS LC_ALL=C "$oracle" -ifree "$@" < "$input" > "$fixture.oracle"
-    env -u FINDENT_FLAGS LC_ALL=C "$rust_forformat" -ifree "$@" < "$input" > "$fixture.rust"
+    env -u FINDENT_FLAGS LC_ALL=C "$rust_forformat" -ifree --indent-only "$@" < "$input" \
+        > "$fixture.rust"
     if cmp -s "$fixture.oracle" "$fixture.rust"; then
         echo "$fixture: match"
     elif [ "${FORFORMAT_DIFFERENTIAL_STRICT:-0}" = 0 ] \

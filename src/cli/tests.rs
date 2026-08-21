@@ -483,6 +483,29 @@ fn mode_and_full_format_options_parse_and_do_not_collide_with_construct_names() 
         FormatMode::IndentOnly
     );
     assert_eq!(run(&["--indent_only"]).mode, FormatMode::IndentOnly);
+    assert_eq!(
+        run(&["--canonicalize-only"]).mode,
+        FormatMode::CanonicalizeOnly
+    );
+
+    // Mode is one field, so every ordering of the mode options is decided by
+    // the last one rather than leaving half of an earlier mode behind.
+    assert_eq!(
+        run(&["--canonicalize-only", "--normalize-only"]).mode,
+        FormatMode::NormalizeOnly
+    );
+    assert_eq!(
+        run(&["--normalize-only", "--canonicalize-only"]).mode,
+        FormatMode::CanonicalizeOnly
+    );
+    assert_eq!(
+        run(&["--canonicalize-only", "--full"]).mode,
+        FormatMode::Full
+    );
+    assert!(!run(&["--canonicalize-only"]).mode.normalizes_whitespace());
+    assert!(run(&["--canonicalize-only", "--normalize-only"])
+        .mode
+        .normalizes_whitespace());
 
     assert!(run(&[]).wrap.enabled);
     assert!(!run(&["--no-wrap"]).wrap.enabled);
@@ -491,12 +514,44 @@ fn mode_and_full_format_options_parse_and_do_not_collide_with_construct_names() 
     assert!(run(&["--uppercase-single-l"]).uppercase_single_l);
 }
 
+/// `--rewrap` repacks continuations through the reflow wrapper, which only full
+/// mode runs. Accepting it in a mode that cannot wrap would make it a silent
+/// no-op that reads as if it worked.
+#[test]
+fn rewrap_is_rejected_by_the_modes_that_never_wrap() {
+    assert!(run(&["--rewrap"]).rewrap);
+    assert!(run(&["--full", "--rewrap"]).rewrap);
+    // Turning wrapping off within full mode stays a coherent policy rather than
+    // a contradiction, and is documented as leaving rewrap inactive.
+    assert!(run(&["--rewrap", "--no-wrap"]).rewrap);
+    // Rewrap is a config value, so a later `--full` rescues an earlier mode.
+    assert!(run(&["--indent-only", "--rewrap", "--full"]).rewrap);
+
+    for mode in ["--indent-only", "--normalize-only", "--canonicalize-only"] {
+        for argv in [
+            vec!["forformat".to_string(), mode.into(), "--rewrap".into()],
+            vec!["forformat".to_string(), "--rewrap".into(), mode.into()],
+        ] {
+            let Err(error) = parse(argv.clone()) else {
+                panic!("{argv:?} was accepted");
+            };
+            assert!(
+                error.to_string().contains("--rewrap requires full mode"),
+                "{argv:?}: {error}"
+            );
+        }
+        // `--rewrap=false` asks for nothing, so it is not a contradiction.
+        assert!(!run(&[mode, "--rewrap=false"]).rewrap);
+    }
+}
+
 #[test]
 fn style_options_parse_all_values_and_underscore_spellings() {
     use crate::config::KeywordCase;
 
     assert!(run(&[]).style.join_goto);
     assert!(run(&[]).style.split_compound_keywords);
+    assert!(run(&[]).style.openmp_case);
 
     let config = run(&[
         "--keyword_case",
@@ -520,8 +575,10 @@ fn style_options_parse_all_values_and_underscore_spellings() {
         "--comment_spacing",
         "0",
         "--continuation-markers=0",
+        "--openmp_case=0",
     ]);
     assert_eq!(config.style.keyword_case, KeywordCase::Upper);
+    assert!(!config.style.openmp_case);
     assert!(!config.style.relational_symbols);
     assert!(!config.style.array_brackets);
     assert!(!config.style.compact_multiplicative);
@@ -550,6 +607,7 @@ fn style_options_parse_all_values_and_underscore_spellings() {
             "delimiter-spacing" => config.style.delimiter_spacing,
             "comment-spacing" => config.style.comment_spacing,
             "continuation-markers" => config.style.continuation_markers,
+            "openmp-case" => config.style.openmp_case,
             _ => unreachable!(),
         }
     }
@@ -566,6 +624,7 @@ fn style_options_parse_all_values_and_underscore_spellings() {
         "delimiter-spacing",
         "comment-spacing",
         "continuation-markers",
+        "openmp-case",
     ];
     for option in bools {
         for spelling in [option.to_string(), option.replace('-', "_")] {

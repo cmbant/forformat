@@ -42,6 +42,7 @@ pub(super) enum OptionId {
     UppercaseSingleL,
     Define,
     KeywordCase,
+    OpenmpCase,
     RelationalSymbols,
     ArrayBrackets,
     CompactMultiplicative,
@@ -49,6 +50,7 @@ pub(super) enum OptionId {
     SplitCompoundKeywords,
     StripEmptyArgs,
     RemoveRedundantParens,
+    NormalizeSemicolons,
     RemoveTerminalReturn,
     ProgramUnitSpacing,
     MaxBlankLines,
@@ -347,6 +349,12 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "recognized keyword case (default lower)"
     ),
     spec!(
+        OpenmpCase,
+        "openmp-case",
+        "--openmp-case=<BOOL>",
+        "uppercase reserved OpenMP directives (default true)"
+    ),
+    spec!(
         RelationalSymbols,
         "relational-symbols",
         "--relational-symbols=<BOOL>",
@@ -387,6 +395,12 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "remove-redundant-parens",
         "--remove-redundant-parens=<BOOL>",
         "remove redundant parentheses (default true)"
+    ),
+    spec!(
+        NormalizeSemicolons,
+        "normalize-semicolons",
+        "--normalize-semicolons=<BOOL>",
+        "drop redundant statement separators (default true)"
     ),
     spec!(
         RemoveTerminalReturn,

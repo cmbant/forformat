@@ -1,4 +1,5 @@
 use super::*;
+use crate::source::subscripts::scan_multiple_subscripts;
 
 /// Rule 4: delimiter and comma spacing.
 ///
@@ -222,61 +223,6 @@ fn normalize_delimiters_in_code(code: &[u8], out: &mut Vec<u8>, following_conten
         out.push(code[index]);
         index += 1;
     }
-}
-
-#[derive(Default)]
-struct MultipleSubscriptScan {
-    prefixes: Vec<usize>,
-    triplet_colons: Vec<usize>,
-    active_depths: Vec<usize>,
-}
-
-/// Scan one physical line while carrying the absolute delimiter depths of any
-/// `@` multiple-subscript items opened on earlier continuation lines.
-///
-/// Tracking absolute depth rather than token-local `depth` is important when a
-/// continuation line closes groups that were opened on an earlier physical
-/// line. A comma at an active depth ends that subscript item; closing a group
-/// drops deeper active items. Nested calls/sections therefore do not leak their
-/// ordinary colons into the outer `@` triplet formatting policy.
-fn scan_multiple_subscripts(
-    tokens: &[crate::source::Token<'_>],
-    open_depth: usize,
-    continued_multiple_subscripts: &[usize],
-) -> MultipleSubscriptScan {
-    let mut scan = MultipleSubscriptScan {
-        active_depths: continued_multiple_subscripts.to_vec(),
-        ..MultipleSubscriptScan::default()
-    };
-    let mut depth = open_depth;
-
-    for (index, token) in tokens.iter().enumerate() {
-        match token.kind {
-            TokenKind::LParen | TokenKind::LBracket => {
-                depth += 1;
-            }
-            TokenKind::RParen | TokenKind::RBracket => {
-                depth = depth.saturating_sub(1);
-                scan.active_depths.retain(|active| *active <= depth);
-            }
-            TokenKind::Comma => {
-                scan.active_depths.retain(|active| *active < depth);
-            }
-            TokenKind::Operator if token.text == b"@" => {
-                scan.active_depths.retain(|active| *active != depth);
-                scan.active_depths.push(depth);
-                scan.prefixes.push(index);
-            }
-            TokenKind::Operator
-                if matches!(token.text, b":" | b"::") && scan.active_depths.contains(&depth) =>
-            {
-                scan.triplet_colons.push(index);
-            }
-            _ => {}
-        }
-    }
-
-    scan
 }
 
 pub(in crate::transform::passes::line_rules) fn advance_multiple_subscript_depths(

@@ -4,6 +4,7 @@ pub mod logical_statement;
 pub mod physical_line;
 pub mod regions;
 pub mod scanner;
+pub(crate) mod subscripts;
 pub(crate) mod syntax;
 pub mod tokens;
 

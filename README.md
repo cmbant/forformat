@@ -38,7 +38,7 @@ To build from source, install Rust 1.85 or newer:
 
 ```sh
 cargo build --locked --release
-./target/release/forformat --version
+"${CARGO_TARGET_DIR:-target}/release/forformat" --version
 ```
 
 ## Quick start
@@ -161,12 +161,7 @@ unless `options` explicitly supplies `--config`.
 The Rust implementation is under `src/`; tests and golden fixtures are under `tests/`. Run:
 
 ```sh
-cargo test --locked --all-targets
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
-./tools/check_cli_contract.sh target/debug/forformat
-./tools/check_docs.sh target/debug/forformat
+./tools/check_local.sh
 ```
 
 For changes to full-mode normalization, wrapping, or layout, also run

@@ -1,5 +1,5 @@
 use super::{
-    regions::LexState,
+    regions::{LexState, StreamStates},
     syntax::{conditional_compilation_prefix, ConditionalPrefixKind, SourceStream},
     Newline, PhysicalLine, PhysicalLineKind,
 };
@@ -17,16 +17,15 @@ pub struct SourceBuffer<B = Vec<u8>> {
     pub lines: Vec<PhysicalLine>,
 }
 
+/// What one stream carries from each physical line to the next.
+///
+/// `continued` is only *read* for the conditional stream, where it is what
+/// resolves a following compact `!$&` prefix into conditional code rather than
+/// a comment; both streams maintain it so the pair is one type.
 #[derive(Default)]
-struct ConditionalStreamState {
+struct StreamScanState {
     lex: LexState,
     continued: bool,
-}
-
-#[derive(Default)]
-struct LexStreams {
-    ordinary: LexState,
-    conditional: ConditionalStreamState,
 }
 
 impl SourceBuffer<Vec<u8>> {
@@ -52,7 +51,7 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         // Ordinary and conditional-compilation code carry independent lexical
         // state. A literal continued in one stream steps over a physical line
         // from the other stream, so that line must not close or reset it.
-        let mut states = LexStreams::default();
+        let mut states = StreamStates::<StreamScanState>::default();
         for (i, b) in source.iter().enumerate() {
             if *b == b'\n' {
                 let is_crlf = i > start && source[i - 1] == b'\r';
@@ -81,7 +80,7 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         content: &[u8],
         span: Range<usize>,
         newline: Newline,
-        states: &mut LexStreams,
+        states: &mut StreamStates<StreamScanState>,
     ) -> PhysicalLine {
         let mut first = 0;
         while first < content.len() && (content[first] == b' ' || content[first] == b'\t') {
@@ -125,32 +124,29 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         let mut comment = None;
         if matches!(kind, PhysicalLineKind::Code | PhysicalLineKind::FindentFix) {
             let code = &content[code_offset..];
-            match stream {
-                SourceStream::Ordinary => {
-                    if let Some(i) = super::regions::line_comment_start(&mut states.ordinary, code)
-                    {
-                        comment = Some((span.start + code_offset + i) as u32..span.end as u32);
-                    }
-                }
+            let state = states.select_mut(stream);
+            // The two streams differ only in which gate decides that a line is
+            // stepped over rather than lexed. The ordinary stream walks raw
+            // lines, so it uses the shape gate (blank, comment, directive);
+            // the conditional stream's body is always code-shaped, so only the
+            // strict "a literal resumes on `&`" rule can apply to it.
+            let scan = match stream {
+                SourceStream::Ordinary => Some(super::regions::line_scan(&mut state.lex, code)),
                 SourceStream::Conditional => {
-                    let stream = &mut states.conditional;
-                    // A free-form character literal can only resume on a physical line
-                    // whose first nonblank body byte is `&`. If malformed or inactive
-                    // source puts another code-looking line in between, step over it
-                    // without consuming either lexical or continuation state.
-                    let can_scan =
-                        !stream.lex.in_literal() || code.trim_ascii_start().starts_with(b"&");
-                    if can_scan {
-                        let scan = stream.lex.scan_line(code, |_| {});
-                        if let Some(i) = scan.comment_start {
-                            comment = Some((span.start + code_offset + i) as u32..span.end as u32);
+                    super::regions::resumes_protected_region(&state.lex, code).then(|| {
+                        let scan = state.lex.scan_line(code, |_| {});
+                        if !scan.continued {
+                            state.lex = LexState::default();
                         }
-                        stream.continued = scan.continued;
-                        if !stream.continued {
-                            stream.lex = LexState::default();
-                        }
-                    }
+                        scan
+                    })
                 }
+            };
+            if let Some(scan) = scan {
+                if let Some(i) = scan.comment_start {
+                    comment = Some((span.start + code_offset + i) as u32..span.end as u32);
+                }
+                state.continued = scan.continued;
             }
         }
         // Non-code lines leave both stream states alone. A continued statement
@@ -166,6 +162,23 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
             code_span: code_start as u32..code_end as u32,
             comment_span: comment,
             omp: stream.is_conditional(),
+        }
+    }
+
+    /// Which continuation stream the physical line at `index` belongs to.
+    ///
+    /// Out-of-range indices answer `Ordinary`: a caller walking a document that
+    /// has grown past the buffer is asking about a line the buffer never saw,
+    /// and ordinary is the stream that owns everything unclaimed.
+    pub(crate) fn stream(&self, index: usize) -> SourceStream {
+        if self
+            .lines
+            .get(index)
+            .is_some_and(|line| line.is_conditional_compilation())
+        {
+            SourceStream::Conditional
+        } else {
+            SourceStream::Ordinary
         }
     }
 
