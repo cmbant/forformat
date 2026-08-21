@@ -53,27 +53,10 @@ jobs:
           text, replaced = pattern.subn(replacement, text, count=1)
           assert replaced == 1, replaced
 
-          anchor = '''        PassContext {
-              config,
-              project,
-              local,
-              analysis,
-              scopes,
-          }
-          }
-
-          #[test]
+          marker = '''    #[test]
+              fn continuation_markers_are_normalized_without_touching_literals() {
           '''
-          helpers = '''        PassContext {
-              config,
-              project,
-              local,
-              analysis,
-              scopes,
-          }
-          }
-
-          fn normalize(
+          helpers = '''    fn normalize(
               document: &mut Document,
               local: &FileFacts,
               project: &ProjectContext,
@@ -100,10 +83,9 @@ jobs:
               normalize_openmp_continuation_sentinels(document, &context)
           }
 
-          #[test]
           '''
-          assert text.count(anchor) == 1
-          text = text.replace(anchor, helpers, 1)
+          assert text.count(marker) == 1
+          text = text.replace(marker, helpers + marker, 1)
 
           replacements = {
               'normalize_continuations(&mut document, &cx(&local, &project))':
