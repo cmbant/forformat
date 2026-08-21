@@ -1,0 +1,104 @@
+name: Fix PR18 indent-only compact sentinel
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'fix/conditional-continuation-state'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: fix/conditional-continuation-state
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.85.0
+          components: rustfmt,clippy
+      - name: Preserve compact sentinel spelling in indent-only
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def one(text, old, new, label):
+              count = text.count(old)
+              assert count == 1, f"{label}: expected 1 match, found {count}"
+              return text.replace(old, new, 1)
+
+          emitter = Path('src/format/emitter.rs')
+          text = emitter.read_text()
+          old = '''        let prefix = conditional_compilation_prefix(original)
+              .expect("conditional SourceBuffer line has a parsed sentinel prefix");
+          source = trim_start(&original[prefix.body_start..]);
+          '''
+          new = '''        let prefix = conditional_compilation_prefix(original)
+              .expect("conditional SourceBuffer line has a parsed sentinel prefix");
+          // Indent-only is a spelling-preserving mode. A contextual compact
+          // continuation has real Fortran body syntax (`&`) immediately after
+          // the sentinel, so inserting the canonical blank would rewrite a
+          // non-leading source byte. Keep the authored compact boundary and
+          // only apply the mode's ordinary leading/trailing whitespace policy.
+          if config.mode == FormatMode::IndentOnly
+              && prefix.kind
+                  == crate::source::syntax::ConditionalPrefixKind::CompactContinuation
+          {
+              out.write_all(trim_end_horizontal(trim_start(original)))
+                  .map_err(FormatError::Write)?;
+              write_newline(buf, index, out)?;
+              return Ok(());
+          }
+          source = trim_start(&original[prefix.body_start..]);
+          '''
+          text = one(text, old, new, 'emitter compact indent-only guard')
+          emitter.write_text(text)
+
+          tests = Path('tests/conditional_compilation.rs')
+          text = tests.read_text()
+          anchor = '''#[test]
+          fn hollerith_payload_ampersand_does_not_promote_following_compact_prefix() {
+          '''
+          test = '''#[test]
+          fn indent_only_preserves_contextual_compact_prefix_spelling() {
+              let source = b"program p\n!$ call f( &\n!$& arg = 1)   \nend program p\n";
+              let config = FormatConfig {
+                  mode: FormatMode::IndentOnly,
+                  ..FormatConfig::default()
+              };
+              let output = format_source(source, &config).unwrap().bytes;
+              let text = String::from_utf8(output.clone()).unwrap();
+
+              assert!(
+                  text.lines().any(|line| line == "!$& arg = 1)"),
+                  "contextual compact spelling changed in indent-only:\n{text}"
+              );
+              assert!(
+                  !text.lines().any(|line| line.starts_with("!$ &")),
+                  "indent-only canonicalized the compact boundary:\n{text}"
+              );
+              assert_eq!(format_source(&output, &config).unwrap().bytes, output);
+          }
+
+          ''' + anchor
+          text = one(text, anchor, test, 'indent-only integration regression')
+          tests.write_text(text)
+
+      - name: Validate focused and full tests
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo test --locked --lib format::emitter
+          cargo test --locked --test conditional_compilation indent_only_preserves_contextual_compact_prefix_spelling
+          cargo test --locked --all-targets
+          cargo clippy --locked --all-targets -- -D warnings
+      - name: Commit clean fix
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git rm .github/workflows/fix-indent-only-compact-pr18.yml
+          git add src/format/emitter.rs tests/conditional_compilation.rs
+          git commit -m "Preserve compact conditional spelling in indent-only"
+          git push origin HEAD:fix/conditional-continuation-state
