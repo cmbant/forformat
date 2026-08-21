@@ -9,8 +9,9 @@ here.
 Options configure formatter **policy** rather than exposing every internal pass. Full and
 normalize-only mode perform the safe normalization required by their format contracts, including
 project/local declaration-driven casing and lexical continuation handling. Canonicalize-only keeps
-only token/spelling canonicalization and deliberately preserves authored presentation whitespace and
-physical layout. The switches below control the behaviours intended to be user choices.
+canonicalization transformations that do not require presentation layout while deliberately
+preserving authored presentation whitespace and physical layout. The switches below control the
+behaviours intended to be user choices.
 
 ## Quick examples
 
@@ -69,7 +70,7 @@ forformat --stdout src/module.f90 --context-path=src --context-path=modules
 | `--full` | `mode = "full"` | normalization, wrapping, and structural layout | yes |
 | `--indent-only` | `mode = "indent-only"` | findent-compatible layout; style controls are ignored | no |
 | `--normalize-only` | `mode = "normalize-only"` | normalization only; no layout or wrapping | no |
-| `--canonicalize-only` | `mode = "canonicalize-only"` | canonical token/spelling changes without whitespace or layout normalization | no |
+| `--canonicalize-only` | `mode = "canonicalize-only"` | canonical transformations without whitespace or layout normalization | no |
 
 Mode switches are valueless on the command line. In TOML use the single `mode` key.
 
@@ -77,8 +78,9 @@ Canonicalize-only preserves indentation, incidental horizontal whitespace, comme
 structure, continuation layout, trailing whitespace, and each physical line's original LF/CRLF
 terminator. Canonical replacements may still contain whitespace that is intrinsic to the replacement
 spelling: for example `enddo` becomes `end do`, `endmodule` becomes `end module`, and `go to` may
-become `goto`. This is therefore a promise not to make **whitespace-only formatting edits**, not a
-promise that the byte count of every whitespace run can never change as part of a token rewrite.
+become `goto`. Other enabled canonicalization transforms, such as safely redundant-parenthesis
+removal, may also change syntax without being whitespace formatting. This is therefore a promise not
+to make **whitespace-only formatting edits**, not a promise that only character case can change.
 
 ## Selecting input and output
 
@@ -186,9 +188,9 @@ key is `indent_contains` and accepts either a non-negative integer or `"restart"
 
 ## Full/normalization style
 
-These controls affect `--full` and `--normalize-only`. Canonicalize-only applies controls that change
-canonical token/spelling, but ignores presentation-only whitespace, blank-line, continuation-marker,
-and alignment effects. `--indent-only` deliberately ignores these style controls.
+The style controls in this table affect `--full` and `--normalize-only`. Canonicalize-only applies
+canonicalization controls that do not amount to presentation-only whitespace/layout changes;
+`--indent-only` deliberately ignores this table.
 
 | CLI / TOML key | Values | Default | Effect |
 | --- | --- | --- | --- |
@@ -215,13 +217,19 @@ blank-line cap runs afterward. Canonicalize-only does not perform either blank-l
 
 | CLI | Configuration | Default | Meaning |
 | --- | --- | --- | --- |
-| `--ws-remred[=N]` | `ws_remred = N/BOOL` | `0` | reduce redundant whitespace; bare means enabled |
+| `--reduce-whitespace[=N]` | `reduce_whitespace = N/BOOL` | `0` | reduce redundant body whitespace; bare means enabled |
 | `--align-declarations=BOOL` | `align_declarations = BOOL` | true | align/shrink declaration `::` runs |
 | `--align-comments=BOOL` | `align_comments = BOOL` | false | align/shrink trailing-comment runs |
 
-When declaration or comment alignment owns its corresponding gap, `--ws-remred` leaves that gap for
-the alignment pass instead of collapsing it first. Canonicalize-only bypasses structural layout and
-therefore does not run these whitespace/alignment effects.
+`--reduce-whitespace` is an emission/layout control rather than a normalize-only text pass: it
+applies when the layout emitter runs (full and indent-only modes), and is inactive in normalize-only
+and canonicalize-only modes. Declaration/comment alignment runs only in full mode. When one of those
+alignment passes owns its corresponding gap, `--reduce-whitespace` leaves the gap for the alignment
+pass instead of collapsing it first.
+
+For findent command-line compatibility, `--ws_remred` (equivalently `--ws-remred`) remains an alias
+for `--reduce-whitespace`; the legacy `ws_remred` TOML key is accepted for the same reason. Prefer
+`--reduce-whitespace` and `reduce_whitespace` in new forformat configuration.
 
 ### END completion
 
@@ -252,8 +260,9 @@ physical line already fits. The statement is joined logically first and then han
 fixed-point wrapper used for ordinary over-budget statements: it may collapse to one line when the
 joined form fits, or receive a completely fresh set of breaks at the active line-length budget.
 Groups that the existing wrapper cannot safely reflow, including protected/comment-bearing shapes,
-retain their authored continuation layout. `--rewrap=false` restores the normal overflow-only policy;
-a later `--no-wrap` disables the wrapping stage entirely.
+retain their authored continuation layout. `--rewrap=false` restores the normal overflow-only policy.
+Rewrap never enables wrapping: if wrapping is disabled by `--no-wrap` or `--wrap=false`, in any CLI
+order or through TOML, the rewrap policy is simply inactive.
 
 ## Preprocessor definitions
 
