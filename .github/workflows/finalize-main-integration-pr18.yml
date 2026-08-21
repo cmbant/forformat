@@ -1,0 +1,72 @@
+name: Finalize current-main integration in PR18
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'fix/conditional-continuation-state'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: fix/conditional-continuation-state
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.85.0
+          components: rustfmt
+      - name: Restore current-main changes and resolve overlaps
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=14b438780e4746ebd73be4802a021d96fcbc2e02
+          main=b9b296387f68975403193923446d6b1cda40826b
+
+          git checkout "$main" -- \
+            docs/migration.md \
+            docs/options.md \
+            src/cli/options.rs \
+            src/cli/parse/long.rs \
+            src/config.rs \
+            src/transform/document.rs \
+            src/transform/passes/canonical_end.rs \
+            src/transform/passes/line_rules/case.rs \
+            src/transform/passes/line_rules/keyword_spacing.rs \
+            src/transform/passes/rewrap.rs \
+            tests/canonicalize_rewrap.rs \
+            tests/config_wrap_policy.rs \
+            tests/reduce_whitespace_config.rs \
+            tests/reduce_whitespace_option.rs
+
+          for path in \
+            src/transform/passes/line_rules/mod.rs \
+            src/transform/passes/mod.rs \
+            src/transform/pipeline.rs
+          do
+            patch="/tmp/$(basename "$path").patch"
+            git diff "$base" "$main" -- "$path" > "$patch"
+            if ! git apply --3way "$patch"; then
+              echo "three-way apply failed for $path" >&2
+              git status --short
+              git diff --cc -- "$path"
+              exit 1
+            fi
+          done
+
+          cargo fmt --all
+          git diff --check
+
+      - name: Commit integrated tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/finalize-main-integration-pr18.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Integrate current main policies with conditional continuations'
+          git push origin HEAD:fix/conditional-continuation-state
