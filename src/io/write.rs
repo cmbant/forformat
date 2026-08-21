@@ -72,12 +72,11 @@ fn set_mode(_file: &File, _mode: u32) -> Result<(), WorkflowError> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::atomic_replace;
     use std::fs;
 
-    #[cfg(unix)]
     #[test]
     fn atomic_replace_preserves_mode_and_cleans_failed_temporary_write() {
         use std::os::unix::fs::PermissionsExt;
