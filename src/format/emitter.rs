@@ -502,9 +502,9 @@ mod tests {
             b"!$    call x\n"
         );
 
-        let compact = SourceBuffer::new(b"!$& arg = 1)\n").unwrap();
+        let compact = SourceBuffer::new(b"!$ call f( &\n!$& arg = 1)\n").unwrap();
         assert_eq!(
-            emit_line(&compact, 0, first(0), &style, None),
+            emit_line(&compact, 1, first(0), &style, None),
             b"!$ & arg = 1)\n"
         );
 

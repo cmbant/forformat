@@ -27,7 +27,6 @@ use crate::{
     error::FormatError,
     source::{
         regions::LexState,
-        syntax::conditional_compilation_body_start,
         tokens::{tokenize, TokenKind},
         PhysicalLineKind,
     },
@@ -182,7 +181,12 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             .map(|line| line.kind)
             .unwrap_or(PhysicalLineKind::Code);
 
-        if let Some(body_start) = conditional_compilation_body_start(&document.lines[index]) {
+        let conditional_body_start = cx.analysis.buffer.lines.get(index).and_then(|physical| {
+            physical
+                .is_conditional_compilation()
+                .then_some((physical.code_span.start - physical.span.start) as usize)
+        });
+        if let Some(body_start) = conditional_body_start {
             let stream = &mut state.conditional;
             let multiple_subscript_depths = stream.multiple_subscript_depths.clone();
             let context = stream.context(

@@ -302,7 +302,7 @@ fn reflow_with_context_inner(
                     replacement: None,
                     ..
                 }
-            ) && join_openmp_directive(document, group).is_none()
+            ) && join_openmp_directive(document, &analysis.buffer, group).is_none()
                 && eligible(&analysis.buffer, group)
                 && group.statements.len() == 1
         })
@@ -367,7 +367,7 @@ fn reflow_with_context_inner(
                           span: &std::ops::Range<usize>|
          -> (Vec<Vec<u8>>, Option<(usize, Decline)>) {
             let mut out: Vec<Vec<u8>> = Vec::new();
-            if let Some(directive) = join_openmp_directive(document, group) {
+            if let Some(directive) = join_openmp_directive(document, &analysis.buffer, group) {
                 // A directive is measured and wrapped at the column the layout
                 // engine is about to move it to.  Measuring the authored indent
                 // instead leaves an over-long directive for the next run to find,
@@ -539,7 +539,8 @@ fn reflow_with_context_inner(
             // back to the statement indent afterwards disagreed with the engine
             // above a dedented `else if`, and the next run moved it.
             let comment_indent = first_indent;
-            let detached = detach_final_inline_comment(document, group, comment_indent);
+            let detached =
+                detach_final_inline_comment(document, &analysis.buffer, group, comment_indent);
             // Whatever step 17 is going to add around `::` has to be paid for
             // here, from the same budget: a break chosen against the unpadded text
             // lands one column over once step 17 runs, and the run after that
@@ -560,7 +561,12 @@ fn reflow_with_context_inner(
                                 conditional,
                             );
                         } else {
-                            copy_group_without_final_comment(document, group, &mut out);
+                            copy_group_without_final_comment(
+                                document,
+                                &analysis.buffer,
+                                group,
+                                &mut out,
+                            );
                         }
                     }
                     Some(None) if group.lines.len() > 1 => {
@@ -657,11 +663,14 @@ impl CommentLexStreams {
     /// Find an inline comment in one physical line while keeping conditional
     /// and ordinary protected regions independent. The returned offset is in
     /// the original physical line, not the sentinel-stripped body.
-    fn comment_start(&mut self, line: &[u8]) -> Option<usize> {
-        let prefix = conditional_compilation_prefix(line);
+    fn comment_start(&mut self, line: &[u8], stream: SourceStream) -> Option<usize> {
+        let prefix = stream
+            .is_conditional()
+            .then(|| conditional_compilation_prefix(line))
+            .flatten();
         let body_start = prefix.map_or(0, |prefix| prefix.body_start);
         let body = &line[body_start..];
-        let lex = self.select_mut(SourceStream::from(prefix));
+        let lex = self.select_mut(stream);
         if lex.in_literal() && !body.trim_ascii_start().starts_with(b"&") {
             return None;
         }
@@ -672,8 +681,9 @@ impl CommentLexStreams {
 /// Return the final inline comment, if there is exactly one and it is on the
 /// last physical line of the group. `None` means the group is unsafe to detach;
 /// `Some(None)` means it has no inline comment.
-fn detach_final_inline_comment(
+fn detach_final_inline_comment<B: AsRef<[u8]>>(
     document: &Document,
+    buffer: &SourceBuffer<B>,
     group: &LogicalGroup,
     comment_indent: usize,
 ) -> Option<Option<Vec<Vec<u8>>>> {
@@ -684,7 +694,16 @@ fn detach_final_inline_comment(
     let mut comments = Vec::new();
     for index in group.lines.clone() {
         let line = &document.lines[index];
-        if let Some(start) = streams.comment_start(line) {
+        let stream = if buffer
+            .lines
+            .get(index)
+            .is_some_and(|line| line.is_conditional_compilation())
+        {
+            SourceStream::Conditional
+        } else {
+            SourceStream::Ordinary
+        };
+        if let Some(start) = streams.comment_start(line, stream) {
             comments.push((index, start));
         }
     }
@@ -741,15 +760,31 @@ impl ReflowSentinel {
     }
 }
 
-fn reflow_sentinel(line: &[u8]) -> Option<(usize, ReflowSentinel)> {
-    if let Some(prefix) = conditional_compilation_prefix(line) {
+fn reflow_sentinel(line: &[u8], conditional: bool) -> Option<(usize, ReflowSentinel)> {
+    if conditional {
+        let prefix = conditional_compilation_prefix(line)?;
         return Some((prefix.body_start, ReflowSentinel::Conditional));
     }
     openmp_directive_prefix(line)
         .map(|prefix| (prefix.body_start, ReflowSentinel::OpenMp(prefix.sentinel)))
 }
 
-fn join_openmp_directive(document: &Document, group: &LogicalGroup) -> Option<Vec<u8>> {
+fn canonical_reflow_sentinel(line: &[u8]) -> Option<(usize, ReflowSentinel)> {
+    if let Some(prefix) = openmp_directive_prefix(line) {
+        return Some((prefix.body_start, ReflowSentinel::OpenMp(prefix.sentinel)));
+    }
+    conditional_compilation_prefix(line)
+        .filter(|prefix| {
+            prefix.kind == crate::source::syntax::ConditionalPrefixKind::BlankSeparated
+        })
+        .map(|prefix| (prefix.body_start, ReflowSentinel::Conditional))
+}
+
+fn join_openmp_directive<B: AsRef<[u8]>>(
+    document: &Document,
+    buffer: &SourceBuffer<B>,
+    group: &LogicalGroup,
+) -> Option<Vec<u8>> {
     // A continued OpenMP directive is already a sequence of physical
     // directives. Joining it here would erase the repeated sentinel and one
     // physical line when the wrapper decides the joined text fits. Wrapping
@@ -765,9 +800,14 @@ fn join_openmp_directive(document: &Document, group: &LogicalGroup) -> Option<Ve
         indices.truncate(1);
     }
 
-    let line = document.lines.get(*indices.first()?)?;
+    let index = *indices.first()?;
+    let line = document.lines.get(index)?;
     let indent_end = line.iter().position(|byte| !byte.is_ascii_whitespace())?;
-    let (body_start, sentinel) = reflow_sentinel(line)?;
+    let conditional = buffer
+        .lines
+        .get(index)
+        .is_some_and(|line| line.is_conditional_compilation());
+    let (body_start, sentinel) = reflow_sentinel(line, conditional)?;
     let body = line.get(body_start..)?.trim_ascii_start();
     if crate::source::regions::comment_start(body).is_some() {
         return None;
@@ -789,7 +829,7 @@ fn wrap_openmp_directive(line: &[u8], line_length: usize) -> Result<Vec<Vec<u8>>
         .position(|byte| !byte.is_ascii_whitespace())
         .unwrap_or(0);
     let indent = &line[..indent_end];
-    let (body_start, sentinel) = reflow_sentinel(line).ok_or(Decline::NoSafeBreak)?;
+    let (body_start, sentinel) = canonical_reflow_sentinel(line).ok_or(Decline::NoSafeBreak)?;
     let mut prefix = indent.to_vec();
     prefix.extend_from_slice(sentinel.canonical());
     if line.len() <= line_length {
@@ -972,8 +1012,9 @@ fn copy_group(document: &Document, group: &LogicalGroup, lines: &mut Vec<Vec<u8>
     }
 }
 
-fn copy_group_without_final_comment(
+fn copy_group_without_final_comment<B: AsRef<[u8]>>(
     document: &Document,
+    buffer: &SourceBuffer<B>,
     group: &LogicalGroup,
     lines: &mut Vec<Vec<u8>>,
 ) {
@@ -983,7 +1024,16 @@ fn copy_group_without_final_comment(
         let Some(line) = document.lines.get(index) else {
             continue;
         };
-        let comment = streams.comment_start(line);
+        let stream = if buffer
+            .lines
+            .get(index)
+            .is_some_and(|line| line.is_conditional_compilation())
+        {
+            SourceStream::Conditional
+        } else {
+            SourceStream::Ordinary
+        };
+        let comment = streams.comment_start(line, stream);
         if index == final_line {
             if let Some(comment) = comment {
                 lines.push(line[..comment].trim_ascii_end().to_vec());
@@ -1156,10 +1206,19 @@ end module m
             pieces: Vec::new(),
         };
         let mut once = Vec::new();
-        super::copy_group_without_final_comment(&document, &group, &mut once);
+        let document_bytes = document.to_lf_bytes();
+        let buffer = SourceBuffer::new(&document_bytes).unwrap();
+        super::copy_group_without_final_comment(&document, &buffer, &group, &mut once);
         let transformed = Document::from_bytes(b"  code ! keep\n  code\n");
         let mut twice = Vec::new();
-        super::copy_group_without_final_comment(&transformed, &group, &mut twice);
+        let transformed_bytes = transformed.to_lf_bytes();
+        let transformed_buffer = SourceBuffer::new(&transformed_bytes).unwrap();
+        super::copy_group_without_final_comment(
+            &transformed,
+            &transformed_buffer,
+            &group,
+            &mut twice,
+        );
         assert_eq!(once, [b"  code ! keep".to_vec(), b"  code".to_vec()]);
         assert_eq!(twice, once);
     }

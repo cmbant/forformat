@@ -15,7 +15,10 @@ use crate::{
     error::FormatError,
     source::{
         regions::{comment_start, line_comment_start, stepped_over_by_continuation},
-        syntax::{conditional_compilation_prefix, is_directive_comment, SourceStream},
+        syntax::{
+            conditional_compilation_prefix, is_directive_comment, ConditionalPrefix,
+            ConditionalPrefixKind, SourceStream,
+        },
         tokens::{tokenize, TokenKind},
         LexState,
     },
@@ -207,6 +210,19 @@ struct MultipleSubscriptScan {
     end_depth: usize,
 }
 
+fn canonical_conditional_prefix(line: &[u8]) -> Option<ConditionalPrefix> {
+    conditional_compilation_prefix(line)
+        .filter(|prefix| prefix.kind == ConditionalPrefixKind::BlankSeparated)
+}
+
+fn stream_for_prefix(prefix: Option<ConditionalPrefix>) -> SourceStream {
+    if prefix.is_some() {
+        SourceStream::Conditional
+    } else {
+        SourceStream::Ordinary
+    }
+}
+
 #[derive(Default)]
 struct DeclarationStreamState {
     lex: LexState,
@@ -248,7 +264,7 @@ impl LexStreams {
 /// than Fortran body bytes, so strip them before tokenizing and translate the
 /// returned column back to the physical line.
 pub(crate) fn declaration_separator_info(line: &[u8]) -> Option<(usize, usize, usize)> {
-    let prefix = conditional_compilation_prefix(line);
+    let prefix = canonical_conditional_prefix(line);
     let body_start = prefix.map_or(0, |prefix| prefix.body_start);
     let body = &line[body_start..];
     declaration_separator_info_in(
@@ -381,10 +397,10 @@ fn declaration_separator_columns(
             if *cpp {
                 return None;
             }
-            let prefix = conditional_compilation_prefix(line);
+            let prefix = canonical_conditional_prefix(line);
             let body_start = prefix.map_or(0, |prefix| prefix.body_start);
             let body = &line[body_start..];
-            let stream = streams.select_mut(SourceStream::from(prefix));
+            let stream = streams.select_mut(stream_for_prefix(prefix));
             // Preserve the same conservative editor-buffer behavior as
             // SourceBuffer: malformed/inactive code between the halves of a
             // protected literal is transparent unless it resumes with `&`.
@@ -430,10 +446,10 @@ fn column_info(
                 // between the halves of a continued literal without ending it.
                 return None;
             }
-            let prefix = conditional_compilation_prefix(line);
+            let prefix = canonical_conditional_prefix(line);
             let body_start = prefix.map_or(0, |prefix| prefix.body_start);
             let body = &line[body_start..];
-            let lex = streams.select_mut(SourceStream::from(prefix));
+            let lex = streams.select_mut(stream_for_prefix(prefix));
             if lex.in_literal() && !body.trim_ascii_start().starts_with(b"&") {
                 return None;
             }
@@ -544,7 +560,7 @@ fn aligned_members(
     // one would collapse the alignment of every commented declaration.
     let width_at = |(line_index, (column, _, after)): &BlockMember, target: usize| {
         let line = &original[*line_index];
-        let body_start = conditional_compilation_prefix(line).map_or(0, |prefix| prefix.body_start);
+        let body_start = canonical_conditional_prefix(line).map_or(0, |prefix| prefix.body_start);
         let body = &line[body_start..];
         let code_end = body_start
             + comment_start(body).map_or(body.len(), |at| body[..at].trim_ascii_end().len());
@@ -645,13 +661,13 @@ fn shares_one_column(separators: &[Option<(usize, usize, usize)>], run: &[usize]
 }
 
 fn code_context(line: &[u8]) -> &[u8] {
-    let body_start = conditional_compilation_prefix(line).map_or(0, |prefix| prefix.body_start);
+    let body_start = canonical_conditional_prefix(line).map_or(0, |prefix| prefix.body_start);
     let body = &line[body_start..];
     comment_start(body).map_or(body, |index| &body[..index])
 }
 
 fn is_comment_line(line: &[u8]) -> bool {
-    conditional_compilation_prefix(line).is_none() && line.trim_ascii_start().starts_with(b"!")
+    canonical_conditional_prefix(line).is_none() && line.trim_ascii_start().starts_with(b"!")
 }
 
 fn trimmed(code: &[u8]) -> &[u8] {

@@ -29,6 +29,22 @@ fn conditional_continuation_spellings_converge_to_valid_exact_output() {
 }
 
 #[test]
+fn standalone_compact_prefix_is_not_promoted_to_conditional_code() {
+    let source = b"program p\n!$& standalone\nend program p\n";
+    for config in [
+        full(),
+        FormatConfig {
+            mode: FormatMode::IndentOnly,
+            ..FormatConfig::default()
+        },
+    ] {
+        let output = format_source(source, &config).unwrap().bytes;
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.lines().any(|line| line == "!$& standalone"), "{text}");
+    }
+}
+
+#[test]
 fn compact_conditional_literal_continuation_keeps_the_required_ampersand() {
     let source = b"program p\ncharacter(len=40) :: s\n!$ s = 'abc &\n!$& def!ghi'\nend program p\n";
 

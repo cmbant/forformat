@@ -1,6 +1,6 @@
 use super::{
-    regions::LexState,
-    syntax::{conditional_compilation_prefix, SourceStream},
+    regions::{LexState, RegionKind},
+    syntax::{conditional_compilation_prefix, ConditionalPrefixKind, SourceStream},
     Newline, PhysicalLine, PhysicalLineKind,
 };
 use crate::error::FormatError;
@@ -18,18 +18,15 @@ pub struct SourceBuffer<B = Vec<u8>> {
 }
 
 #[derive(Default)]
-struct LexStreams {
-    ordinary: LexState,
-    conditional: LexState,
+struct ConditionalStreamState {
+    lex: LexState,
+    continued: bool,
 }
 
-impl LexStreams {
-    fn select_mut(&mut self, stream: SourceStream) -> &mut LexState {
-        match stream {
-            SourceStream::Ordinary => &mut self.ordinary,
-            SourceStream::Conditional => &mut self.conditional,
-        }
-    }
+#[derive(Default)]
+struct LexStreams {
+    ordinary: LexState,
+    conditional: ConditionalStreamState,
 }
 
 impl SourceBuffer<Vec<u8>> {
@@ -90,9 +87,24 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         while first < content.len() && (content[first] == b' ' || content[first] == b'\t') {
             first += 1;
         }
-        let conditional_prefix = conditional_compilation_prefix(content);
-        let stream = SourceStream::from(conditional_prefix);
-        let conditional_start = conditional_prefix.map(|prefix| prefix.body_start);
+        let parsed_prefix = conditional_compilation_prefix(content);
+        let stream = match parsed_prefix {
+            Some(prefix) if prefix.kind == ConditionalPrefixKind::BlankSeparated => {
+                SourceStream::Conditional
+            }
+            Some(prefix)
+                if prefix.kind == ConditionalPrefixKind::CompactContinuation
+                    && states.conditional.continued =>
+            {
+                SourceStream::Conditional
+            }
+            _ => SourceStream::Ordinary,
+        };
+        let conditional_start = stream.is_conditional().then(|| {
+            parsed_prefix
+                .expect("conditional stream has a parsed prefix")
+                .body_start
+        });
         let trimmed = &content[first..];
         let kind = if trimmed.is_empty() {
             PhysicalLineKind::Blank
@@ -113,16 +125,36 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         let mut comment = None;
         if matches!(kind, PhysicalLineKind::Code | PhysicalLineKind::FindentFix) {
             let code = &content[code_offset..];
-            let state = states.select_mut(stream);
-            // A free-form character literal can only resume on a physical line
-            // whose first nonblank body byte is `&`. If malformed or inactive
-            // source puts another code-looking line in between, step over it
-            // rather than letting it close/reset the protected context. This is
-            // the conservative byte-preservation rule used for editor buffers.
-            let can_scan = !state.in_literal() || code.trim_ascii_start().starts_with(b"&");
-            if can_scan {
-                if let Some(i) = super::regions::line_comment_start(state, code) {
-                    comment = Some((span.start + code_offset + i) as u32..span.end as u32);
+            match stream {
+                SourceStream::Ordinary => {
+                    if let Some(i) = super::regions::line_comment_start(&mut states.ordinary, code)
+                    {
+                        comment = Some((span.start + code_offset + i) as u32..span.end as u32);
+                    }
+                }
+                SourceStream::Conditional => {
+                    let stream = &mut states.conditional;
+                    // A free-form character literal can only resume on a physical line
+                    // whose first nonblank body byte is `&`. If malformed or inactive
+                    // source puts another code-looking line in between, step over it
+                    // without consuming either lexical or continuation state.
+                    let can_scan =
+                        !stream.lex.in_literal() || code.trim_ascii_start().starts_with(b"&");
+                    if can_scan {
+                        let mut comment_start = None;
+                        stream.lex.scan(code, |region| {
+                            if comment_start.is_none() && region.kind == RegionKind::Comment {
+                                comment_start = Some(region.range.start);
+                            }
+                        });
+                        if let Some(i) = comment_start {
+                            comment = Some((span.start + code_offset + i) as u32..span.end as u32);
+                        }
+                        stream.continued = ends_with_continuation_before(code, comment_start);
+                        if !stream.continued {
+                            stream.lex = LexState::default();
+                        }
+                    }
                 }
             }
         }
@@ -164,6 +196,14 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
     }
 }
 
+fn ends_with_continuation_before(line: &[u8], comment: Option<usize>) -> bool {
+    let mut end = comment.unwrap_or(line.len());
+    while end > 0 && line[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    end > 0 && line[end - 1] == b'&'
+}
+
 pub fn is_fix(s: &[u8]) -> bool {
     let mut i = 0;
     while i < s.len() && (s[i] == b' ' || s[i] == b'\t') {
@@ -182,7 +222,7 @@ pub fn is_fix(s: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{comment_start, Newline, SourceBuffer};
+    use super::{comment_start, Newline, PhysicalLineKind, SourceBuffer};
 
     #[test]
     fn borrowed_source_buffer_reuses_input_bytes() {
@@ -200,7 +240,7 @@ mod tests {
     }
 
     #[test]
-    fn conditional_compilation_accepts_initial_and_compact_continuation_sentinels() {
+    fn conditional_compilation_accepts_initial_and_contextual_compact_sentinels() {
         let buffer =
             SourceBuffer::new(b"!$ x = 1\n!$\ty = 2 ! note\n!$ call f( &\n!$& arg = 1)\n").unwrap();
         for line in &buffer.lines {
@@ -211,6 +251,14 @@ mod tests {
         assert!(buffer.lines[1].comment_span.is_some());
         assert_eq!(buffer.code_bytes(&buffer.lines[2]), b"call f( &");
         assert_eq!(buffer.code_bytes(&buffer.lines[3]), b"& arg = 1)");
+
+        let standalone = SourceBuffer::new(
+            b"!$& standalone
+",
+        )
+        .unwrap();
+        assert_eq!(standalone.lines[0].kind, PhysicalLineKind::Comment);
+        assert!(!standalone.lines[0].is_conditional_compilation());
     }
 
     #[test]

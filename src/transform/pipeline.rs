@@ -92,7 +92,7 @@ pub fn normalize(
     // spelling. This is a deliberate ordering exception for step 12: the later
     // continuation pass still owns removal of the body-leading `&`.
     let mut changed = if config.style.continuation_markers {
-        passes::conditional_continuations::run(document)
+        passes::conditional_continuations::run(document)?
     } else {
         Changed::No
     };

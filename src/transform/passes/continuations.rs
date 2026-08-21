@@ -3,13 +3,12 @@
 use crate::{
     error::FormatError,
     source::{
-        regions,
         regions::LexState,
         syntax::{
             conditional_compilation_body_start, conditional_compilation_prefix,
             openmp_directive_prefix, ConditionalPrefixKind, SourceStream,
         },
-        RegionKind,
+        PhysicalLineKind, RegionKind,
     },
     transform::{
         document::Document,
@@ -48,15 +47,15 @@ pub fn normalize_continuations(
 ) -> Result<Changed, FormatError> {
     let _ = cx;
     let original = document.lines.clone();
-    let (previous_statement_line, next_statement_line) = statement_neighbours(&original);
+    let (previous_statement_line, next_statement_line) = statement_neighbours(cx);
     let mut normalized = Vec::with_capacity(original.len());
     let mut continuation = false;
     let mut state = LexState::default();
     let mut open_stream: Option<SourceStream> = None;
     for (index, original_line) in original.iter().enumerate() {
-        let stream = source_stream(original_line);
-        let passed_over = regions::stepped_over_by_continuation(original_line)
-            || open_stream.is_some_and(|open| open != stream);
+        let stream = source_stream(cx, index);
+        let passed_over =
+            !carries_statement(cx, index) || open_stream.is_some_and(|open| open != stream);
         let incoming_protected = state.in_literal() || state.in_hollerith();
         let mut line = original_line.clone();
         let code = fortran_code(original_line);
@@ -73,11 +72,13 @@ pub fn normalize_continuations(
             .is_some_and(|at| is_lexical_token_continuation(&original[at], original_line));
         let lexical_suffix = next_statement_line[index]
             .is_some_and(|at| is_lexical_token_continuation(original_line, &original[at]));
-        if continuation && !protected && !lexical_prefix {
-            line = remove_leading_continuation(&line);
-        }
-        if !protected && !lexical_suffix {
-            line = normalize_continuation_marker(&line);
+        if !passed_over {
+            if continuation && !protected && !lexical_prefix {
+                line = remove_leading_continuation(&line);
+            }
+            if !protected && !lexical_suffix {
+                line = normalize_continuation_marker(&line);
+            }
         }
         normalized.push(line);
         if !passed_over {
@@ -172,22 +173,18 @@ fn fortran_code_start(line: &[u8]) -> usize {
 /// Precomputed in two linear passes rather than searched per line: a file that
 /// opens with a long comment header would otherwise make each of those lines
 /// rescan the whole header, which is quadratic and cost 2s on a 40k-line file.
-fn statement_neighbours(lines: &[Vec<u8>]) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
-    let carries_statement: Vec<bool> = lines
-        .iter()
-        .map(|line| !regions::stepped_over_by_continuation(line))
-        .collect();
-    let streams: Vec<SourceStream> = lines.iter().map(|line| source_stream(line)).collect();
+fn statement_neighbours(cx: &PassContext) -> (Vec<Option<usize>>, Vec<Option<usize>>) {
+    let lines = &cx.analysis.buffer.lines;
     let mut previous = vec![None; lines.len()];
     let mut ordinary = None;
     let mut conditional = None;
     for index in 0..lines.len() {
-        let nearest = match streams[index] {
+        let nearest = match source_stream(cx, index) {
             SourceStream::Ordinary => &mut ordinary,
             SourceStream::Conditional => &mut conditional,
         };
         previous[index] = *nearest;
-        if carries_statement[index] {
+        if carries_statement(cx, index) {
             *nearest = Some(index);
         }
     }
@@ -195,21 +192,39 @@ fn statement_neighbours(lines: &[Vec<u8>]) -> (Vec<Option<usize>>, Vec<Option<us
     let mut ordinary = None;
     let mut conditional = None;
     for index in (0..lines.len()).rev() {
-        let nearest = match streams[index] {
+        let nearest = match source_stream(cx, index) {
             SourceStream::Ordinary => &mut ordinary,
             SourceStream::Conditional => &mut conditional,
         };
         next[index] = *nearest;
-        if carries_statement[index] {
+        if carries_statement(cx, index) {
             *nearest = Some(index);
         }
     }
     (previous, next)
 }
 
+fn carries_statement(cx: &PassContext, index: usize) -> bool {
+    cx.analysis
+        .buffer
+        .lines
+        .get(index)
+        .is_some_and(|line| line.kind == PhysicalLineKind::Code)
+}
+
 /// Which continuation stream a physical line belongs to.
-fn source_stream(line: &[u8]) -> SourceStream {
-    SourceStream::from(conditional_compilation_prefix(line))
+fn source_stream(cx: &PassContext, index: usize) -> SourceStream {
+    if cx
+        .analysis
+        .buffer
+        .lines
+        .get(index)
+        .is_some_and(|line| line.is_conditional_compilation())
+    {
+        SourceStream::Conditional
+    } else {
+        SourceStream::Ordinary
+    }
 }
 
 fn lexical_prefix_end(line: &[u8]) -> Option<usize> {

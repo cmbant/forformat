@@ -23,8 +23,9 @@ impl SourceStream {
     }
 }
 
-/// The two free-form conditional-compilation prefix shapes the formatter
-/// accepts.
+/// The two free-form conditional-compilation prefix shapes the source-shape
+/// recognizer reports. Whether a compact prefix belongs to the conditional
+/// stream is contextual and is decided by `SourceBuffer`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConditionalPrefixKind {
     /// A sentinel separated from its body by a horizontal blank: `!$ ` / `!$\t`.
@@ -45,23 +46,15 @@ pub(crate) struct ConditionalPrefix {
     pub kind: ConditionalPrefixKind,
 }
 
-impl From<Option<ConditionalPrefix>> for SourceStream {
-    fn from(prefix: Option<ConditionalPrefix>) -> Self {
-        if prefix.is_some() {
-            Self::Conditional
-        } else {
-            Self::Ordinary
-        }
-    }
-}
-
 /// Parse the free-form conditional-compilation sentinel at the start of a
 /// physical line (after optional horizontal indentation).
 ///
 /// An initial OpenMP conditional-compilation line uses `!$` followed by a
 /// blank. A continued line may instead put the continuation marker directly
-/// after the sentinel, as in `!$& index`. Joined spellings such as `!$OMP` and
-/// `!$acc`, and bare `!$`, are not conditional-compilation code.
+/// after the sentinel, as in `!$& index`. This function recognizes that compact
+/// *shape* without deciding whether a continuation is actually open; semantic
+/// stream classification belongs to `SourceBuffer`. Joined spellings such as
+/// `!$OMP` and `!$acc`, and bare `!$`, are not conditional-compilation code.
 pub(crate) fn conditional_compilation_prefix(line: &[u8]) -> Option<ConditionalPrefix> {
     let start = line.iter().position(|byte| !matches!(byte, b' ' | b'\t'))?;
     if !line
@@ -262,7 +255,7 @@ mod tests {
         conditional_compilation_body_start, conditional_compilation_prefix,
         declaration_type_head_len, is_directive_comment, is_end_construct_keyword,
         openmp_directive_prefix, ConditionalPrefix, ConditionalPrefixKind, OpenMpDirectivePrefix,
-        OpenMpDirectiveSentinel, SourceStream,
+        OpenMpDirectiveSentinel,
     };
     use crate::source::tokens::tokens;
 
@@ -314,11 +307,6 @@ mod tests {
             assert_eq!(
                 conditional_compilation_body_start(line),
                 expected.map(|prefix| prefix.body_start),
-                "{line:?}"
-            );
-            assert_eq!(
-                SourceStream::from(expected).is_conditional(),
-                expected.is_some(),
                 "{line:?}"
             );
         }
