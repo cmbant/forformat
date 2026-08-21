@@ -1,10 +1,11 @@
 use super::{
-    facts::{FileFacts, UseAssociation},
+    facts::{FileFacts, IncludeDirective},
     syntax::{
         is_old_style_type_context, is_type_definition, old_style_type_name, select_type_alias,
         type_definition_parent, type_spec_name,
     },
     types::TypeMaps,
+    HostAccess, HostUnit, UnitFacts, UseAssociation, UseName,
 };
 use crate::{
     analysis::{
@@ -21,11 +22,14 @@ use crate::{
 /// Extract every declaration fact from one analyzed file.
 pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
     let mut facts = FileFacts::default();
+    initialize_units(scopes, &mut facts);
     scope_names(
         scopes,
         &mut facts.cases,
         &mut facts.file_symbols,
+        &mut facts.external_symbols,
         &mut facts.declared_types,
+        &mut facts.units,
     );
     for group in &analysis.groups {
         let first = &analysis.buffer.lines[group.lines.start];
@@ -38,6 +42,12 @@ pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
             }
             continue;
         }
+        let ancestors = scopes.ancestors(scopes.index_of_line(group.lines.start));
+        let unit_scope = ancestors
+            .iter()
+            .copied()
+            .find(|scope| owns_declarations(scopes.scopes[*scope].kind))
+            .unwrap_or(0);
         let owner = scopes.enclosing_type(group.lines.start).map(|scope| {
             scope
                 .name
@@ -45,16 +55,16 @@ pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
                 .unwrap_or_default()
                 .to_ascii_lowercase()
         });
-        let procedure_scope = scopes
-            .ancestors(scopes.index_of_line(group.lines.start))
-            .into_iter()
+        let procedure_scope = ancestors
+            .iter()
+            .copied()
             .find(|scope| is_procedure_scope(scopes.scopes[*scope].kind));
         let procedure = procedure_scope
             .and_then(|scope| scopes.scopes[scope].name.as_deref())
             .map(|name| name.to_ascii_lowercase());
-        let file_specification_scope = scopes
-            .ancestors(scopes.index_of_line(group.lines.start))
-            .into_iter()
+        let file_specification_scope = ancestors
+            .iter()
+            .copied()
             .find(|scope| {
                 matches!(
                     scopes.scopes[*scope].kind,
@@ -72,19 +82,32 @@ pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
             .map(|name| name.to_ascii_lowercase());
 
         for statement in &group.statements {
+            scope_header_semantics(&statement.text, unit_scope, scopes, &mut facts);
+            import_statement(&statement.text, unit_scope, &mut facts);
+            include_statement(&statement.text, group.lines.start, &mut facts.includes);
+            if owner.is_none() {
+                access_statement(&statement.text, unit_scope, &mut facts);
+                type_definition_access(&statement.text, unit_scope, &mut facts);
+            }
             if let Some((child, parent)) = type_definition_parent(&statement.text) {
                 facts.types.insert_parent(child, parent);
+                if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                    unit.type_graph.insert_parent(child, parent);
+                }
             }
-            use_statement(
-                &statement.text,
-                &mut facts.cases.symbols,
-                &mut facts.imports,
-            );
-            auxiliary_declaration(&statement.text, &mut facts.cases.symbols);
+            if let Some(association) = use_statement(&statement.text, &mut facts.cases.symbols) {
+                if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                    unit.imports.push(association);
+                }
+            }
+            if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                auxiliary_declaration(&statement.text, &mut facts.cases.symbols, &mut unit.symbols);
+            }
             entity_declaration(
                 &statement.text,
                 owner.as_deref(),
                 procedure.as_deref(),
+                unit_scope,
                 file_scope_declaration,
                 declaring_module.as_deref(),
                 &mut facts,
@@ -93,6 +116,10 @@ pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
                 if let Some(selector_type) =
                     selector_type(&statement.text, &facts.types, procedure.as_deref())
                 {
+                    if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                        unit.symbols.insert(&alias);
+                        unit.insert_variable_type(&alias, &selector_type);
+                    }
                     if let Some(procedure) = procedure.as_deref() {
                         facts
                             .types
@@ -107,6 +134,183 @@ pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
     facts
 }
 
+fn owns_declarations(kind: ScopeKind) -> bool {
+    kind == ScopeKind::File || kind.is_program_unit() || kind == ScopeKind::Construct
+}
+
+fn initialize_units(scopes: &ScopeTree, facts: &mut FileFacts) {
+    for (scope_index, scope) in scopes.scopes.iter().enumerate() {
+        if !owns_declarations(scope.kind) {
+            continue;
+        }
+        let mut parent = scope.parent;
+        while parent.is_some_and(|candidate| !owns_declarations(scopes.scopes[candidate].kind)) {
+            parent = parent.and_then(|candidate| scopes.scopes[candidate].parent);
+        }
+        let mut unit = UnitFacts::new(
+            scope_index,
+            scope.kind,
+            scope.name.as_deref().map(|name| name.to_ascii_lowercase()),
+            parent,
+            scope.lines.clone(),
+        );
+        if scope.kind == ScopeKind::Procedure
+            && scope
+                .parent
+                .is_some_and(|parent| scopes.scopes[parent].kind == ScopeKind::Interface)
+        {
+            unit.host_access = HostAccess::none_by_default();
+        }
+        facts.units.insert(scope_index, unit);
+    }
+}
+
+fn scope_header_semantics(
+    text: &[u8],
+    unit_scope: usize,
+    scopes: &ScopeTree,
+    facts: &mut FileFacts,
+) {
+    let Some(scope) = scopes.scopes.get(unit_scope) else {
+        return;
+    };
+    if scope.kind == ScopeKind::Submodule {
+        if let Some((identity, host)) = submodule_header(text) {
+            if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                unit.project_host = Some(identity);
+                unit.semantic_host = Some(host);
+            }
+        }
+    }
+    if scope.kind == ScopeKind::Procedure
+        && scope
+            .parent
+            .is_some_and(|parent| scopes.scopes[parent].kind == ScopeKind::Interface)
+        && module_procedure_interface_header(text)
+    {
+        if let Some(unit) = facts.units.get_mut(&unit_scope) {
+            unit.host_access.set_default_all();
+        }
+    }
+}
+
+fn submodule_header(text: &[u8]) -> Option<(HostUnit, HostUnit)> {
+    let tokens = tokenize(text, &mut LexState::default());
+    let first = tokens
+        .iter()
+        .position(|token| token.kind != TokenKind::Number)?;
+    if !tokens[first].is_name(b"submodule") {
+        return None;
+    }
+    let open = tokens[first + 1..]
+        .iter()
+        .position(|token| token.text == b"(")?
+        + first
+        + 1;
+    let close = tokens[open + 1..]
+        .iter()
+        .position(|token| token.text == b")")?
+        + open
+        + 1;
+    let ancestor = tokens[open + 1..close]
+        .iter()
+        .find(|token| token.kind == TokenKind::Name)?
+        .text
+        .to_ascii_lowercase();
+    let parent = tokens[open + 1..close]
+        .iter()
+        .position(|token| token.text == b":")
+        .and_then(|colon| {
+            tokens[open + 1 + colon + 1..close]
+                .iter()
+                .find(|token| token.kind == TokenKind::Name)
+        })
+        .map(|token| token.text.to_ascii_lowercase());
+    let child = tokens[close + 1..]
+        .iter()
+        .find(|token| token.kind == TokenKind::Name)?
+        .text
+        .to_ascii_lowercase();
+    let identity = HostUnit::Submodule {
+        ancestor: ancestor.clone(),
+        name: child,
+    };
+    let host = parent.map_or_else(
+        || HostUnit::Module(ancestor.clone()),
+        |name| HostUnit::Submodule {
+            ancestor: ancestor.clone(),
+            name,
+        },
+    );
+    Some((identity, host))
+}
+
+fn module_procedure_interface_header(text: &[u8]) -> bool {
+    let tokens = tokenize(text, &mut LexState::default());
+    let mut saw_module = false;
+    for token in tokens.iter().filter(|token| token.depth == 0) {
+        if token.kind != TokenKind::Name {
+            continue;
+        }
+        if token.is_name(b"module") {
+            saw_module = true;
+        }
+        if token.is_name(b"subroutine") || token.is_name(b"function") {
+            return saw_module;
+        }
+    }
+    false
+}
+
+fn import_statement(text: &[u8], unit_scope: usize, facts: &mut FileFacts) {
+    let tokens = tokenize(text, &mut LexState::default());
+    let Some(first) = tokens
+        .iter()
+        .position(|token| token.kind != TokenKind::Number)
+    else {
+        return;
+    };
+    if !tokens[first].is_name(b"import") {
+        return;
+    }
+    let Some(unit) = facts.units.get_mut(&unit_scope) else {
+        return;
+    };
+    let qualifier = tokens[first + 1..]
+        .iter()
+        .find(|token| token.depth == 0 && token.kind == TokenKind::Name);
+    if qualifier.is_some_and(|token| token.is_name(b"none")) {
+        unit.host_access.import_none();
+        return;
+    }
+    if qualifier.is_some_and(|token| token.is_name(b"all")) {
+        unit.host_access.import_all();
+        return;
+    }
+    let only = qualifier.is_some_and(|token| token.is_name(b"only"));
+    let start = if only {
+        tokens
+            .iter()
+            .position(|token| token.depth == 0 && token.text == b":")
+            .map_or(tokens.len(), |colon| colon + 1)
+    } else {
+        tokens
+            .iter()
+            .position(|token| token.depth == 0 && token.text == b"::")
+            .map_or(first + 1, |separator| separator + 1)
+    };
+    let names = tokens[start..]
+        .iter()
+        .filter(|token| token.depth == 0 && token.kind == TokenKind::Name)
+        .map(|token| token.text.to_vec())
+        .collect::<Vec<_>>();
+    if names.is_empty() && !only {
+        unit.host_access.import_all();
+    } else {
+        unit.host_access.import_only(names);
+    }
+}
+
 fn is_procedure_scope(kind: ScopeKind) -> bool {
     matches!(kind, ScopeKind::Program | ScopeKind::Procedure)
 }
@@ -117,6 +321,7 @@ fn entity_declaration(
     text: &[u8],
     owner: Option<&[u8]>,
     procedure: Option<&[u8]>,
+    unit_scope: usize,
     file_scope_declaration: bool,
     declaring_module: Option<&[u8]>,
     facts: &mut FileFacts,
@@ -135,15 +340,15 @@ fn entity_declaration(
     if is_type_definition(&tokens, first_index) {
         return;
     }
-    let Some(separator) = tokens
-        .iter()
-        .position(|t| t.depth == 0 && t.kind == TokenKind::Operator && t.text == b"::")
-    else {
+    let Some(separator) = tokens.iter().position(|token| {
+        token.depth == 0 && token.kind == TokenKind::Operator && token.text == b"::"
+    }) else {
         old_style_declaration(
             &tokens,
             first_index,
             owner,
             procedure,
+            unit_scope,
             file_scope_declaration,
             declaring_module,
             facts,
@@ -158,6 +363,7 @@ fn entity_declaration(
             facts.cases.types.insert(name);
             name.to_ascii_lowercase()
         });
+    let access = declaration_access(&tokens, first_index, separator);
 
     let bound_procedure =
         owner.is_some() && (first.is(b"procedure") || first.is(b"generic") || first.is(b"final"));
@@ -176,6 +382,9 @@ fn entity_declaration(
                     if !first.is(b"generic") {
                         if let Some(owner) = owner {
                             facts.cases.bound_type_procedures.insert(owner, token.text);
+                            if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                                unit.bound_type_procedures.insert(owner, token.text);
+                            }
                         }
                     }
                     if first.is(b"generic") {
@@ -184,6 +393,9 @@ fn entity_declaration(
                             facts
                                 .generic_bound_type_procedures
                                 .insert(owner, token.text);
+                            if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                                unit.generic_bound_type_procedures.insert(owner, token.text);
+                            }
                         }
                     }
                     continue;
@@ -192,6 +404,13 @@ fn entity_declaration(
                     (Some(owner), declared) => {
                         facts.cases.components.insert(owner, token.text);
                         facts.cases.symbols.insert(token.text);
+                        if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                            unit.components.insert(owner, token.text);
+                            if let Some(declared) = declared {
+                                unit.type_graph
+                                    .insert_component(owner, token.text, declared);
+                            }
+                        }
                         if file_scope_declaration {
                             facts.file_symbols.insert(token.text);
                         }
@@ -201,6 +420,17 @@ fn entity_declaration(
                     }
                     (None, declared) => {
                         facts.cases.symbols.insert(token.text);
+                        if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                            unit.symbols.insert(token.text);
+                            if let Some(declared) = declared {
+                                unit.insert_variable_type(token.text, declared);
+                            }
+                            if let Some(private) = access {
+                                if matches!(unit.kind, ScopeKind::Module | ScopeKind::File) {
+                                    unit.access.mark(token.text, private);
+                                }
+                            }
+                        }
                         if file_scope_declaration {
                             facts.file_symbols.insert(token.text);
                         }
@@ -226,11 +456,26 @@ fn entity_declaration(
     }
 }
 
+fn declaration_access(
+    tokens: &[crate::source::Token<'_>],
+    start: usize,
+    separator: usize,
+) -> Option<bool> {
+    tokens[start..separator].iter().find_map(|token| {
+        token
+            .is_name(b"private")
+            .then_some(true)
+            .or_else(|| token.is_name(b"public").then_some(false))
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn old_style_declaration(
     tokens: &[crate::source::Token<'_>],
     first_index: usize,
     owner: Option<&[u8]>,
     procedure: Option<&[u8]>,
+    unit_scope: usize,
     file_scope_declaration: bool,
     declaring_module: Option<&[u8]>,
     facts: &mut FileFacts,
@@ -290,6 +535,13 @@ fn old_style_declaration(
             if let Some(owner) = owner {
                 facts.cases.components.insert(owner, token.text);
                 facts.cases.symbols.insert(token.text);
+                if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                    unit.components.insert(owner, token.text);
+                    if let Some(declared_type) = &declared_type {
+                        unit.type_graph
+                            .insert_component(owner, token.text, declared_type);
+                    }
+                }
                 if file_scope_declaration {
                     facts.file_symbols.insert(token.text);
                 }
@@ -300,6 +552,12 @@ fn old_style_declaration(
                 }
             } else {
                 facts.cases.symbols.insert(token.text);
+                if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                    unit.symbols.insert(token.text);
+                    if let Some(declared_type) = &declared_type {
+                        unit.insert_variable_type(token.text, declared_type);
+                    }
+                }
                 if file_scope_declaration {
                     facts.file_symbols.insert(token.text);
                 }
@@ -326,35 +584,135 @@ fn scope_names(
     scopes: &ScopeTree,
     cases: &mut CaseTables,
     file_symbols: &mut CaseMap,
+    external_symbols: &mut CaseMap,
     declared_types: &mut CaseMap,
+    units: &mut std::collections::HashMap<usize, UnitFacts>,
 ) {
-    for scope in &scopes.scopes {
+    for (scope_index, scope) in scopes.scopes.iter().enumerate() {
         let Some(name) = scope.name.as_deref() else {
             continue;
         };
         match scope.kind {
             ScopeKind::Module | ScopeKind::Submodule => cases.modules.insert(name),
-            ScopeKind::Program | ScopeKind::Procedure => {
+            ScopeKind::Program => {
                 cases.symbols.insert(name);
                 file_symbols.insert(name);
+            }
+            ScopeKind::Procedure => {
+                cases.symbols.insert(name);
+                file_symbols.insert(name);
+                let parent_scope = units.get(&scope_index).and_then(|unit| unit.parent);
+                if let Some(parent_scope) = parent_scope {
+                    if let Some(parent) = units.get_mut(&parent_scope) {
+                        parent.symbols.insert(name);
+                        if parent.kind == ScopeKind::File {
+                            external_symbols.insert(name);
+                        }
+                    }
+                }
             }
             ScopeKind::DerivedType => {
                 cases.types.insert(name);
                 cases.symbols.insert(name);
                 file_symbols.insert(name);
                 declared_types.insert(name);
+                let mut parent = scope.parent;
+                while let Some(candidate) = parent {
+                    if let Some(unit) = units.get_mut(&candidate) {
+                        unit.types.insert(name);
+                        unit.symbols.insert(name);
+                        break;
+                    }
+                    parent = scopes.scopes[candidate].parent;
+                }
             }
             ScopeKind::File | ScopeKind::Interface | ScopeKind::Construct => {}
         }
     }
 }
 
-/// Record authored USE names and the association needed for imported type lookup.
-fn use_statement(text: &[u8], symbols: &mut CaseMap, imports: &mut Vec<UseAssociation>) {
+fn access_statement(text: &[u8], unit_scope: usize, facts: &mut FileFacts) {
     let tokens = tokenize(text, &mut LexState::default());
-    let first = usize::from(tokens.first().is_some_and(|t| t.kind == TokenKind::Number));
-    if !tokens.get(first).is_some_and(|t| t.is_name(b"use")) {
+    let Some(first) = tokens
+        .iter()
+        .position(|token| token.kind != TokenKind::Number)
+    else {
         return;
+    };
+    let private = if tokens[first].is_name(b"private") {
+        true
+    } else if tokens[first].is_name(b"public") {
+        false
+    } else {
+        return;
+    };
+    let Some(unit) = facts.units.get_mut(&unit_scope) else {
+        return;
+    };
+    if !matches!(unit.kind, ScopeKind::Module | ScopeKind::File) {
+        return;
+    }
+    let start = tokens
+        .iter()
+        .position(|token| token.depth == 0 && token.text == b"::")
+        .map_or(first + 1, |separator| separator + 1);
+    let names = tokens[start..]
+        .iter()
+        .filter(|token| token.depth == 0 && token.kind == TokenKind::Name)
+        .map(|token| token.text)
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        unit.access.set_default(private);
+    } else {
+        for name in names {
+            unit.access.mark(name, private);
+        }
+    }
+}
+
+fn type_definition_access(text: &[u8], unit_scope: usize, facts: &mut FileFacts) {
+    let tokens = tokenize(text, &mut LexState::default());
+    let Some(first) = tokens
+        .iter()
+        .position(|token| token.kind != TokenKind::Number)
+    else {
+        return;
+    };
+    if !is_type_definition(&tokens, first) {
+        return;
+    }
+    let Some(separator) = tokens
+        .iter()
+        .position(|token| token.depth == 0 && token.text == b"::")
+    else {
+        return;
+    };
+    let Some(private) = declaration_access(&tokens, first, separator) else {
+        return;
+    };
+    let Some(name) = tokens[separator + 1..]
+        .iter()
+        .find(|token| token.depth == 0 && token.kind == TokenKind::Name)
+    else {
+        return;
+    };
+    if let Some(unit) = facts.units.get_mut(&unit_scope) {
+        if matches!(unit.kind, ScopeKind::Module | ScopeKind::File) {
+            unit.access.mark(name.text, private);
+        }
+    }
+}
+
+/// Record authored USE names and retain the association for scope-aware lookup.
+fn use_statement(text: &[u8], symbols: &mut CaseMap) -> Option<UseAssociation> {
+    let tokens = tokenize(text, &mut LexState::default());
+    let first = usize::from(
+        tokens
+            .first()
+            .is_some_and(|token| token.kind == TokenKind::Number),
+    );
+    if !tokens.get(first).is_some_and(|token| token.is_name(b"use")) {
+        return None;
     }
     let separator = tokens
         .iter()
@@ -363,14 +721,11 @@ fn use_statement(text: &[u8], symbols: &mut CaseMap, imports: &mut Vec<UseAssoci
         .find(|(_, token)| token.depth == 0 && token.text == b"::")
         .map(|(index, _)| index);
     let module_start = separator.map_or(first + 1, |index| index + 1);
-    let Some((module_index, module)) = tokens
+    let (module_index, module) = tokens
         .iter()
         .enumerate()
         .skip(module_start)
-        .find(|(_, token)| token.depth == 0 && token.kind == TokenKind::Name)
-    else {
-        return;
-    };
+        .find(|(_, token)| token.depth == 0 && token.kind == TokenKind::Name)?;
     let only = tokens
         .iter()
         .enumerate()
@@ -409,18 +764,61 @@ fn use_statement(text: &[u8], symbols: &mut CaseMap, imports: &mut Vec<UseAssoci
             symbols.insert(local.text);
             let remote = remote.unwrap_or(local);
             symbols.insert(remote.text);
-            association.names.push((
-                local.text.to_ascii_lowercase(),
-                remote.text.to_ascii_lowercase(),
-            ));
+            association.names.push(UseName {
+                local: local.text.to_ascii_lowercase(),
+                remote: remote.text.to_ascii_lowercase(),
+                local_spelling: local.text.to_vec(),
+            });
         }
         item_start = item_end.saturating_add(1);
     }
-    imports.push(association);
+    Some(association)
+}
+
+fn include_statement(text: &[u8], line: usize, includes: &mut Vec<IncludeDirective>) {
+    let tokens = tokenize(text, &mut LexState::default());
+    let Some(first) = tokens
+        .iter()
+        .position(|token| token.kind != TokenKind::Number)
+    else {
+        return;
+    };
+    if !tokens[first].is_name(b"include") {
+        return;
+    }
+    let Some(string) = tokens
+        .get(first + 1)
+        .filter(|token| token.kind == TokenKind::String)
+    else {
+        return;
+    };
+    let Some(path) = include_path(string.text) else {
+        return;
+    };
+    includes.push(IncludeDirective { line, path });
+}
+
+fn include_path(literal: &[u8]) -> Option<Vec<u8>> {
+    let quote = *literal.first()?;
+    if literal.len() < 2 || !matches!(quote, b'\'' | b'"') || literal.last() != Some(&quote) {
+        return None;
+    }
+    let mut path = Vec::with_capacity(literal.len().saturating_sub(2));
+    let mut index = 1;
+    while index + 1 < literal.len() {
+        if literal[index] == quote && literal.get(index + 1) == Some(&quote) {
+            path.push(quote);
+            index += 2;
+        } else {
+            path.push(literal[index]);
+            index += 1;
+        }
+    }
+    (!path.is_empty()).then_some(path)
 }
 
 /// Statement forms whose entities are names but do not have a type-spec `::`.
-fn auxiliary_declaration(text: &[u8], symbols: &mut CaseMap) {
+fn auxiliary_declaration(text: &[u8], symbols: &mut CaseMap, unit_symbols: &mut CaseMap) {
     let tokens = tokenize(text, &mut LexState::default());
     let Some(first) = tokens
         .iter()
@@ -435,6 +833,7 @@ fn auxiliary_declaration(text: &[u8], symbols: &mut CaseMap) {
             .filter(|token| token.kind == TokenKind::Name)
         {
             symbols.insert(name.text);
+            unit_symbols.insert(name.text);
         }
         return;
     }
@@ -455,6 +854,7 @@ fn auxiliary_declaration(text: &[u8], symbols: &mut CaseMap) {
             }
             if token.kind == TokenKind::Name && (in_names || slash_count == 0 || slash_count == 1) {
                 symbols.insert(token.text);
+                unit_symbols.insert(token.text);
             }
         }
         return;
@@ -465,13 +865,14 @@ fn auxiliary_declaration(text: &[u8], symbols: &mut CaseMap) {
         .map_or(first + 1, |separator| separator + 1);
     let mut expect_name = true;
     for token in tokens.iter().skip(start) {
-        if token.depth != 0 {
+        if token.depth > 0 {
             continue;
         }
         if token.kind == TokenKind::Comma {
             expect_name = true;
         } else if token.kind == TokenKind::Name && expect_name {
             symbols.insert(token.text);
+            unit_symbols.insert(token.text);
             expect_name = false;
         }
     }

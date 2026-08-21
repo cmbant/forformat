@@ -90,6 +90,24 @@ impl TypeMaps {
         );
     }
 
+    /// Merge only owner-qualified type structure. This is used for textual
+    /// INCLUDE fragments so their local/root variables do not become
+    /// project-global merely because the fragment exists on disk.
+    pub(crate) fn merge_non_roots(&mut self, other: &TypeMaps) {
+        merge_component_type_map(
+            &mut self.component_types,
+            &mut self.component_type_ambiguities,
+            &other.component_types,
+            &other.component_type_ambiguities,
+        );
+        merge_type_map(
+            &mut self.parent_types,
+            &mut self.parent_type_ambiguities,
+            &other.parent_types,
+            &other.parent_type_ambiguities,
+        );
+    }
+
     pub fn insert_local(&mut self, name: &[u8], type_name: &[u8]) {
         insert_agreed_type(
             &mut self.local_types,
@@ -147,6 +165,19 @@ impl TypeMaps {
             name,
             type_name,
         );
+    }
+
+    pub(crate) fn direct_component_type(&self, owner: &[u8], name: &[u8]) -> Option<&[u8]> {
+        let key = (owner.to_ascii_lowercase(), name.to_ascii_lowercase());
+        if self.component_type_ambiguities.contains(&key) {
+            return None;
+        }
+        self.component_types.get(&key).map(Vec::as_slice)
+    }
+
+    pub(crate) fn direct_component_type_is_ambiguous(&self, owner: &[u8], name: &[u8]) -> bool {
+        self.component_type_ambiguities
+            .contains(&(owner.to_ascii_lowercase(), name.to_ascii_lowercase()))
     }
 
     pub fn insert_parent(&mut self, child: &[u8], parent: &[u8]) {

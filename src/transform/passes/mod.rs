@@ -12,5 +12,6 @@ pub mod continuations;
 pub mod layout_post;
 pub mod line_rules;
 pub mod rewrap;
+pub mod scoped_case;
 pub mod semicolons;
 pub mod structure;

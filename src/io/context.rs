@@ -6,7 +6,7 @@
 
 use super::{sources::Source, WorkflowError};
 use crate::{
-    analysis::{analyze_file, FileFacts, ProjectContext},
+    analysis::{analyze_file_at, FileFacts, ProjectContext},
     format_source, FormatResult,
 };
 use std::{
@@ -24,7 +24,10 @@ pub(super) fn analyze_sources(
 ) -> Result<Vec<Option<FileFacts>>, WorkflowError> {
     let mut facts = (0..sources.len()).map(|_| None).collect::<Vec<_>>();
     for &index in indices {
-        facts[index] = Some(analyze_file(&sources[index].bytes)?);
+        facts[index] = Some(analyze_file_at(
+            &sources[index].path,
+            &sources[index].bytes,
+        )?);
     }
     Ok(facts)
 }
