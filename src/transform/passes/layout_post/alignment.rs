@@ -15,7 +15,10 @@ use crate::{
     error::FormatError,
     source::{
         regions::{comment_start, line_comment_start, stepped_over_by_continuation},
-        syntax::is_directive_comment,
+        syntax::{
+            conditional_compilation_prefix, is_directive_comment, ConditionalPrefix,
+            ConditionalPrefixKind, SourceStream,
+        },
         tokens::{tokenize, TokenKind},
         LexState,
     },
@@ -145,7 +148,7 @@ fn align_comment_runs(
                 None => {
                     let transparent = !cpp_lines[scan]
                         && (lines[scan].trim_ascii().is_empty()
-                            || lines[scan].trim_ascii_start().starts_with(b"!")
+                            || is_comment_line(&lines[scan])
                             || continues_previous_line(lines, scan));
                     if !transparent {
                         break;
@@ -207,13 +210,69 @@ struct MultipleSubscriptScan {
     end_depth: usize,
 }
 
-/// The `::` a standalone line offers for alignment, scanned from a clean state.
+fn canonical_conditional_prefix(line: &[u8]) -> Option<ConditionalPrefix> {
+    conditional_compilation_prefix(line)
+        .filter(|prefix| prefix.kind == ConditionalPrefixKind::BlankSeparated)
+}
+
+fn stream_for_prefix(prefix: Option<ConditionalPrefix>) -> SourceStream {
+    if prefix.is_some() {
+        SourceStream::Conditional
+    } else {
+        SourceStream::Ordinary
+    }
+}
+
+#[derive(Default)]
+struct DeclarationStreamState {
+    lex: LexState,
+    multiple_subscript: MultipleSubscriptState,
+}
+
+#[derive(Default)]
+struct DeclarationStreams {
+    ordinary: DeclarationStreamState,
+    conditional: DeclarationStreamState,
+}
+
+impl DeclarationStreams {
+    fn select_mut(&mut self, stream: SourceStream) -> &mut DeclarationStreamState {
+        match stream {
+            SourceStream::Ordinary => &mut self.ordinary,
+            SourceStream::Conditional => &mut self.conditional,
+        }
+    }
+}
+
+#[derive(Default)]
+struct LexStreams {
+    ordinary: LexState,
+    conditional: LexState,
+}
+
+impl LexStreams {
+    fn select_mut(&mut self, stream: SourceStream) -> &mut LexState {
+        match stream {
+            SourceStream::Ordinary => &mut self.ordinary,
+            SourceStream::Conditional => &mut self.conditional,
+        }
+    }
+}
+
+/// The `::` a standalone physical line offers for alignment, scanned from a
+/// clean state. Conditional-compilation sentinels are source prefixes rather
+/// than Fortran body bytes, so strip them before tokenizing and translate the
+/// returned column back to the physical line.
 pub(crate) fn declaration_separator_info(line: &[u8]) -> Option<(usize, usize, usize)> {
+    let prefix = canonical_conditional_prefix(line);
+    let body_start = prefix.map_or(0, |prefix| prefix.body_start);
+    let body = &line[body_start..];
     declaration_separator_info_in(
-        line,
+        body,
         &mut LexState::default(),
         &mut MultipleSubscriptState::default(),
     )
+    .map(|(column, before, after)| (body_start + column, before, after))
 }
 
 /// The same, for one physical line while carrying any active multiple-subscript
@@ -230,6 +289,8 @@ fn declaration_separator_info_in(
         return None;
     }
 
+    let mut continuation_lex = *lex;
+    let line_scan = continuation_lex.scan_line(line, |_| {});
     let tokens = tokenize(line, lex);
     let scan = scan_multiple_subscripts(
         &tokens,
@@ -247,14 +308,7 @@ fn declaration_separator_info_in(
         .map(|(_, token)| token.span.start);
 
     let has_code = tokens.iter().any(|token| token.kind != TokenKind::Comment);
-    let trailing_token_marker = tokens
-        .iter()
-        .rev()
-        .find(|token| token.kind != TokenKind::Comment)
-        .is_some_and(|token| token.kind == TokenKind::Ampersand);
-    let protected_trailing_marker =
-        (lex.in_literal() || lex.in_hollerith()) && line.trim_ascii_end().last() == Some(&b'&');
-    let continued = has_code && (trailing_token_marker || protected_trailing_marker);
+    let continued = has_code && line_scan.continued;
     if has_code {
         if continued {
             multiple_subscript.open_depth = scan.end_depth;
@@ -330,25 +384,26 @@ fn declaration_separator_columns(
     lines: &[Vec<u8>],
     cpp_lines: &[bool],
 ) -> Vec<Option<(usize, usize, usize)>> {
-    let mut lex = [LexState::default(), LexState::default()];
-    let mut multiple_subscripts = [
-        MultipleSubscriptState::default(),
-        MultipleSubscriptState::default(),
-    ];
+    let mut streams = DeclarationStreams::default();
     lines
         .iter()
         .zip(cpp_lines)
         .map(|(line, cpp)| {
             if *cpp {
-                None
-            } else {
-                let stream = usize::from(line.trim_ascii_start().starts_with(b"!$ "));
-                declaration_separator_info_in(
-                    line,
-                    &mut lex[stream],
-                    &mut multiple_subscripts[stream],
-                )
+                return None;
             }
+            let prefix = canonical_conditional_prefix(line);
+            let body_start = prefix.map_or(0, |prefix| prefix.body_start);
+            let body = &line[body_start..];
+            let stream = streams.select_mut(stream_for_prefix(prefix));
+            // Preserve the same conservative editor-buffer behavior as
+            // SourceBuffer: malformed/inactive code between the halves of a
+            // protected literal is transparent unless it resumes with `&`.
+            if stream.lex.in_literal() && !body.trim_ascii_start().starts_with(b"&") {
+                return None;
+            }
+            declaration_separator_info_in(body, &mut stream.lex, &mut stream.multiple_subscript)
+                .map(|(column, before, after)| (body_start + column, before, after))
         })
         .collect()
 }
@@ -368,17 +423,15 @@ fn preprocessor_lines(lines: &[Vec<u8>]) -> Vec<bool> {
 ///
 /// The lexical state is threaded through the walk because a `!` or a `::` on
 /// the second physical line of a continued character literal is literal text:
-/// padding it to a column would write bytes into the literal.  A directive line
-/// carries no column and ends any state a malformed buffer left open.
+/// padding it to a column would write bytes into the literal. Conditional
+/// sentinels are source prefixes, not Fortran body bytes, so they are removed
+/// before scanning and their width is added back to any returned column.
 fn column_info(
     lines: &[Vec<u8>],
     cpp_lines: &[bool],
     mut info: impl FnMut(&[u8], &mut LexState) -> Option<(usize, usize, usize)>,
 ) -> Vec<Option<(usize, usize, usize)>> {
-    // One state per sentinel stream: a statement continues only within its own,
-    // so consecutive `!$ ` lines splice with each other while an ordinary
-    // literal spans an intervening one.
-    let mut lex = [LexState::default(), LexState::default()];
+    let mut streams = LexStreams::default();
     lines
         .iter()
         .zip(cpp_lines)
@@ -386,11 +439,16 @@ fn column_info(
             if *cpp {
                 // A directive line is stepped over, not lexed: it can sit
                 // between the halves of a continued literal without ending it.
-                None
-            } else {
-                let stream = usize::from(line.trim_ascii_start().starts_with(b"!$ "));
-                info(line, &mut lex[stream])
+                return None;
             }
+            let prefix = canonical_conditional_prefix(line);
+            let body_start = prefix.map_or(0, |prefix| prefix.body_start);
+            let body = &line[body_start..];
+            let lex = streams.select_mut(stream_for_prefix(prefix));
+            if lex.in_literal() && !body.trim_ascii_start().starts_with(b"&") {
+                return None;
+            }
+            info(body, lex).map(|(column, before, after)| (body_start + column, before, after))
         })
         .collect()
 }
@@ -497,8 +555,10 @@ fn aligned_members(
     // one would collapse the alignment of every commented declaration.
     let width_at = |(line_index, (column, _, after)): &BlockMember, target: usize| {
         let line = &original[*line_index];
-        let code_end =
-            comment_start(line).map_or(line.len(), |at| line[..at].trim_ascii_end().len());
+        let body_start = canonical_conditional_prefix(line).map_or(0, |prefix| prefix.body_start);
+        let body = &line[body_start..];
+        let code_end = body_start
+            + comment_start(body).map_or(body.len(), |at| body[..at].trim_ascii_end().len());
         target + 3 + code_end.saturating_sub(column + 2 + after)
     };
     let mut members: Vec<&BlockMember> = block
@@ -554,7 +614,7 @@ fn collect_paragraph(
             *index += 1;
             continue;
         }
-        if !cpp_lines[*index] && lines[*index].trim_ascii_start().starts_with(b"!") {
+        if !cpp_lines[*index] && is_comment_line(&lines[*index]) {
             *index += 1;
             continue;
         }
@@ -576,8 +636,7 @@ fn next_carrier(
     let stop = (index..lines.len()).find(|candidate| {
         separators[*candidate].is_some()
             || cpp_lines[*candidate]
-            || !(lines[*candidate].trim_ascii().is_empty()
-                || lines[*candidate].trim_ascii_start().starts_with(b"!"))
+            || !(lines[*candidate].trim_ascii().is_empty() || is_comment_line(&lines[*candidate]))
     })?;
     separators[stop].is_some().then_some(stop)
 }
@@ -597,7 +656,13 @@ fn shares_one_column(separators: &[Option<(usize, usize, usize)>], run: &[usize]
 }
 
 fn code_context(line: &[u8]) -> &[u8] {
-    comment_start(line).map_or(line, |index| &line[..index])
+    let body_start = canonical_conditional_prefix(line).map_or(0, |prefix| prefix.body_start);
+    let body = &line[body_start..];
+    comment_start(body).map_or(body, |index| &body[..index])
+}
+
+fn is_comment_line(line: &[u8]) -> bool {
+    canonical_conditional_prefix(line).is_none() && line.trim_ascii_start().starts_with(b"!")
 }
 
 fn trimmed(code: &[u8]) -> &[u8] {

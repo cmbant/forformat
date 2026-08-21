@@ -64,21 +64,12 @@ struct LineContext<'a> {
     continued_component: bool,
 }
 
-/// State carried from one physical line to the next while step 11 runs.
+/// Continuation and lexical state for one physical source stream.
 #[derive(Default)]
-struct LineState {
+struct StatementState {
     lex: LexState,
-    /// The conditional-compilation stream's own lexical state.
-    ///
-    /// A statement continues only within its own sentinel stream, so the two
-    /// carry literal and Hollerith state independently: consecutive `!$ ` lines
-    /// splice with each other, and an ordinary literal spans an intervening
-    /// `!$ ` line because that line is a comment under the only reading of the
-    /// source that compiles.
-    omp_lex: LexState,
     continued_statement: bool,
     continued_infix: bool,
-    continued_openmp_infix: bool,
     continued_named_parameter: bool,
     continued_bind_parameter: bool,
     continued_component: bool,
@@ -87,7 +78,7 @@ struct LineState {
     entity_list: EntityListCursor,
 }
 
-impl LineState {
+impl StatementState {
     fn context<'a>(
         &self,
         open_groups: &'a [bool],
@@ -126,18 +117,13 @@ impl LineState {
         }
     }
 
-    fn reset_statement(&mut self) {
-        self.lex = LexState::default();
-        // `omp_lex` is deliberately untouched: it belongs to the other stream,
-        // which an ordinary statement boundary does not end.
-        self.continued_statement = false;
-        self.continued_infix = false;
-        self.continued_named_parameter = false;
-        self.continued_bind_parameter = false;
-        self.continued_component = false;
-        self.open_groups.clear();
-        self.multiple_subscript_depths.clear();
-        self.entity_list = EntityListCursor::default();
+    /// End structural continuation context while preserving an open protected
+    /// region. A preprocessing event is not part of either statement stream,
+    /// but it must not close a literal that resumes afterwards.
+    fn reset_context_preserving_lex(&mut self) {
+        let lex = self.lex;
+        *self = Self::default();
+        self.lex = lex;
     }
 
     fn advance(&mut self, code: &[u8], incoming: LexState, cx: &PassContext, line_index: usize) {
@@ -164,6 +150,18 @@ impl LineState {
     }
 }
 
+/// State carried from one physical line to the next while step 11 runs.
+///
+/// Conditional-compilation code has the same Fortran continuation semantics as
+/// ordinary code when active, including multiple-subscript state, but its state
+/// is independent because the two streams can be interleaved in source that is
+/// valid in only one compilation mode.
+#[derive(Default)]
+struct LineState {
+    ordinary: StatementState,
+    conditional: StatementState,
+}
+
 #[derive(Clone, Copy)]
 enum RuleMode<'a> {
     Physical(LineContext<'a>),
@@ -185,17 +183,28 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             .map(|line| line.kind)
             .unwrap_or(PhysicalLineKind::Code);
 
-        if let Some(body_start) = openmp_clause_body_start(&document.lines[index]) {
-            let context = LineContext {
-                continued_infix: state.continued_openmp_infix,
-                ..LineContext::default()
-            };
+        let conditional_body_start = cx.analysis.buffer.lines.get(index).and_then(|physical| {
+            physical
+                .is_conditional_compilation()
+                .then_some((physical.code_span.start - physical.span.start) as usize)
+        });
+        if let Some(body_start) = conditional_body_start {
+            let stream = &mut state.conditional;
+            let multiple_subscript_depths = stream.multiple_subscript_depths.clone();
+            let context = stream.context(
+                &stream.open_groups,
+                &multiple_subscript_depths,
+                document,
+                index,
+                cx,
+            );
+            let incoming_lex = stream.lex;
             let body = apply_rules(
                 &document.lines[index][body_start..],
                 cx,
                 &declared_names,
                 index,
-                &mut state.omp_lex,
+                &mut stream.lex,
                 RuleMode::Physical(context),
             );
             let mut rebuilt = document.lines[index][..body_start].to_vec();
@@ -204,32 +213,32 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 document.lines[index] = rebuilt;
                 changed = changed.or(Changed::Text);
             }
-            state.continued_openmp_infix = trailing_continuation_operand(&body);
-            // The ordinary stream steps over this line, so its lexical state
-            // survives; only the ordinary statement context ends here.
-            let lex = state.lex;
-            state.reset_statement();
-            state.lex = lex;
+            if let Some(physical) = cx.analysis.buffer.lines.get(index) {
+                if physical.kind == PhysicalLineKind::Code {
+                    stream.advance(
+                        cx.analysis.buffer.code_bytes(physical),
+                        incoming_lex,
+                        cx,
+                        index,
+                    );
+                }
+            }
             continue;
         }
 
-        // A normal physical line cannot continue an expression through a
-        // conditional-compilation sentinel; only adjacent `!$` body lines
-        // share this state.
-        state.continued_openmp_infix = false;
         if kind == PhysicalLineKind::Preprocessor {
-            // A directive is stepped over by a continued statement, so it
-            // cannot close a character literal the previous line left open;
-            // only the statement context goes.
-            let lex = state.lex;
-            state.reset_statement();
-            state.lex = lex;
+            // Directives are stepped over by both streams. Preserve protected
+            // lexical state, but retain the existing conservative choice not to
+            // carry structural formatting context through a preprocessing event.
+            state.ordinary.reset_context_preserving_lex();
+            state.conditional.reset_context_preserving_lex();
             continue;
         }
 
-        let multiple_subscript_depths = state.multiple_subscript_depths.clone();
-        let context = state.context(
-            &state.open_groups,
+        let stream = &mut state.ordinary;
+        let multiple_subscript_depths = stream.multiple_subscript_depths.clone();
+        let context = stream.context(
+            &stream.open_groups,
             &multiple_subscript_depths,
             document,
             index,
@@ -241,12 +250,12 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
         // like literal text, and writing it back would let the apostrophe in
         // prose like `! don't` close the literal, so the `!` in `&def!ghi'` on
         // the resumed line would be rewritten as a comment marker.
-        let incoming_lex = state.lex;
+        let incoming_lex = stream.lex;
         let mut scratch = LexState::default();
         let lex = if matches!(kind, PhysicalLineKind::Comment | PhysicalLineKind::Blank) {
             &mut scratch
         } else {
-            &mut state.lex
+            &mut stream.lex
         };
         let line = apply_rules(
             &document.lines[index],
@@ -262,7 +271,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 physical.kind,
                 PhysicalLineKind::Code | PhysicalLineKind::FindentFix
             ) {
-                state.advance(
+                stream.advance(
                     cx.analysis.buffer.code_bytes(physical),
                     incoming_lex,
                     cx,
@@ -526,30 +535,6 @@ fn ends_with_dotted_operator(code: &[u8]) -> bool {
     }
     let word = &code[open..];
     !word.eq_ignore_ascii_case(b".true.") && !word.eq_ignore_ascii_case(b".false.")
-}
-
-fn openmp_clause_body_start(line: &[u8]) -> Option<usize> {
-    let start = line.iter().position(|byte| !matches!(byte, b' ' | b'\t'))?;
-    if !line[start..].starts_with(b"!$") {
-        return None;
-    }
-    let body_start = start + 2;
-    if line
-        .get(body_start)
-        .is_some_and(|byte| !matches!(byte, b' ' | b'\t'))
-    {
-        return None;
-    }
-    let body = line.get(body_start..)?.trim_ascii_start();
-    if body.len() >= 3
-        && body[..3].eq_ignore_ascii_case(b"omp")
-        && body
-            .get(3)
-            .is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
-    {
-        return None;
-    }
-    Some(body_start)
 }
 
 #[derive(Clone, Copy, Default)]

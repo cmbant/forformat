@@ -1,4 +1,8 @@
-use super::{regions::LexState, Newline, PhysicalLine, PhysicalLineKind};
+use super::{
+    regions::LexState,
+    syntax::{conditional_compilation_prefix, ConditionalPrefixKind, SourceStream},
+    Newline, PhysicalLine, PhysicalLineKind,
+};
 use crate::error::FormatError;
 use std::ops::Range;
 
@@ -11,6 +15,18 @@ pub use super::regions::comment_start;
 pub struct SourceBuffer<B = Vec<u8>> {
     pub bytes: B,
     pub lines: Vec<PhysicalLine>,
+}
+
+#[derive(Default)]
+struct ConditionalStreamState {
+    lex: LexState,
+    continued: bool,
+}
+
+#[derive(Default)]
+struct LexStreams {
+    ordinary: LexState,
+    conditional: ConditionalStreamState,
 }
 
 impl SourceBuffer<Vec<u8>> {
@@ -33,11 +49,10 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         }
         let mut lines = Vec::new();
         let mut start = 0usize;
-        // One lexical state for the whole file: a character literal or
-        // Hollerith payload that a `&` carries onto the next physical line is
-        // still protected there, so the `!` in `&def!ghi')` is literal text
-        // rather than the start of a comment.
-        let mut state = LexState::default();
+        // Ordinary and conditional-compilation code carry independent lexical
+        // state. A literal continued in one stream steps over a physical line
+        // from the other stream, so that line must not close or reset it.
+        let mut states = LexStreams::default();
         for (i, b) in source.iter().enumerate() {
             if *b == b'\n' {
                 let is_crlf = i > start && source[i - 1] == b'\r';
@@ -46,7 +61,7 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
                     &source[start..end],
                     start..end,
                     if is_crlf { Newline::CrLf } else { Newline::Lf },
-                    &mut state,
+                    &mut states,
                 ));
                 start = i + 1;
             }
@@ -56,7 +71,7 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
                 &source[start..],
                 start..source.len(),
                 Newline::None,
-                &mut state,
+                &mut states,
             ));
         }
         Ok(Self { bytes, lines })
@@ -66,17 +81,34 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         content: &[u8],
         span: Range<usize>,
         newline: Newline,
-        state: &mut LexState,
+        states: &mut LexStreams,
     ) -> PhysicalLine {
         let mut first = 0;
         while first < content.len() && (content[first] == b' ' || content[first] == b'\t') {
             first += 1;
         }
-        let omp = content.get(first..).is_some_and(|s| s.starts_with(b"!$ "));
+        let parsed_prefix = conditional_compilation_prefix(content);
+        let stream = match parsed_prefix {
+            Some(prefix) if prefix.kind == ConditionalPrefixKind::BlankSeparated => {
+                SourceStream::Conditional
+            }
+            Some(prefix)
+                if prefix.kind == ConditionalPrefixKind::CompactContinuation
+                    && states.conditional.continued =>
+            {
+                SourceStream::Conditional
+            }
+            _ => SourceStream::Ordinary,
+        };
+        let conditional_start = stream.is_conditional().then(|| {
+            parsed_prefix
+                .expect("conditional stream has a parsed prefix")
+                .body_start
+        });
         let trimmed = &content[first..];
         let kind = if trimmed.is_empty() {
             PhysicalLineKind::Blank
-        } else if omp {
+        } else if stream.is_conditional() {
             PhysicalLineKind::Code
         } else if trimmed.starts_with(b"#") || trimmed.starts_with(b"??") {
             PhysicalLineKind::Preprocessor
@@ -89,30 +121,51 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         } else {
             PhysicalLineKind::Code
         };
+        let code_offset = conditional_start.unwrap_or(first);
         let mut comment = None;
         if matches!(kind, PhysicalLineKind::Code | PhysicalLineKind::FindentFix) {
-            let code = if omp { &trimmed[3..] } else { trimmed };
-            if let Some(i) = super::regions::line_comment_start(state, code) {
-                comment = Some(
-                    (span.start + first + if omp { 3 } else { 0 } + i) as u32..span.end as u32,
-                );
+            let code = &content[code_offset..];
+            match stream {
+                SourceStream::Ordinary => {
+                    if let Some(i) = super::regions::line_comment_start(&mut states.ordinary, code)
+                    {
+                        comment = Some((span.start + code_offset + i) as u32..span.end as u32);
+                    }
+                }
+                SourceStream::Conditional => {
+                    let stream = &mut states.conditional;
+                    // A free-form character literal can only resume on a physical line
+                    // whose first nonblank body byte is `&`. If malformed or inactive
+                    // source puts another code-looking line in between, step over it
+                    // without consuming either lexical or continuation state.
+                    let can_scan =
+                        !stream.lex.in_literal() || code.trim_ascii_start().starts_with(b"&");
+                    if can_scan {
+                        let scan = stream.lex.scan_line(code, |_| {});
+                        if let Some(i) = scan.comment_start {
+                            comment = Some((span.start + code_offset + i) as u32..span.end as u32);
+                        }
+                        stream.continued = scan.continued;
+                        if !stream.continued {
+                            stream.lex = LexState::default();
+                        }
+                    }
+                }
             }
         }
-        // The other kinds deliberately leave `state` alone.  A continued
-        // statement steps over blank, comment and directive lines, so one
-        // appearing inside an open character context neither closes it nor
-        // lexes as part of it; the literal resumes on the next code line.
-        // Outside such a context the scan above already left `state` default,
-        // so there is nothing to reset either way.
+        // Non-code lines leave both stream states alone. A continued statement
+        // steps over blank, comment and directive lines, so one appearing
+        // inside an open protected context neither closes it nor lexes as part
+        // of it; the literal resumes on the next code line of the same stream.
         let code_end = comment.as_ref().map_or(span.end, |r| r.start as usize);
-        let code_start = span.start + first + if omp { 3 } else { 0 };
+        let code_start = span.start + code_offset;
         PhysicalLine {
             span: span.start as u32..span.end as u32,
             newline,
             kind,
             code_span: code_start as u32..code_end as u32,
             comment_span: comment,
-            omp,
+            omp: stream.is_conditional(),
         }
     }
 
@@ -156,7 +209,7 @@ pub fn is_fix(s: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{comment_start, Newline, SourceBuffer};
+    use super::{comment_start, Newline, PhysicalLineKind, SourceBuffer};
 
     #[test]
     fn borrowed_source_buffer_reuses_input_bytes() {
@@ -174,6 +227,61 @@ mod tests {
     }
 
     #[test]
+    fn conditional_compilation_accepts_initial_and_contextual_compact_sentinels() {
+        let buffer =
+            SourceBuffer::new(b"!$ x = 1\n!$\ty = 2 ! note\n!$ call f( &\n!$& arg = 1)\n").unwrap();
+        for line in &buffer.lines {
+            assert!(line.is_conditional_compilation());
+        }
+        assert_eq!(buffer.code_bytes(&buffer.lines[0]), b"x = 1");
+        assert_eq!(buffer.code_bytes(&buffer.lines[1]), b"y = 2 ");
+        assert!(buffer.lines[1].comment_span.is_some());
+        assert_eq!(buffer.code_bytes(&buffer.lines[2]), b"call f( &");
+        assert_eq!(buffer.code_bytes(&buffer.lines[3]), b"& arg = 1)");
+
+        let standalone = SourceBuffer::new(
+            b"!$& standalone
+",
+        )
+        .unwrap();
+        assert_eq!(standalone.lines[0].kind, PhysicalLineKind::Comment);
+        assert!(!standalone.lines[0].is_conditional_compilation());
+    }
+
+    #[test]
+    fn hollerith_payload_ampersand_does_not_open_conditional_stream() {
+        let buffer = SourceBuffer::new(
+            b"!$ x = 1H&
+!$& standalone
+",
+        )
+        .unwrap();
+        assert!(buffer.lines[0].is_conditional_compilation());
+        assert_eq!(buffer.code_bytes(&buffer.lines[0]), b"x = 1H&");
+        assert_eq!(buffer.lines[1].kind, PhysicalLineKind::Comment);
+        assert!(!buffer.lines[1].is_conditional_compilation());
+        assert_eq!(buffer.line_bytes(&buffer.lines[1]), b"!$& standalone");
+    }
+
+    #[test]
+    fn lexical_state_is_independent_between_sentinel_streams() {
+        let ordinary = SourceBuffer::new(b"x = 'ab &\n!$ y = 2\n&cd!ef'\n").unwrap();
+        assert!(ordinary.lines[2].comment_span.is_none());
+        assert_eq!(ordinary.code_bytes(&ordinary.lines[2]), b"&cd!ef'");
+
+        let conditional = SourceBuffer::new(b"!$ x = 'ab &\ny = 2\n!$&cd!ef'\n").unwrap();
+        assert!(conditional.lines[2].comment_span.is_none());
+        assert_eq!(conditional.code_bytes(&conditional.lines[2]), b"&cd!ef'");
+    }
+
+    #[test]
+    fn open_literal_steps_over_non_continuation_code_in_its_stream() {
+        let buffer = SourceBuffer::new(b"!$ s = 'abc &\n!$ y = 2\n!$ &def!ghi'\n").unwrap();
+        assert!(buffer.lines[2].comment_span.is_none());
+        assert_eq!(buffer.code_bytes(&buffer.lines[2]), b"&def!ghi'");
+    }
+
+    #[test]
     fn source_spans_preserve_mixed_newlines_and_lone_carriage_returns() {
         let buffer = SourceBuffer::new(b" a\r\nb\nc\r\n").unwrap();
         assert_eq!(buffer.lines.len(), 3);
@@ -184,6 +292,7 @@ mod tests {
 
         let lone = SourceBuffer::new(b"a\rb").unwrap();
         assert_eq!(lone.lines.len(), 1);
+        assert_eq!(buffer.line_bytes(&buffer.lines[0]), b" a");
         assert_eq!(lone.line_bytes(&lone.lines[0]), b"a\rb");
     }
 
