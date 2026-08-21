@@ -33,7 +33,13 @@ use crate::{
     analysis::{analyze_file, scoped_declared_names, ProjectContext, ScopeTree},
     config::{FormatConfig, FormatMode},
     error::FormatError,
-    source::{LogicalGroup, PhysicalLineKind, SourceBuffer},
+    source::{
+        syntax::{
+            conditional_compilation_prefix, openmp_directive_prefix, OpenMpDirectiveSentinel,
+            SourceStream,
+        },
+        LexState, LogicalGroup, PhysicalLineKind, SourceBuffer,
+    },
     transform::{document::Document, pipeline},
     FormatMeta, FormatResult,
 };
@@ -261,7 +267,7 @@ fn reflow_with_context_inner(
     // `--align-paren` in agreement with the pass that will actually place the
     // text; the engine emits one line per physical line.
     //
-    // The authored document laid out, kept for the OpenMP directive path, which
+    // The authored document laid out, kept for the sentinel reflow path, which
     // asks about the group's *authored* lines and so needs a measurement that
     // does not advance with the rounds.  Statements are asked about the round's
     // own layout instead; see `needs_reflow`.
@@ -296,7 +302,7 @@ fn reflow_with_context_inner(
                     replacement: None,
                     ..
                 }
-            ) && join_openmp_directive(document, group).is_none()
+            ) && prepare_sentinel_reflow(document, &analysis.buffer, group).is_none()
                 && eligible(&analysis.buffer, group)
                 && group.statements.len() == 1
         })
@@ -361,7 +367,7 @@ fn reflow_with_context_inner(
                           span: &std::ops::Range<usize>|
          -> (Vec<Vec<u8>>, Option<(usize, Decline)>) {
             let mut out: Vec<Vec<u8>> = Vec::new();
-            if let Some(directive) = join_openmp_directive(document, group) {
+            if let Some(directive) = prepare_sentinel_reflow(document, &analysis.buffer, group) {
                 // A directive is measured and wrapped at the column the layout
                 // engine is about to move it to.  Measuring the authored indent
                 // instead leaves an over-long directive for the next run to find,
@@ -384,7 +390,7 @@ fn reflow_with_context_inner(
                         .clone()
                         .any(|index| unwrapped_width(index) > config.wrap.line_length);
                 if long {
-                    match wrap_openmp_directive(&directive, config.wrap.line_length) {
+                    match wrap_sentinel_line(&directive, config.wrap.line_length) {
                         Ok(wrapped) => out.extend(wrapped),
                         Err(reason) => {
                             decline = Some((group.lines.start, reason));
@@ -419,11 +425,19 @@ fn reflow_with_context_inner(
                 return (out, None);
             }
             let index = group.lines.start;
-            let continuation = first_indent.saturating_add(if config.indent_continuation {
-                config.continuation_indent
-            } else {
-                0
-            });
+            let conditional = analysis
+                .buffer
+                .lines
+                .get(index)
+                .is_some_and(|line| line.is_conditional_compilation() && config.openmp);
+            let sentinel_width = if conditional { 3 } else { 0 };
+            let emitted_target = first_indent.saturating_sub(sentinel_width);
+            let continuation = sentinel_width
+                + emitted_target.saturating_add(if config.indent_continuation {
+                    config.continuation_indent
+                } else {
+                    0
+                });
             // Only the laid-out width decides.  The normalized line still carries
             // the authored indent and the authored `::` run, and both are about to
             // change: a declaration whose author lined its `::` up in a wide block
@@ -465,15 +479,16 @@ fn reflow_with_context_inner(
             let (label, first_body_column) = match crate::format::emitter::split_label(&body) {
                 Some((label, rest)) => {
                     let label = label.to_vec();
-                    let column = crate::format::emitter::labelled_body_column(
-                        first_indent,
-                        label.len(),
-                        config,
-                    );
+                    let column = sentinel_width
+                        + crate::format::emitter::labelled_body_column(
+                            emitted_target,
+                            label.len(),
+                            config,
+                        );
                     body = rest.to_vec();
                     (Some(label), column)
                 }
-                None => (None, first_indent),
+                None => (None, sentinel_width + emitted_target),
             };
             // Only the *body* moves to the label's column.  The continuation
             // indent and a detached comment are structural and stay where the
@@ -524,7 +539,8 @@ fn reflow_with_context_inner(
             // back to the statement indent afterwards disagreed with the engine
             // above a dedented `else if`, and the next run moved it.
             let comment_indent = first_indent;
-            let detached = detach_final_inline_comment(document, group, comment_indent);
+            let detached =
+                detach_final_inline_comment(document, &analysis.buffer, group, comment_indent);
             // Whatever step 17 is going to add around `::` has to be paid for
             // here, from the same budget: a break chosen against the unpadded text
             // lands one column over once step 17 runs, and the run after that
@@ -538,13 +554,23 @@ fn reflow_with_context_inner(
                     Some(Some(comment)) => {
                         out.extend(comment);
                         if group.lines.len() > 1 {
-                            emit_joined_body(&mut out, &with_label(body), first_indent);
+                            emit_joined_body(
+                                &mut out,
+                                &with_label(body),
+                                first_indent,
+                                conditional,
+                            );
                         } else {
-                            copy_group_without_final_comment(document, group, &mut out);
+                            copy_group_without_final_comment(
+                                document,
+                                &analysis.buffer,
+                                group,
+                                &mut out,
+                            );
                         }
                     }
                     Some(None) if group.lines.len() > 1 => {
-                        emit_joined_body(&mut out, &with_label(body), first_indent);
+                        emit_joined_body(&mut out, &with_label(body), first_indent, conditional);
                     }
                     _ => copy_group(document, group, &mut out),
                 }
@@ -566,7 +592,11 @@ fn reflow_with_context_inner(
                     if let Some(first) = wrapped.first_mut() {
                         *first = with_label(std::mem::take(first));
                     }
-                    out.extend(wrapped)
+                    out.extend(
+                        wrapped
+                            .into_iter()
+                            .map(|line| restore_conditional_prefix(line, conditional)),
+                    );
                 }
                 // A decline means the statement stays exactly as authored.  It has
                 // to be copied whole: pushing only the first physical line silently
@@ -616,25 +646,64 @@ fn reflow_with_context_inner(
     Ok(declined)
 }
 
+#[derive(Default)]
+struct CommentLexStreams {
+    ordinary: LexState,
+    conditional: LexState,
+}
+
+impl CommentLexStreams {
+    fn select_mut(&mut self, stream: SourceStream) -> &mut LexState {
+        match stream {
+            SourceStream::Ordinary => &mut self.ordinary,
+            SourceStream::Conditional => &mut self.conditional,
+        }
+    }
+
+    /// Find an inline comment in one physical line while keeping conditional
+    /// and ordinary protected regions independent. The returned offset is in
+    /// the original physical line, not the sentinel-stripped body.
+    fn comment_start(&mut self, line: &[u8], stream: SourceStream) -> Option<usize> {
+        let prefix = stream
+            .is_conditional()
+            .then(|| conditional_compilation_prefix(line))
+            .flatten();
+        let body_start = prefix.map_or(0, |prefix| prefix.body_start);
+        let body = &line[body_start..];
+        let lex = self.select_mut(stream);
+        if lex.in_literal() && !body.trim_ascii_start().starts_with(b"&") {
+            return None;
+        }
+        crate::source::regions::line_comment_start(lex, body).map(|start| body_start + start)
+    }
+}
+
 /// Return the final inline comment, if there is exactly one and it is on the
 /// last physical line of the group. `None` means the group is unsafe to detach;
 /// `Some(None)` means it has no inline comment.
-fn detach_final_inline_comment(
+fn detach_final_inline_comment<B: AsRef<[u8]>>(
     document: &Document,
+    buffer: &SourceBuffer<B>,
     group: &LogicalGroup,
     comment_indent: usize,
 ) -> Option<Option<Vec<Vec<u8>>>> {
-    // One lexical state for the whole group: the `!` in a continued literal
-    // (`...invalid!')` on the second line of `'... &`) is literal text, and
-    // detaching it as a comment would emit it twice — once above the statement
-    // and once inside the body the wrapper rebuilds from the joined text.
-    // One lexical state per sentinel stream; see `regions::line_scan`.
-    let mut lex = [crate::source::LexState::default(); 2];
+    // One lexical state per source stream: a `!` in a continued literal is
+    // protected independently of conditional-compilation lines interleaved in
+    // the other stream.
+    let mut streams = CommentLexStreams::default();
     let mut comments = Vec::new();
     for index in group.lines.clone() {
         let line = &document.lines[index];
-        let stream = usize::from(line.trim_ascii_start().starts_with(b"!$ "));
-        if let Some(start) = crate::source::regions::line_comment_start(&mut lex[stream], line) {
+        let stream = if buffer
+            .lines
+            .get(index)
+            .is_some_and(|line| line.is_conditional_compilation())
+        {
+            SourceStream::Conditional
+        } else {
+            SourceStream::Ordinary
+        };
+        if let Some(start) = streams.comment_start(line, stream) {
             comments.push((index, start));
         }
     }
@@ -651,16 +720,74 @@ fn detach_final_inline_comment(
     Some(Some(vec![comment]))
 }
 
-fn emit_joined_body(lines: &mut Vec<Vec<u8>>, body: &[u8], first_indent: usize) {
+fn emit_joined_body(lines: &mut Vec<Vec<u8>>, body: &[u8], first_indent: usize, conditional: bool) {
     let mut line = vec![b' '; first_indent];
     line.extend_from_slice(body);
-    lines.push(line);
+    lines.push(restore_conditional_prefix(line, conditional));
 }
 
-fn join_openmp_directive(document: &Document, group: &LogicalGroup) -> Option<Vec<u8>> {
+/// Restore the canonical conditional-compilation sentinel to a line generated
+/// by the wrapper. `line` already carries the absolute column where its Fortran
+/// body belongs, so the sentinel replaces three leading columns instead of
+/// shifting the body to the right.
+fn restore_conditional_prefix(line: Vec<u8>, conditional: bool) -> Vec<u8> {
+    if !conditional {
+        return line;
+    }
+    let leading = line
+        .iter()
+        .take_while(|byte| byte.is_ascii_whitespace())
+        .count();
+    let mut restored = Vec::with_capacity(line.len() + 3);
+    restored.extend_from_slice(b"!$ ");
+    restored.extend(std::iter::repeat_n(b' ', leading.saturating_sub(3)));
+    restored.extend_from_slice(&line[leading..]);
+    restored
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReflowSentinel {
+    Conditional,
+    OpenMp(OpenMpDirectiveSentinel),
+}
+
+impl ReflowSentinel {
+    fn canonical(self) -> &'static [u8] {
+        match self {
+            Self::Conditional => b"!$ ",
+            Self::OpenMp(sentinel) => sentinel.canonical(),
+        }
+    }
+}
+
+fn reflow_sentinel(line: &[u8], conditional: bool) -> Option<(usize, ReflowSentinel)> {
+    if conditional {
+        let prefix = conditional_compilation_prefix(line)?;
+        return Some((prefix.body_start, ReflowSentinel::Conditional));
+    }
+    openmp_directive_prefix(line)
+        .map(|prefix| (prefix.body_start, ReflowSentinel::OpenMp(prefix.sentinel)))
+}
+
+fn canonical_reflow_sentinel(line: &[u8]) -> Option<(usize, ReflowSentinel)> {
+    if let Some(prefix) = openmp_directive_prefix(line) {
+        return Some((prefix.body_start, ReflowSentinel::OpenMp(prefix.sentinel)));
+    }
+    conditional_compilation_prefix(line)
+        .filter(|prefix| {
+            prefix.kind == crate::source::syntax::ConditionalPrefixKind::BlankSeparated
+        })
+        .map(|prefix| (prefix.body_start, ReflowSentinel::Conditional))
+}
+
+fn prepare_sentinel_reflow<B: AsRef<[u8]>>(
+    document: &Document,
+    buffer: &SourceBuffer<B>,
+    group: &LogicalGroup,
+) -> Option<Vec<u8>> {
     // A continued OpenMP directive is already a sequence of physical
-    // directives.  Joining it here would erase the repeated sentinel and one
-    // physical line when the wrapper decides the joined text fits.  Wrapping
+    // directives. Joining it here would erase the repeated sentinel and one
+    // physical line when the wrapper decides the joined text fits. Wrapping
     // remains available for a single overlong directive, even when the
     // classifier grouped the following statement with the directive comment.
     let mut indices: Vec<usize> = group.lines.clone().collect();
@@ -672,92 +799,46 @@ fn join_openmp_directive(document: &Document, group: &LogicalGroup) -> Option<Ve
         }
         indices.truncate(1);
     }
-    let mut parts = Vec::new();
-    let mut omp_style = false;
-    let mut indent = Vec::new();
-    for (position, index) in indices.into_iter().enumerate() {
-        let line = &document.lines[index];
-        let start = line.iter().position(|byte| !byte.is_ascii_whitespace())?;
-        if !openmp_candidate(line, start) {
-            return None;
-        }
-        if position == 0 {
-            indent.extend_from_slice(&line[..start]);
-        }
-        let mut body = line[start + 2..].trim_ascii_start();
-        if body.len() >= 3 && body[..3].eq_ignore_ascii_case(b"omp") {
-            omp_style = true;
-            body = body[3..].trim_ascii_start();
-        }
-        if position > 0 && body.first() == Some(&b'&') {
-            body = body[1..].trim_ascii_start();
-        }
-        if crate::source::regions::comment_start(body).is_some() {
-            return None;
-        }
-        if position + 1 < group.lines.len() {
-            let mut end = body.len();
-            while end > 0 && body[end - 1].is_ascii_whitespace() {
-                end -= 1;
-            }
-            if body.get(end - 1) != Some(&b'&') {
-                return None;
-            }
-            body = body[..end - 1].trim_ascii_end();
-        }
-        parts.push(body);
+
+    let index = *indices.first()?;
+    let line = document.lines.get(index)?;
+    let indent_end = line.iter().position(|byte| !byte.is_ascii_whitespace())?;
+    let conditional = buffer
+        .lines
+        .get(index)
+        .is_some_and(|line| line.is_conditional_compilation());
+    let (body_start, sentinel) = reflow_sentinel(line, conditional)?;
+    let body = line.get(body_start..)?.trim_ascii_start();
+    if crate::source::regions::comment_start(body).is_some() {
+        return None;
     }
-    let mut joined = indent;
-    joined.extend_from_slice(if omp_style { b"!$OMP " } else { b"!$ " });
-    for (index, part) in parts.into_iter().enumerate() {
-        if index > 0 {
-            joined.push(b' ');
-        }
-        joined.extend_from_slice(part);
-    }
+
+    let mut joined = line[..indent_end].to_vec();
+    joined.extend_from_slice(sentinel.canonical());
+    joined.extend_from_slice(body);
     Some(joined)
 }
 
-/// findent's free-form sentinel is `!$` at EOL or followed by a blank.  The
-/// `OMP` spelling is the separate uppercase directive form; `!$acc` and other
-/// joined words are ordinary comments and must not be re-emitted as sentinels.
-fn openmp_candidate(line: &[u8], start: usize) -> bool {
-    if !line[start..].starts_with(b"!$") {
-        return false;
-    }
-    line.get(start + 2)
-        .is_none_or(|byte| matches!(byte, b' ' | b'\t') || is_openmp_line(line))
-}
-
 fn is_openmp_line(line: &[u8]) -> bool {
-    let start = line.iter().position(|byte| !byte.is_ascii_whitespace());
-    start.is_some_and(|start| {
-        line[start..]
-            .get(..5)
-            .is_some_and(|prefix| prefix[..2] == *b"!$" && prefix[2..].eq_ignore_ascii_case(b"omp"))
-    })
+    openmp_directive_prefix(line).is_some()
 }
 
-fn wrap_openmp_directive(line: &[u8], line_length: usize) -> Result<Vec<Vec<u8>>, Decline> {
+fn wrap_sentinel_line(line: &[u8], line_length: usize) -> Result<Vec<Vec<u8>>, Decline> {
     let indent_end = line
         .iter()
         .position(|byte| !byte.is_ascii_whitespace())
         .unwrap_or(0);
     let indent = &line[..indent_end];
-    let prefix: Vec<u8> = if line
-        .get(indent_end + 2..indent_end + 5)
-        .is_some_and(|bytes| bytes.eq_ignore_ascii_case(b"omp"))
-    {
-        [indent, b"!$OMP "].concat()
-    } else {
-        [indent, b"!$ "].concat()
-    };
+    let (body_start, sentinel) = canonical_reflow_sentinel(line).ok_or(Decline::NoSafeBreak)?;
+    let mut prefix = indent.to_vec();
+    prefix.extend_from_slice(sentinel.canonical());
     if line.len() <= line_length {
         return Ok(vec![line.to_vec()]);
     }
     let mut body = line
-        .get(prefix.len()..)
+        .get(body_start..)
         .ok_or(Decline::NoSafeBreak)?
+        .trim_ascii_start()
         .to_vec();
     let mut result = Vec::new();
     while prefix.len() + body.len() > line_length {
@@ -931,28 +1012,35 @@ fn copy_group(document: &Document, group: &LogicalGroup, lines: &mut Vec<Vec<u8>
     }
 }
 
-fn copy_group_without_final_comment(
+fn copy_group_without_final_comment<B: AsRef<[u8]>>(
     document: &Document,
+    buffer: &SourceBuffer<B>,
     group: &LogicalGroup,
     lines: &mut Vec<Vec<u8>>,
 ) {
     let final_line = group.lines.end.saturating_sub(1);
-    let mut lex = [crate::source::LexState::default(); 2];
+    let mut streams = CommentLexStreams::default();
     for index in group.lines.clone() {
         let Some(line) = document.lines.get(index) else {
             continue;
         };
-        let stream = usize::from(line.trim_ascii_start().starts_with(b"!$ "));
-        let comment = crate::source::regions::line_comment_start(&mut lex[stream], line);
+        let stream = if buffer
+            .lines
+            .get(index)
+            .is_some_and(|line| line.is_conditional_compilation())
+        {
+            SourceStream::Conditional
+        } else {
+            SourceStream::Ordinary
+        };
+        let comment = streams.comment_start(line, stream);
         if index == final_line {
             if let Some(comment) = comment {
                 lines.push(line[..comment].trim_ascii_end().to_vec());
                 continue;
             }
         }
-        {
-            lines.push(line.clone());
-        }
+        lines.push(line.clone());
     }
 }
 
@@ -987,7 +1075,7 @@ mod tests {
         analysis::{analyze_project, ProjectContext},
         config::{FormatConfig, FormatMode},
         format_source,
-        source::LogicalGroup,
+        source::{LogicalGroup, SourceBuffer},
         transform::document::Document,
     };
     use std::path::Path;
@@ -1057,13 +1145,6 @@ mod tests {
 
     #[test]
     fn a_nested_type_spec_colon_is_a_stable_wrap_point() {
-        // `allocate`'s type-spec `::` sits inside the call's parens, not at
-        // statement depth 0, so it is a different code path from an ordinary
-        // declaration's head. Deep indent plus a compact `::` (no authored
-        // space on either side) pushes the line past the budget only once
-        // step 17 pads the separator — the first pass has to reserve that
-        // budget and still find a break, or it declines and leaves an
-        // over-long line for the second pass to wrap differently (I1).
         let source = b"subroutine s\nif (a) then\nif (b) then\nif (c) then\nallocate(TMetropolisSampler::this%SamplingAlgorithm)\nend if\nend if\nend if\nend subroutine s\n";
         let setup = |config: &mut FormatConfig| {
             config.indent = 8;
@@ -1125,17 +1206,25 @@ end module m
             pieces: Vec::new(),
         };
         let mut once = Vec::new();
-        super::copy_group_without_final_comment(&document, &group, &mut once);
+        let document_bytes = document.to_lf_bytes();
+        let buffer = SourceBuffer::new(&document_bytes).unwrap();
+        super::copy_group_without_final_comment(&document, &buffer, &group, &mut once);
         let transformed = Document::from_bytes(b"  code ! keep\n  code\n");
         let mut twice = Vec::new();
-        super::copy_group_without_final_comment(&transformed, &group, &mut twice);
+        let transformed_bytes = transformed.to_lf_bytes();
+        let transformed_buffer = SourceBuffer::new(&transformed_bytes).unwrap();
+        super::copy_group_without_final_comment(
+            &transformed,
+            &transformed_buffer,
+            &group,
+            &mut twice,
+        );
         assert_eq!(once, [b"  code ! keep".to_vec(), b"  code".to_vec()]);
         assert_eq!(twice, once);
     }
 
     #[test]
     fn full_output_is_a_findent_fixed_point() {
-        // I2: running indent-only over full output must change nothing.
         let source =
             b"PROGRAM Main\nIF (X > 1) THEN\nCALL DoThing(Value)\nEND IF\nEND PROGRAM Main\n";
         let once = full(|_| {}, source);
@@ -1160,7 +1249,6 @@ end module m
 
     #[test]
     fn full_formatting_reaches_its_fixed_point_in_one_pass() {
-        // I1.
         for source in [
             b"PROGRAM p\nX = 1\nEND PROGRAM p\n".as_slice(),
             b"module m\ncontains\nSUBROUTINE s()\nEND SUBROUTINE s\nend module m\n".as_slice(),
@@ -1205,31 +1293,18 @@ end module m
             assert!(line.len() <= 40, "overlong line {line:?} in\n{text}");
         }
         assert!(text.contains(" &\n"), "no continuation produced:\n{text}");
-        // The wrapped result is still a findent fixed point.
         let again = format_source(&wrapped, &FormatConfig::default())
             .unwrap()
             .bytes;
         assert_eq!(String::from_utf8_lossy(&again), text);
     }
 
-    /// The four ways step 16 used to need a second run to settle. They share
-    /// one shape: something the
-    /// pipeline does *after* the wrapper measured the text — normalization
-    /// widening it, the layout engine moving it, step 17 padding a `::` —
-    /// pushed a line past the budget that the next run then rewrapped.
     #[test]
     fn statements_settle_on_the_first_run_when_later_passes_widen_them() {
         let cases: [&[u8]; 4] = [
-            // Normalization adds the spaces around `//` that tip the joined
-            // statement over the budget (`source/EstCovmat.f90`).
             b"module m\ncontains\nsubroutine s\n    if (Feedback >1 ) write(*,*) &\n     ' Parameter '//trim(BaseParams%UsedParamNameOrNumber(i))//' is weakly constrained, neglect correlations'\nend subroutine s\nend module m\n",
-            // The layout engine moves the directive right, and the sentinel has
-            // to be repeated on the wrapped line.
             b"module m\ncontains\nsubroutine s\ndo i = 1, n\ndo j = 1, n\n!$OMP PARALLEL DO DEFAULT(SHARED), SCHEDULE(STATIC), PRIVATE(zpeak, sigma_z, zpeakstart, zpeakend, nu_i, Win)\ndo k = 1, n\nx = 1\nend do\nend do\nend do\nend subroutine s\nend module m\n",
-            // Step 17 gives `::` the space the wrapper had not paid for
-            // because step 17 gives `::` its owed space.
             b"module m\ncontains\nsubroutine s\nreal (dl):: dif_old,dif,max,min,dlm,binz,m_min,m_max,mp,yp,zp,thp,xk1,xk2,xk3,yk1,yk2,yk3,fact,qmin,qmax,dlogy\nend subroutine s\nend module m\n",
-            // A detached trailing comment above a dedented `else if`.
             b"module m\ncontains\nsubroutine s\nif (fb == zero) then\nxzero = b\nelseif (fa*(fb/abs(fb))<zero) then  ! check that f(ax) and f(bx) have different signs\nc = a\nend if\nend subroutine s\nend module m\n",
         ];
         for source in cases {
@@ -1247,11 +1322,6 @@ end module m
 
     #[test]
     fn project_case_does_not_make_wrapped_intrinsics_non_idempotent() {
-        // The unrelated project declaration supplies project-wide `Size` evidence. The
-        // target declaration uses the intrinsic twice in a dimension bound;
-        // at a narrow budget the second occurrence becomes a continuation
-        // fragment, which must retain the intrinsic's canonical lowercase
-        // spelling across both runs.
         let target = b"module target\n\
 implicit none\n\
 contains\n\
@@ -1289,9 +1359,6 @@ end module project_names\n";
         assert!(output.contains("size(x%element(i, j)%x))"), "{output}");
     }
 
-    /// An unwrappable statement keeps every physical line it came with.  The
-    /// decline path used to emit the first line alone, which silently deleted
-    /// the rest of the statement.
     #[test]
     fn a_declined_wrap_keeps_the_whole_statement() {
         let mut source = b"module m\ncontains\nsubroutine s\ncall f(a, '".to_vec();
@@ -1304,9 +1371,6 @@ end module project_names\n";
         assert_eq!(text, String::from_utf8_lossy(&twice));
     }
 
-    /// `/)` closes a FORMAT statement's edit-descriptor list; only an array
-    /// constructor's `/)` becomes `]`.  On a continuation line there is no
-    /// `format` keyword to see, so the statement-level fact has to be carried.
     #[test]
     fn a_continued_format_statement_keeps_its_slash_before_the_paren() {
         let source = b"module m\ncontains\nsubroutine s\n9060 format ('    NXD =', i5, ',  NYD =', i5, ',  NXI =', i5, &\n    ',  NYI =', i5 /)\nend subroutine s\nend module m\n";
@@ -1401,36 +1465,54 @@ end module project_names\n";
     }
 
     #[test]
-    fn openmp_wrapping_repeats_the_sentinel_and_keeps_macro_case() {
-        let source = b"!$OMP PARALLEL DO DEFAULT(SHARED), private(worker), SCHEDULE(STATIC), REDUCTION(+:total)\n";
-        let mut project = ProjectContext::empty();
-        project.define(&[crate::config::MacroDefine {
-            name: "private".into(),
-            value: None,
-        }]);
-        let config = FormatConfig {
-            mode: FormatMode::Full,
-            wrap: crate::config::WrapConfig {
-                enabled: true,
-                line_length: 42,
-            },
-            ..FormatConfig::default()
-        };
-        let output = format_with_context(source, &project, &config)
-            .unwrap()
-            .bytes;
-        for line in output
-            .split(|byte| *byte == b'\n')
-            .filter(|line| !line.is_empty())
-        {
-            assert!(line.starts_with(b"!$OMP"), "invalid sentinel: {line:?}");
-            assert!(line.len() <= 42, "overlong OpenMP line: {line:?}");
+    fn conditional_declaration_separator_is_visible_to_wrapper_measurement() {
+        assert_eq!(
+            crate::transform::passes::layout_post::declaration_separator_info(b"!$ real    ::  x"),
+            Some((11, 4, 2))
+        );
+    }
+
+    #[test]
+    fn openmp_wrapping_repeats_reserved_sentinels_and_keeps_macro_case() {
+        for (sentinel, canonical) in [
+            ("!$OMP", b"!$OMP".as_slice()),
+            ("!$OMPX", b"!$OMPX".as_slice()),
+        ] {
+            let source = format!(
+                "{sentinel} PARALLEL DO DEFAULT(SHARED), private(worker), SCHEDULE(STATIC), REDUCTION(+:total)\n"
+            );
+            let mut project = ProjectContext::empty();
+            project.define(&[crate::config::MacroDefine {
+                name: "private".into(),
+                value: None,
+            }]);
+            let config = FormatConfig {
+                mode: FormatMode::Full,
+                wrap: crate::config::WrapConfig {
+                    enabled: true,
+                    line_length: 42,
+                },
+                ..FormatConfig::default()
+            };
+            let output = format_with_context(source.as_bytes(), &project, &config)
+                .unwrap()
+                .bytes;
+            for line in output
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+            {
+                assert!(
+                    line.starts_with(canonical),
+                    "invalid {sentinel} sentinel: {line:?}"
+                );
+                assert!(line.len() <= 42, "overlong OpenMP line: {line:?}");
+            }
+            assert!(output
+                .windows(b"PRIVATE".len())
+                .all(|window| window != b"PRIVATE"));
+            assert!(output
+                .windows(b"private".len())
+                .any(|window| window == b"private"));
         }
-        assert!(output
-            .windows(b"PRIVATE".len())
-            .all(|window| window != b"PRIVATE"));
-        assert!(output
-            .windows(b"private".len())
-            .any(|window| window == b"private"));
     }
 }

@@ -110,11 +110,20 @@ fn collect_evidence(source: &[u8]) -> FormEvidence {
             continue;
         }
 
+        let preprocessor = preprocessor_kind(line);
+        let is_preprocessor_line = match preprocessor {
+            PreprocessorKind::Cpp => is_cpp_directive_line(line),
+            PreprocessorKind::Coco | PreprocessorKind::Fypp => true,
+            PreprocessorKind::Other => false,
+        };
+
         // A source line that is already lexically incomplete without
         // continuation makes any legal nonblank/nonzero column-6 marker strong
-        // fixed-form evidence, even if that marker is `#` or `!` and the line
-        // could otherwise look like a directive/comment after left trimming.
-        if cpp_activity(&cpp_stack) == CppActivity::Active
+        // fixed-form evidence. Actual preprocessor directives are excluded:
+        // they disappear before Fortran parsing and may be indented through
+        // column six without becoming source continuation lines.
+        if !is_preprocessor_line
+            && cpp_activity(&cpp_stack) == CppActivity::Active
             && !previous_free_continuation
             && previous_code.is_some_and(line_requires_continuation)
             && fixed_continuation_signature(line, previous_code)
@@ -122,8 +131,7 @@ fn collect_evidence(source: &[u8]) -> FormEvidence {
             evidence.strong_fixed = true;
         }
 
-        let preprocessor = preprocessor_kind(line);
-        if preprocessor != PreprocessorKind::Other {
+        if is_preprocessor_line {
             if preprocessor == PreprocessorKind::Cpp {
                 update_cpp_activity(line, &mut cpp_stack);
             }
@@ -224,6 +232,18 @@ fn cpp_directive(line: &[u8]) -> Option<(&[u8], &[u8])> {
         .position(|byte| !byte.is_ascii_alphabetic())
         .unwrap_or(rest.len());
     Some((&rest[..keyword_len], trim_left(&rest[keyword_len..])))
+}
+
+fn is_cpp_directive_line(line: &[u8]) -> bool {
+    let line = trim_left(line);
+    let Some(rest) = line.strip_prefix(b"#") else {
+        return false;
+    };
+    let rest = trim_left(rest);
+    match rest.first() {
+        None => true,
+        Some(byte) => byte.is_ascii_alphanumeric() || *byte == b'_',
+    }
 }
 
 fn literal_cpp_condition(rest: &[u8]) -> Option<bool> {
@@ -693,6 +713,28 @@ mod tests {
             assert_eq!(
                 detect_path(Path::new("legacy.f90"), source),
                 SourceForm::Fixed
+            );
+        }
+    }
+
+    #[test]
+    fn column_six_hash_is_fixed_unless_it_starts_a_cpp_directive() {
+        assert_eq!(
+            detect_path(
+                Path::new("legacy.f90"),
+                b"      x = 1\n     #+ 2\n      end\n"
+            ),
+            SourceForm::Fixed
+        );
+
+        for source in [
+            b"     #define VALUE 1\nmodule m\nend module m\n".as_slice(),
+            b"     #if 1\nmodule m\n     #endif\nend module m\n".as_slice(),
+            b"     # 1 \"source.f90\"\nmodule m\nend module m\n".as_slice(),
+        ] {
+            assert_eq!(
+                detect_path(Path::new("modern.f90"), source),
+                SourceForm::Free
             );
         }
     }

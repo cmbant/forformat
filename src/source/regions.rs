@@ -15,6 +15,7 @@
 //! state across physical lines so a character literal continued with `&` is a
 //! single protected region rather than two unterminated ones.
 
+use super::syntax::{conditional_compilation_prefix, ConditionalPrefixKind};
 use std::ops::Range;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +61,14 @@ pub struct LexState {
     hollerith: usize,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LineScan {
+    /// Offset of an inline comment marker, when present.
+    pub comment_start: Option<usize>,
+    /// Whether the final significant byte is a semantic continuation marker.
+    pub continued: bool,
+}
+
 impl LexState {
     pub fn new() -> Self {
         Self::default()
@@ -74,6 +83,42 @@ impl LexState {
     /// True while a Hollerith payload is still owed.
     pub fn in_hollerith(&self) -> bool {
         self.hollerith != 0
+    }
+
+    /// Scan one Fortran line body and classify how it ends.
+    ///
+    /// A trailing `&` is a continuation marker only when that byte belongs to
+    /// ordinary code, or when it is the final byte of a still-open character
+    /// literal. An ampersand consumed by a Hollerith payload is data, not a
+    /// continuation marker. The caller decides whether non-continuation state
+    /// should be reset or whether this physical line is stepped over.
+    pub(crate) fn scan_line<F: FnMut(Region)>(&mut self, s: &[u8], mut push: F) -> LineScan {
+        let mut comment_start = None;
+        let mut trailing = None;
+        self.scan(s, |region| {
+            let range = region.range.clone();
+            let kind = region.kind;
+            if kind == RegionKind::Comment {
+                if comment_start.is_none() {
+                    comment_start = Some(range.start);
+                }
+            } else if let Some(relative) = s[range.clone()]
+                .iter()
+                .rposition(|byte| !byte.is_ascii_whitespace())
+            {
+                trailing = Some((range.start + relative, kind));
+            }
+            push(region);
+        });
+        let continued = trailing.is_some_and(|(index, kind)| {
+            s[index] == b'&'
+                && (kind == RegionKind::Code
+                    || (kind == RegionKind::StringLiteral && self.in_literal()))
+        });
+        LineScan {
+            comment_start,
+            continued,
+        }
     }
 
     /// Walk `s`, reporting a contiguous partition of it into regions.
@@ -265,35 +310,32 @@ pub fn is_code_offset(s: &[u8], offset: usize) -> bool {
 /// it the literal is merely unterminated, and leaking its state forward would
 /// swallow every later line's comment.
 pub fn line_comment_start(state: &mut LexState, line: &[u8]) -> Option<usize> {
-    let mut found = None;
-    line_scan(state, line, |region| {
-        if found.is_none() && region.kind == RegionKind::Comment {
-            found = Some(region.range.start);
-        }
-    });
-    found
+    scan_group_line(state, line, |_| {}).comment_start
 }
 
 /// [`line_comment_start`]'s sibling for a pass that needs the code bytes rather
 /// than the comment offset: the code spans of one physical line of a
 /// continuation group, with `state` carried on to the next line.
 pub fn line_code_spans<F: FnMut(usize, &[u8])>(state: &mut LexState, line: &[u8], mut f: F) {
-    line_scan(state, line, |region| {
+    scan_group_line(state, line, |region| {
         if region.kind == RegionKind::Code {
             f(region.range.start, &line[region.range]);
         }
     });
 }
 
-/// Scan one line of a group, then decide whether the state survives it.
-fn line_scan<F: FnMut(Region)>(state: &mut LexState, line: &[u8], push: F) {
+/// Scan one line of a continuation group, then decide whether lexical state
+/// survives it. Protected bytes that merely happen to be `&` never license a
+/// carry into the next physical line.
+fn scan_group_line<F: FnMut(Region)>(state: &mut LexState, line: &[u8], push: F) -> LineScan {
     if *state != LexState::default() && stepped_over_by_continuation(line) {
-        return;
+        return LineScan::default();
     }
-    state.scan(line, push);
-    if line.trim_ascii_end().last() != Some(&b'&') {
+    let scan = state.scan_line(line, push);
+    if !scan.continued {
         *state = LexState::default();
     }
+    scan
 }
 
 /// Does a continued statement step over this line rather than absorb it?
@@ -306,10 +348,12 @@ fn line_scan<F: FnMut(Region)>(state: &mut LexState, line: &[u8], push: F) {
 /// close it -- the apostrophe in prose like `! don't stop here` is not a
 /// delimiter, and the literal resumes at the `&` on the next code line.
 ///
-/// The OpenMP sentinel is deliberately not in the set: `!$ ` introduces
-/// conditionally compiled *code*, which a group absorbs like any other line.
-/// Which of the two streams a line belongs to matters as well, and that part is
-/// the caller's: see `continuations::conditional_stream`.
+/// A blank-separated conditional-compilation sentinel (`!$ ` / `!$\t`) is
+/// unconditionally code-shaped and is therefore not in the skipped set. Compact
+/// `!$&` is different: it is conditional code only with proven incoming
+/// continuation context, so this context-free helper treats a raw compact line
+/// as comment-like. Semantic callers use `SourceBuffer` when that distinction
+/// matters.
 ///
 /// A `!findentfix:` line *is* in the set, and this is the one place the set is
 /// deliberately wider than [`LogicalGroup::visit`]'s, which treats
@@ -327,11 +371,13 @@ fn line_scan<F: FnMut(Region)>(state: &mut LexState, line: &[u8], push: F) {
 /// [`LogicalGroup::visit`]: crate::source::LogicalGroup::visit
 /// [`PhysicalLineKind::FindentFix`]: crate::source::PhysicalLineKind::FindentFix
 pub fn stepped_over_by_continuation(line: &[u8]) -> bool {
-    let line = line.trim_ascii_start();
-    line.is_empty()
-        || line.starts_with(b"#")
-        || line.starts_with(b"??")
-        || (line.starts_with(b"!") && !line.starts_with(b"!$ "))
+    let trimmed = line.trim_ascii_start();
+    let blank_conditional = conditional_compilation_prefix(line)
+        .is_some_and(|prefix| prefix.kind == ConditionalPrefixKind::BlankSeparated);
+    trimmed.is_empty()
+        || trimmed.starts_with(b"#")
+        || trimmed.starts_with(b"??")
+        || (trimmed.starts_with(b"!") && !blank_conditional)
 }
 
 /// Visit every code region of `s` as `(start offset, bytes)`, skipping string
@@ -390,6 +436,21 @@ mod tests {
             .into_iter()
             .map(|region| (region.kind, &s[region.range]))
             .collect()
+    }
+
+    #[test]
+    fn trailing_continuation_respects_region_ownership() {
+        let scan = |line: &[u8]| {
+            let mut state = LexState::default();
+            state.scan_line(line, |_| {}).continued
+        };
+
+        assert!(scan(b"x = a &"));
+        assert!(scan(b"x = 'abc &"));
+        assert!(!scan(b"x = 1H&"));
+        assert!(!scan(b"x = 2H&&"));
+        assert!(scan(b"x = 1H&&"));
+        assert!(!scan(b"x = 1 ! comment &"));
     }
 
     #[test]
@@ -547,11 +608,18 @@ mod tests {
     }
 
     #[test]
-    fn an_openmp_sentinel_is_code_not_a_skipped_line() {
-        // `!$ ` introduces conditionally compiled code, so a group absorbs it
-        // like any other line rather than stepping over it.
-        assert!(!super::stepped_over_by_continuation(b"!$ x = 1"));
-        assert!(super::stepped_over_by_continuation(b"!$OMP parallel"));
+    fn conditional_sentinel_transparency_respects_compact_context() {
+        for line in [b"!$ x = 1".as_slice(), b"!$	x = 1"] {
+            assert!(!super::stepped_over_by_continuation(line), "{line:?}");
+        }
+        for line in [
+            b"!$& x = 1".as_slice(),
+            b"  !$&x = 1",
+            b"!$OMP parallel",
+            b"!$OMPX vendor",
+        ] {
+            assert!(super::stepped_over_by_continuation(line), "{line:?}");
+        }
     }
 
     #[test]
