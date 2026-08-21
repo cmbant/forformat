@@ -1,0 +1,95 @@
+name: Fix PR20 integration CI
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'fix/conditional-continuation-state'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: fix/conditional-continuation-state
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.85.0
+          components: rustfmt
+      - name: Apply CI cleanups
+        shell: python
+        run: |
+          from pathlib import Path
+
+          full = Path('src/format/full.rs')
+          text = full.read_text()
+          old = '        source::LogicalGroup,\n'
+          new = '        source::{LogicalGroup, SourceBuffer},\n'
+          assert text.count(old) == 1
+          full.write_text(text.replace(old, new, 1))
+
+          cont = Path('src/transform/passes/continuations.rs')
+          text = cont.read_text()
+          old = '''    for index in 0..lines.len() {
+              let nearest = match source_stream(cx, index) {
+                  SourceStream::Ordinary => &mut ordinary,
+                  SourceStream::Conditional => &mut conditional,
+              };
+              previous[index] = *nearest;
+              if carries_statement(cx, index) {
+                  *nearest = Some(index);
+              }
+          }
+          let mut next = vec![None; lines.len()];
+          let mut ordinary = None;
+          let mut conditional = None;
+          for index in (0..lines.len()).rev() {
+              let nearest = match source_stream(cx, index) {
+                  SourceStream::Ordinary => &mut ordinary,
+                  SourceStream::Conditional => &mut conditional,
+              };
+              next[index] = *nearest;
+              if carries_statement(cx, index) {
+                  *nearest = Some(index);
+              }
+          }
+          '''
+          new = '''    for (index, slot) in previous.iter_mut().enumerate() {
+              let nearest = match source_stream(cx, index) {
+                  SourceStream::Ordinary => &mut ordinary,
+                  SourceStream::Conditional => &mut conditional,
+              };
+              *slot = *nearest;
+              if carries_statement(cx, index) {
+                  *nearest = Some(index);
+              }
+          }
+          let mut next = vec![None; lines.len()];
+          let mut ordinary = None;
+          let mut conditional = None;
+          for (index, slot) in next.iter_mut().enumerate().rev() {
+              let nearest = match source_stream(cx, index) {
+                  SourceStream::Ordinary => &mut ordinary,
+                  SourceStream::Conditional => &mut conditional,
+              };
+              *slot = *nearest;
+              if carries_statement(cx, index) {
+                  *nearest = Some(index);
+              }
+          }
+          '''
+          assert text.count(old) == 1
+          cont.write_text(text.replace(old, new, 1))
+      - run: cargo fmt --all && git diff --check
+      - name: Commit clean tree
+        shell: bash
+        run: |
+          git rm .github/workflows/fix-pr20-integration-ci.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- src/format/full.rs src/transform/passes/continuations.rs
+          git commit -m 'Fix consolidated continuation CI cleanups'
+          git push origin HEAD:fix/conditional-continuation-state
