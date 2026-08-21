@@ -177,8 +177,9 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
     ),
     spec!(
         WsRemred,
-        "ws-remred",
-        "--ws-remred[=<n>]",
+        "reduce-whitespace",
+        aliases = &["ws-remred"],
+        "--reduce-whitespace[=<n>]",
         "reduce redundant whitespace"
     ),
     spec!(
