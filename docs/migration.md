@@ -16,7 +16,7 @@ a no-op: automatic fixed/free detection is the default, and `-ifree` (or
 | `--start-indent`, `--max-indent`, `--label-left`, `--include-left`, `--openmp` | supported |
 | `-k`, `-K`, `--indent-continuation`, `--indent-ampersand`, `--align_paren` | supported for free form |
 | `-Rr`, `-RR`, `--refactor-end` | supported; `--refactor-procedures` is an alias |
-| `--ws_remred` | supported; bare spelling enables it |
+| `--ws_remred` | supported as a compatibility alias for native `--reduce-whitespace`; bare spelling enables it |
 | `-i-`, `--indent=none` | supported; preserve authored leading indentation while retaining the selected mode's other behaviour |
 | `-lastindent`, `-lastusable` | supported |
 | `-iauto`, `--input-format=auto` | supported; automatic fixed/free input detection is the default |
@@ -31,7 +31,8 @@ Rust intentionally does not read `FINDENT_FLAGS` and rejects unknown options. `-
 matches the legacy formatter's removal of trailing spaces/tabs while preserving other source
 spelling and non-trailing body bytes. Full mode additionally normalizes keywords, separators,
 comments, array constructors, declaration-driven names and kind suffixes, and can wrap statements.
-Use `--ws_remred` or `--ws_remred=1` for broader redundant-whitespace reduction; `=0` disables it.
+Prefer `--reduce-whitespace` for broader redundant-whitespace reduction. Legacy `--ws_remred` and
+`--ws_remred=1` remain accepted aliases; `=0` disables the transform.
 
 For the current native option names, defaults, configuration keys, and interactions, see
 [options.md](options.md). Full mode's intentional divergences are centralized in
