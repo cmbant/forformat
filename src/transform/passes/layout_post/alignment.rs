@@ -14,8 +14,9 @@ use crate::{
     config::FormatConfig,
     error::FormatError,
     source::{
-        regions::{comment_start, line_code_spans, line_comment_start},
+        regions::{comment_start, line_comment_start, stepped_over_by_continuation},
         syntax::is_directive_comment,
+        tokens::{tokenize, TokenKind},
         LexState,
     },
     transform::{
@@ -48,7 +49,7 @@ pub fn declaration_separator_alignment(
     let mut lines = document.lines.clone();
     loop {
         let cpp_lines = preprocessor_lines(&lines);
-        let separators = column_info(&lines, &cpp_lines, declaration_separator_info_in);
+        let separators = declaration_separator_columns(&lines, &cpp_lines);
         let original = lines.clone();
         let mut updated = original.clone();
         align_blocks(
@@ -194,22 +195,77 @@ fn set_comment_column(
     *updated.get_mut(line_index).expect("run line in range") = line;
 }
 
-/// The `::` a standalone line offers for alignment, scanned from a clean state.
-pub(crate) fn declaration_separator_info(line: &[u8]) -> Option<(usize, usize, usize)> {
-    declaration_separator_info_in(line, &mut LexState::default())
+#[derive(Default)]
+struct MultipleSubscriptState {
+    open_depth: usize,
+    active_depths: Vec<usize>,
 }
 
-/// The same, for one line of a group whose lexical state is already known.
-fn declaration_separator_info_in(line: &[u8], lex: &mut LexState) -> Option<(usize, usize, usize)> {
-    let mut found = None;
-    line_code_spans(lex, line, |start, span| {
-        if found.is_none() {
-            if let Some(at) = span.windows(2).position(|pair| pair == b"::") {
-                found = Some(start + at);
-            }
+struct MultipleSubscriptScan {
+    triplet_colons: Vec<usize>,
+    active_depths: Vec<usize>,
+    end_depth: usize,
+}
+
+/// The `::` a standalone line offers for alignment, scanned from a clean state.
+pub(crate) fn declaration_separator_info(line: &[u8]) -> Option<(usize, usize, usize)> {
+    declaration_separator_info_in(
+        line,
+        &mut LexState::default(),
+        &mut MultipleSubscriptState::default(),
+    )
+}
+
+/// The same, for one physical line while carrying any active multiple-subscript
+/// item from an earlier continuation line.
+fn declaration_separator_info_in(
+    line: &[u8],
+    lex: &mut LexState,
+    multiple_subscript: &mut MultipleSubscriptState,
+) -> Option<(usize, usize, usize)> {
+    let carrying_statement = *lex != LexState::default()
+        || multiple_subscript.open_depth > 0
+        || !multiple_subscript.active_depths.is_empty();
+    if carrying_statement && stepped_over_by_continuation(line) {
+        return None;
+    }
+
+    let tokens = tokenize(line, lex);
+    let scan = scan_multiple_subscripts(
+        &tokens,
+        multiple_subscript.open_depth,
+        &multiple_subscript.active_depths,
+    );
+    let separator = tokens
+        .iter()
+        .enumerate()
+        .find(|(index, token)| {
+            token.kind == TokenKind::Operator
+                && token.text == b"::"
+                && !scan.triplet_colons.contains(index)
+        })
+        .map(|(_, token)| token.span.start);
+
+    let has_code = tokens.iter().any(|token| token.kind != TokenKind::Comment);
+    let trailing_token_marker = tokens
+        .iter()
+        .rev()
+        .find(|token| token.kind != TokenKind::Comment)
+        .is_some_and(|token| token.kind == TokenKind::Ampersand);
+    let protected_trailing_marker =
+        (lex.in_literal() || lex.in_hollerith()) && line.trim_ascii_end().last() == Some(&b'&');
+    let continued = has_code && (trailing_token_marker || protected_trailing_marker);
+    if has_code {
+        if continued {
+            multiple_subscript.open_depth = scan.end_depth;
+            multiple_subscript.active_depths = scan.active_depths;
+        } else {
+            *lex = LexState::default();
+            *multiple_subscript = MultipleSubscriptState::default();
         }
-    });
-    let index = found?;
+    }
+
+    let index = separator?;
     let mut before = index;
     while before > 0 && matches!(line[before - 1], b' ' | b'\t') {
         before -= 1;
@@ -222,6 +278,79 @@ fn declaration_separator_info_in(line: &[u8], lex: &mut LexState) -> Option<(usi
         return None;
     }
     Some((index, index - before, after - index - 2))
+}
+
+/// Scan one physical line using absolute delimiter depth, carrying active `@`
+/// items from earlier continuation lines. A comma at the active depth ends the
+/// item; closing delimiters discard deeper items. This is the same state model
+/// used by delimiter normalization, so post-layout alignment cannot reinterpret
+/// a continued multiple-subscript `::` as a declaration separator.
+fn scan_multiple_subscripts(
+    tokens: &[crate::source::Token<'_>],
+    open_depth: usize,
+    continued_multiple_subscripts: &[usize],
+) -> MultipleSubscriptScan {
+    let mut active_depths = continued_multiple_subscripts.to_vec();
+    let mut triplet_colons = Vec::new();
+    let mut depth = open_depth;
+
+    for (index, token) in tokens.iter().enumerate() {
+        match token.kind {
+            TokenKind::LParen | TokenKind::LBracket => {
+                depth += 1;
+            }
+            TokenKind::RParen | TokenKind::RBracket => {
+                depth = depth.saturating_sub(1);
+                active_depths.retain(|active| *active <= depth);
+            }
+            TokenKind::Comma => {
+                active_depths.retain(|active| *active < depth);
+            }
+            TokenKind::Operator if token.text == b"@" => {
+                active_depths.retain(|active| *active != depth);
+                active_depths.push(depth);
+            }
+            TokenKind::Operator
+                if matches!(token.text, b":" | b"::") && active_depths.contains(&depth) =>
+            {
+                triplet_colons.push(index);
+            }
+            _ => {}
+        }
+    }
+
+    MultipleSubscriptScan {
+        triplet_colons,
+        active_depths,
+        end_depth: depth,
+    }
+}
+
+fn declaration_separator_columns(
+    lines: &[Vec<u8>],
+    cpp_lines: &[bool],
+) -> Vec<Option<(usize, usize, usize)>> {
+    let mut lex = [LexState::default(), LexState::default()];
+    let mut multiple_subscripts = [
+        MultipleSubscriptState::default(),
+        MultipleSubscriptState::default(),
+    ];
+    lines
+        .iter()
+        .zip(cpp_lines)
+        .map(|(line, cpp)| {
+            if *cpp {
+                None
+            } else {
+                let stream = usize::from(line.trim_ascii_start().starts_with(b"!$ "));
+                declaration_separator_info_in(
+                    line,
+                    &mut lex[stream],
+                    &mut multiple_subscripts[stream],
+                )
+            }
+        })
+        .collect()
 }
 
 fn preprocessor_lines(lines: &[Vec<u8>]) -> Vec<bool> {
