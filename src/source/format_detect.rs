@@ -333,10 +333,10 @@ fn strong_free_form_signature(line: &[u8]) -> bool {
             continue;
         }
         let byte = line[index];
-        if byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'%') {
-            if index > 0 || !matches!(byte, b'c' | b'C' | b'd' | b'D') {
-                return true;
-            }
+        if (byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'%'))
+            && (index > 0 || !matches!(byte, b'c' | b'C' | b'd' | b'D'))
+        {
+            return true;
         }
         if byte == b'&' {
             return true;
