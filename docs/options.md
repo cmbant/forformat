@@ -230,10 +230,13 @@ Both settings draw the same boundaries. Macro names are never re-cased, and neit
 argument list: `PRIVATE(shared)` keeps the declared name as written even though `shared` is itself a
 clause name elsewhere, because the argument is the user's program and not the formatter's to respell.
 The exception is the handful of clauses whose argument grammar is a fixed vocabulary rather than a
-list of names — `default`, `schedule`, `dist_schedule`, `proc_bind`, `order` — where the
-argument is cased too, so `schedule(dynamic, chunk)` becomes `SCHEDULE(DYNAMIC, chunk)` and the
-chunk-size expression beside it stays as authored. Clauses that take a list keep their modifiers as
-written for the same reason the list itself is kept: `MAP(to: a)` is not re-cased, since telling a
+list of names — `default`, `schedule`, `dist_schedule`, `proc_bind`, `order` — where the kind is
+cased too. That vocabulary stops at the clause's first top-level comma, because what follows is an
+expression: `schedule(dynamic, chunk)` becomes `SCHEDULE(DYNAMIC, chunk)`, and a chunk size named
+after a kind keeps its spelling, so `schedule(dynamic, static)` becomes `SCHEDULE(DYNAMIC, static)`.
+A modifier is separated from the kind by a colon rather than a comma and is still cased:
+`schedule(monotonic: static, n)` becomes `SCHEDULE(MONOTONIC: STATIC, n)`. Clauses that take a list
+keep their modifiers as written for the same reason the list itself is kept: `MAP(to: a)` is not re-cased, since telling a
 modifier from a name there needs the clause-by-clause grammar of the whole specification.
 Unreserved sentinels such as `!$acc` are ordinary comments to this
 formatter and keep their authored spelling under every setting. A conditional-compilation `!$ ` line

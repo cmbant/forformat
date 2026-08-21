@@ -358,6 +358,16 @@ pub fn protected_trailing_floor(state: &mut LexState, line: &[u8]) -> usize {
     floor
 }
 
+/// Advance `state` over one physical line of a continuation group, reporting
+/// nothing.
+///
+/// For a caller that writes the line's bytes through unchanged and so has no
+/// other reason to scan it, but still owes the next physical line of the group
+/// the lexical state this one leaves behind.
+pub fn advance_group_line(state: &mut LexState, line: &[u8]) {
+    scan_group_line(state, line, |_| {});
+}
+
 /// One `T` per source stream, for a caller that walks whole physical lines
 /// rather than one statement.
 ///

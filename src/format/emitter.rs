@@ -125,12 +125,13 @@ pub fn emit_line_to_with_lex<B: AsRef<[u8]>, W: Write>(
     if !style.apply_indent {
         let leading = leading_len(original);
         if let Some(replacement) = replacement {
+            let body = trim_end_horizontal(replacement);
+            crate::source::regions::advance_group_line(lex, body);
             out.write_all(&original[..leading])
                 .map_err(FormatError::Write)?;
-            out.write_all(trim_end_horizontal(replacement))
-                .map_err(FormatError::Write)?;
+            out.write_all(body).map_err(FormatError::Write)?;
         } else {
-            out.write_all(trim_end_horizontal_protected(original, *lex))
+            out.write_all(trim_end_horizontal_protected(original, lex))
                 .map_err(FormatError::Write)?;
         }
         write_newline(buf, index, out)?;
@@ -209,6 +210,13 @@ pub fn emit_line_to_with_lex<B: AsRef<[u8]>, W: Write>(
         if !config.mode.normalizes()
             && prefix.kind == crate::source::syntax::ConditionalPrefixKind::CompactContinuation
         {
+            // The group's state tracks the Fortran body, never the sentinel,
+            // so it is advanced over the body this line writes even though the
+            // bytes go out with their authored prefix attached.
+            crate::source::regions::advance_group_line(
+                lex,
+                trim_end_horizontal(&original[prefix.body_start..]),
+            );
             out.write_all(trim_end_horizontal(trim_start(original)))
                 .map_err(FormatError::Write)?;
             write_newline(buf, index, out)?;
@@ -287,7 +295,13 @@ fn write_body<W: Write>(
     lex: &mut LexState,
     out: &mut W,
 ) -> Result<(), FormatError> {
-    let body = trim_end_horizontal_protected(body, *lex);
+    // Exactly one writer may advance the group's state over this line. The
+    // `--ws-remred` reducer below is one, so the trim scan gets a snapshot
+    // there and the real state here; with the reducer off, nothing else would
+    // advance it at all, and the next physical line of a continued literal
+    // would be lexed as though the literal had never opened.
+    let mut scanned = *lex;
+    let body = trim_end_horizontal_protected(body, &mut scanned);
     if style.remred {
         // The post-layout alignment passes that would own a protected gap
         // (`declaration_separator_alignment`, `trailing_comment_alignment`)
@@ -305,6 +319,7 @@ fn write_body<W: Write>(
         )
         .map_err(FormatError::Write)
     } else {
+        *lex = scanned;
         out.write_all(body).map_err(FormatError::Write)
     }
 }
@@ -316,7 +331,8 @@ fn trim_end_horizontal(mut s: &[u8]) -> &[u8] {
     s
 }
 
-/// [`trim_end_horizontal`] for a line that carries code.
+/// [`trim_end_horizontal`] for a line that carries code, advancing `lex` over
+/// it.
 ///
 /// Trailing blanks are invisible presentation everywhere except inside a
 /// character literal or a Hollerith payload, where they are payload bytes:
@@ -325,14 +341,17 @@ fn trim_end_horizontal(mut s: &[u8]) -> &[u8] {
 /// same continuation group, so a region opened on one of them is still
 /// protected here — including a Hollerith payload, whose owed byte count no
 /// bare delimiter could have carried.
-fn trim_end_horizontal_protected(s: &[u8], lex: LexState) -> &[u8] {
+///
+/// The scan that answers that question is also the scan the *next* physical
+/// line needs, so it advances `lex` rather than a copy. A caller that has
+/// another writer advancing the same state — [`write_body`] under
+/// `--ws-remred` — must hand this one a snapshot instead.
+fn trim_end_horizontal_protected<'a>(s: &'a [u8], lex: &mut LexState) -> &'a [u8] {
     let body_start = match conditional_compilation_prefix(s) {
         Some(prefix) if prefix.kind == ConditionalPrefixKind::BlankSeparated => prefix.body_start,
         _ => 0,
     };
-    let mut state = lex;
-    let floor = match crate::source::regions::protected_trailing_floor(&mut state, &s[body_start..])
-    {
+    let floor = match crate::source::regions::protected_trailing_floor(lex, &s[body_start..]) {
         0 => 0,
         floor => body_start + floor,
     };

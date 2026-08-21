@@ -389,11 +389,14 @@ fn openmp_body(line: &[u8]) -> Option<&[u8]> {
 /// directive or clause name, and [`DIRECTIVE_WORDS`] applies. Inside a clause's
 /// parentheses the default is that the word is the user's, and the exceptions
 /// are listed one clause at a time in [`CLAUSE_KINDS`]: the handful of clauses
-/// whose argument grammar is a fixed vocabulary rather than a list of names.
-/// `SCHEDULE(STATIC, chunk)` is cased because `schedule` takes a kind; the
-/// `chunk` beside it is not, and neither is anything in `MAP(to: a)`, because
-/// `map` takes a list and telling its modifier from the list would take the
-/// clause-by-clause grammar of the whole OpenMP specification.
+/// whose argument grammar is a fixed vocabulary rather than a list of names --
+/// and within those, only up to the clause's first top-level comma, because
+/// every one of them spends its vocabulary on the kind and modifiers and leaves
+/// the rest to an expression. `SCHEDULE(STATIC, chunk)` is cased because
+/// `schedule` takes a kind; the chunk size beside it is not, even when it is
+/// spelled `schedule(dynamic, static)`. Nothing in `MAP(to: a)` is cased
+/// either, because `map` takes a list and telling its modifier from the list
+/// would take the clause-by-clause grammar of the whole OpenMP specification.
 ///
 /// [`StyleConfig::openmp_keyword_case`]: crate::config::StyleConfig::openmp_keyword_case
 fn case_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
@@ -462,6 +465,11 @@ fn case_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
                     }
                     depth += 1;
                 }
+                // Only the kind and modifier portion, before the clause's first
+                // top-level comma, is a fixed vocabulary. What follows is an
+                // expression the user wrote: `schedule(dynamic, static)` names a
+                // chunk-size variable, and re-casing it would rename it.
+                b',' if depth == 1 => clause_kinds = None,
                 b')' => {
                     depth = depth.saturating_sub(1);
                     if depth == 0 {
@@ -555,13 +563,14 @@ const DIRECTIVE_WORDS: &[&[u8]] = &[
 /// Clauses whose arguments are a fixed vocabulary rather than a list of the
 /// user's names, with the spellings each one admits.
 ///
-/// Membership is the promise that no argument of that clause is ever a program
-/// identifier, so casing a word there cannot rename anything. `schedule` is on
-/// the list even though its second argument is a chunk-size expression, because
-/// no kind spelling is a plausible name for one. Clauses that take a list —
-/// `private`, `shared`, `map`, `depend`, `reduction`, `linear` — are absent
-/// however reserved-looking their modifiers are, because a list is exactly
-/// where the user's own names appear.
+/// Membership is the promise that no *kind* argument of that clause is ever a
+/// program identifier, so casing a word there cannot rename anything. It does
+/// not extend past the clause's first top-level comma: `schedule` and
+/// `dist_schedule` take a chunk-size expression after theirs, and an expression
+/// is the user's, so `schedule(dynamic, static)` keeps its `static`. Clauses
+/// that take a list — `private`, `shared`, `map`, `depend`, `reduction`,
+/// `linear` — are absent however reserved-looking their modifiers are, because
+/// a list is exactly where the user's own names appear.
 const CLAUSE_KINDS: &[(&[u8], &[&[u8]])] = &[
     (
         b"default",
@@ -792,6 +801,41 @@ mod tests {
         assert_eq!(
             String::from_utf8(document.to_bytes()).unwrap(),
             "!$OMP DO SCHEDULE(DYNAMIC, chunk) DEFAULT(NONE) PROC_BIND(CLOSE) ORDER(CONCURRENT)\n",
+        );
+    }
+
+    /// A kind clause's vocabulary stops at its first top-level comma. What
+    /// follows is a chunk-size expression, so a variable named after a
+    /// schedule kind is still the user's name — the same defect as the flat
+    /// table, one clause further in.
+    #[test]
+    fn a_chunk_size_spelled_like_a_schedule_kind_keeps_the_authored_case() {
+        let mut document = Document::from_bytes(
+            b"!$omp do schedule(dynamic, static) dist_schedule(static, guided)
+",
+        );
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+        let context = cx_cased(&document, &local, &project, KeywordCase::Lower, true);
+        case_openmp_directives(&mut document, &context).unwrap();
+        assert_eq!(
+            String::from_utf8(document.to_bytes()).unwrap(),
+            "!$OMP DO SCHEDULE(DYNAMIC, static) DIST_SCHEDULE(STATIC, guided)\n",
+        );
+    }
+
+    /// The modifier syntax puts a colon, not a comma, between the modifier and
+    /// the kind, so both are still reserved.
+    #[test]
+    fn a_schedule_modifier_before_the_kind_is_still_cased() {
+        let mut document = Document::from_bytes(b"!$omp do schedule(monotonic: static, dynamic)\n");
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+        let context = cx_cased(&document, &local, &project, KeywordCase::Lower, true);
+        case_openmp_directives(&mut document, &context).unwrap();
+        assert_eq!(
+            String::from_utf8(document.to_bytes()).unwrap(),
+            "!$OMP DO SCHEDULE(MONOTONIC: STATIC, dynamic)\n",
         );
     }
 

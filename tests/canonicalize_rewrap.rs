@@ -162,6 +162,46 @@ fn a_hollerith_payload_is_not_trailing_whitespace() {
     }
 }
 
+/// Trailing-blank protection is a lexical question, and on a continuation line
+/// the answer lives on the line before it. The emitter carries one
+/// `LexState` through a group for exactly that, but only the `--ws-remred`
+/// writer used to advance it, so with reduction off every physical line after
+/// the first was lexed from a clean slate: the `'` closing a continued literal
+/// read as one *opening* a fresh one, and the presentation blank after it
+/// looked like payload and survived.
+#[test]
+fn a_continued_literal_carries_its_lexical_state_to_the_next_physical_line() {
+    let source = b"program p\ny = 'ab&\n&cd   ' \nz = 'ef&\n&gh   '\nend program p\n";
+    for mode in [
+        FormatMode::IndentOnly,
+        FormatMode::NormalizeOnly,
+        FormatMode::CanonicalizeOnly,
+        FormatMode::Full,
+    ] {
+        for ws_remred in [false, true] {
+            let config = FormatConfig {
+                mode,
+                ws_remred,
+                ..FormatConfig::default()
+            };
+            let text = String::from_utf8(format_source(source, &config).unwrap().bytes).unwrap();
+            for line in text.lines() {
+                assert_eq!(
+                    line.trim_end(),
+                    line,
+                    "{mode:?} ws_remred={ws_remred} kept trailing space: {line:?}"
+                );
+            }
+            // The blanks *inside* the literal are payload on the same line and
+            // must survive whatever the trailing rule does beside them.
+            assert!(
+                text.contains("&cd   '") && text.contains("&gh   '"),
+                "{mode:?} ws_remred={ws_remred} lost literal payload: {text:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_literal_keeps_its_blanks_while_the_line_around_it_is_trimmed() {
     let source = b"program p\ny = 'tail spaces   '   \n!$ z = 3Hab \nend program p\n";
