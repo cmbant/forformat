@@ -86,8 +86,25 @@ pub fn normalize(
     local: &FileFacts,
     config: &FormatConfig,
 ) -> Result<(), FormatError> {
+    // `!$&...` is only a conditional-compilation sentinel while that stream has
+    // an open continuation. Resolve that contextual spelling before the first
+    // `SourceBuffer` analysis, then let every later pass use the stable `!$ `
+    // spelling. This is a deliberate ordering exception for step 12: the later
+    // continuation pass still owns removal of the body-leading `&`.
+    let mut changed = if config.style.continuation_markers {
+        passes::conditional_continuations::run(document)
+    } else {
+        Changed::No
+    };
+
     // Steps 1-3: macro-name casing, from `-D` and from `#define`.
-    let mut changed = with_context(document, project, local, config, passes::case_pass::macros)?;
+    changed = changed.or(with_context(
+        document,
+        project,
+        local,
+        config,
+        passes::case_pass::macros,
+    )?);
 
     // Step 5 needs a fresh statement view after macro casing. Steps 6 and 7 do
     // not inspect their PassContext at all, so they can follow on the same
