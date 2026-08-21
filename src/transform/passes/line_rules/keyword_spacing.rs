@@ -308,10 +308,10 @@ impl Rules<'_> {
     fn only_colon(&self, index: usize, token: &Token<'_>, edits: &mut EditBuffer) {
         if !token.is(b"only")
             || self.shadowed(token.text)
-            || !self
+            || self
                 .tokens
                 .get(index + 1)
-                .is_some_and(|next| next.text == b":")
+                .is_none_or(|next| next.text != b":")
         {
             return;
         }
