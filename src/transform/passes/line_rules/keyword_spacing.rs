@@ -15,6 +15,7 @@ pub fn normalize_keyword_spacing(
         line_index,
         LexState::default(),
         false,
+        true,
         &StyleConfig::default(),
     )
 }
@@ -25,13 +26,16 @@ pub(crate) fn normalize_keyword_spacing_with_state(
     line_index: usize,
     incoming: LexState,
     continued_format: bool,
+    normalize_whitespace: bool,
     style: &StyleConfig,
 ) -> Vec<u8> {
     let tokens = tokenize(line, &mut incoming.clone());
     let mut edits = EditBuffer::new(line);
 
-    if let Some((start, end, replacement)) = common_block_edit(line, &tokens) {
-        edits.replace(start..end, &replacement);
+    if normalize_whitespace {
+        if let Some((start, end, replacement)) = common_block_edit(line, &tokens) {
+            edits.replace(start..end, &replacement);
+        }
     }
     if style.array_brackets && !is_format_statement(&tokens) && !continued_format {
         for pair in tokens.windows(2) {
@@ -41,8 +45,10 @@ pub(crate) fn normalize_keyword_spacing_with_state(
                 && horizontal_gap(line, pair[0].span.end, pair[1].span.start)
             {
                 let mut end = pair[1].span.end;
-                while end < line.len() && matches!(line[end], b' ' | b'\t') {
-                    end += 1;
+                if normalize_whitespace {
+                    while end < line.len() && matches!(line[end], b' ' | b'\t') {
+                        end += 1;
+                    }
                 }
                 edits.replace(pair[0].span.start..end, b"[");
             }
@@ -54,8 +60,10 @@ pub(crate) fn normalize_keyword_spacing_with_state(
                 && horizontal_gap(line, pair[0].span.end, pair[1].span.start)
             {
                 let mut start = pair[0].span.start;
-                while start > 0 && matches!(line[start - 1], b' ' | b'\t') {
-                    start -= 1;
+                if normalize_whitespace {
+                    while start > 0 && matches!(line[start - 1], b' ' | b'\t') {
+                        start -= 1;
+                    }
                 }
                 edits.replace(start..pair[1].span.end, b"]");
             }
@@ -70,8 +78,9 @@ pub(crate) fn normalize_keyword_spacing_with_state(
             {
                 let mut replacement = apply_case(pair[0].text, style.keyword_case);
                 replacement.extend_from_slice(&apply_case(pair[1].text, style.keyword_case));
-                if if_condition_close(&tokens)
-                    .is_some_and(|close| tokens[close].span.end == pair[0].span.start)
+                if normalize_whitespace
+                    && if_condition_close(&tokens)
+                        .is_some_and(|close| tokens[close].span.end == pair[0].span.start)
                 {
                     replacement.insert(0, b' ');
                 }
@@ -80,6 +89,9 @@ pub(crate) fn normalize_keyword_spacing_with_state(
         }
     }
 
+    // A language-level multiword token has one canonical internal space. This
+    // stays active when presentation whitespace is preserved: `end   module`
+    // and `endmodule` are spelling choices, not incidental layout gaps.
     for pair in tokens.windows(2) {
         if pair[0].kind == TokenKind::Name
             && pair[1].kind == TokenKind::Name
@@ -105,11 +117,13 @@ pub(crate) fn normalize_keyword_spacing_with_state(
                         replacement = apply_case(&replacement, style.keyword_case);
                     }
                     edits.replace(first.span.clone(), &replacement);
-                    if let Some(next) = next {
-                        if next.kind == TokenKind::Name
-                            && horizontal_gap(line, first.span.end, next.span.start)
-                        {
-                            edits.replace(first.span.end..next.span.start, b" ");
+                    if normalize_whitespace {
+                        if let Some(next) = next {
+                            if next.kind == TokenKind::Name
+                                && horizontal_gap(line, first.span.end, next.span.start)
+                            {
+                                edits.replace(first.span.end..next.span.start, b" ");
+                            }
                         }
                     }
                     if first.is_name(b"elseif") {
@@ -126,7 +140,9 @@ pub(crate) fn normalize_keyword_spacing_with_state(
 
     for (index, token) in tokens.iter().enumerate() {
         if token.kind == TokenKind::Name {
-            if token.is(b"end") && !declared_names.suppresses_keyword(line_index, token.text, false)
+            if normalize_whitespace
+                && token.is(b"end")
+                && !declared_names.suppresses_keyword(line_index, token.text, false)
             {
                 if let Some(next) = tokens.get(index + 1) {
                     if next.kind == TokenKind::Name
@@ -143,7 +159,9 @@ pub(crate) fn normalize_keyword_spacing_with_state(
                     }
                 }
             }
-            if token.is(b"do") && !declared_names.suppresses_keyword(line_index, token.text, false)
+            if normalize_whitespace
+                && token.is(b"do")
+                && !declared_names.suppresses_keyword(line_index, token.text, false)
             {
                 if let Some(next) = tokens.get(index + 1) {
                     if next.kind == TokenKind::Name
@@ -168,14 +186,19 @@ pub(crate) fn normalize_keyword_spacing_with_state(
             {
                 let colon = tokens[index + 1].span.start;
                 let keyword = apply_case(token.text, style.keyword_case);
-                if token.text != keyword || horizontal_gap(line, token.span.end, colon) {
-                    edits.replace(token.span.start..colon, &keyword);
+                if normalize_whitespace {
+                    if token.text != keyword || horizontal_gap(line, token.span.end, colon) {
+                        edits.replace(token.span.start..colon, &keyword);
+                    }
+                } else if token.text != keyword {
+                    edits.replace(token.span.clone(), &keyword);
                 }
             }
-            if (token.is(b"module")
-                || token.is(b"use")
-                || token.is(b"call")
-                || token.is(b"subroutine"))
+            if normalize_whitespace
+                && (token.is(b"module")
+                    || token.is(b"use")
+                    || token.is(b"call")
+                    || token.is(b"subroutine"))
                 && !declared_names.suppresses_keyword(line_index, token.text, false)
             {
                 if let Some(next) = tokens.get(index + 1) {
@@ -188,7 +211,10 @@ pub(crate) fn normalize_keyword_spacing_with_state(
             }
         }
 
-        if token.kind == TokenKind::Name && is_followed_by_lparen(&tokens, index) {
+        if normalize_whitespace
+            && token.kind == TokenKind::Name
+            && is_followed_by_lparen(&tokens, index)
+        {
             let next = &tokens[index + 1];
             if !horizontal_gap(line, token.span.end, next.span.start) {
                 continue;
@@ -210,7 +236,7 @@ pub(crate) fn normalize_keyword_spacing_with_state(
             }
         }
 
-        if token.is(b"select") {
+        if normalize_whitespace && token.is(b"select") {
             if let (Some(ty), Some(paren)) = (tokens.get(index + 1), tokens.get(index + 2)) {
                 if ty.is_name(b"type") && paren.kind == TokenKind::LParen {
                     if horizontal_gap(line, token.span.end, ty.span.start) {
@@ -240,7 +266,12 @@ pub(crate) fn normalize_keyword_spacing_with_state(
             }
         }
 
-        if token.is(b"change") || token.is(b"form") || token.is(b"select") || token.is(b"sync") {
+        if normalize_whitespace
+            && (token.is(b"change")
+                || token.is(b"form")
+                || token.is(b"select")
+                || token.is(b"sync"))
+        {
             if let (Some(rank_or_team), Some(paren)) =
                 (tokens.get(index + 1), tokens.get(index + 2))
             {
@@ -254,37 +285,39 @@ pub(crate) fn normalize_keyword_spacing_with_state(
         }
     }
 
-    for pair in tokens.windows(2) {
-        if (pair[0].kind == TokenKind::LParen || pair[0].kind == TokenKind::LBracket)
-            && horizontal_gap(line, pair[0].span.end, pair[1].span.start)
-            && !is_trailing_continuation_marker(line, pair[1].span.start)
-        {
-            edits.replace(pair[0].span.end..pair[1].span.start, b"");
-        }
-        if (pair[1].kind == TokenKind::RParen || pair[1].kind == TokenKind::RBracket)
-            && !matches!(pair[0].kind, TokenKind::String | TokenKind::Hollerith)
-            && horizontal_gap(line, pair[0].span.end, pair[1].span.start)
-        {
-            edits.replace(pair[0].span.end..pair[1].span.start, b"");
-        }
-        if pair[0].kind == TokenKind::RParen
-            && pair[1].is_name(b"then")
-            && horizontal_gap(line, pair[0].span.end, pair[1].span.start)
-        {
-            edits.replace(pair[0].span.end..pair[1].span.start, b" ");
-        }
-    }
-
-    if let Some(close) = if_condition_close(&tokens) {
-        if let Some(next) = tokens.get(close + 1) {
-            if next.kind != TokenKind::Comment
-                && next.text != b"&"
-                && !next.is_name(b"then")
-                && line[next.span.start..]
-                    .iter()
-                    .any(|byte| !byte.is_ascii_whitespace())
+    if normalize_whitespace {
+        for pair in tokens.windows(2) {
+            if (pair[0].kind == TokenKind::LParen || pair[0].kind == TokenKind::LBracket)
+                && horizontal_gap(line, pair[0].span.end, pair[1].span.start)
+                && !is_trailing_continuation_marker(line, pair[1].span.start)
             {
-                edits.replace(tokens[close].span.end..next.span.start, b" ");
+                edits.replace(pair[0].span.end..pair[1].span.start, b"");
+            }
+            if (pair[1].kind == TokenKind::RParen || pair[1].kind == TokenKind::RBracket)
+                && !matches!(pair[0].kind, TokenKind::String | TokenKind::Hollerith)
+                && horizontal_gap(line, pair[0].span.end, pair[1].span.start)
+            {
+                edits.replace(pair[0].span.end..pair[1].span.start, b"");
+            }
+            if pair[0].kind == TokenKind::RParen
+                && pair[1].is_name(b"then")
+                && horizontal_gap(line, pair[0].span.end, pair[1].span.start)
+            {
+                edits.replace(pair[0].span.end..pair[1].span.start, b" ");
+            }
+        }
+
+        if let Some(close) = if_condition_close(&tokens) {
+            if let Some(next) = tokens.get(close + 1) {
+                if next.kind != TokenKind::Comment
+                    && next.text != b"&"
+                    && !next.is_name(b"then")
+                    && line[next.span.start..]
+                        .iter()
+                        .any(|byte| !byte.is_ascii_whitespace())
+                {
+                    edits.replace(tokens[close].span.end..next.span.start, b" ");
+                }
             }
         }
     }
@@ -319,6 +352,8 @@ pub(crate) fn normalize_keyword_spacing_with_state(
         .get(start..)
         .is_some_and(|tail| tail.starts_with(b"else if("))
     {
+        // Splitting ELSEIF creates a language-level separator; this is part of
+        // the canonical replacement spelling, not a whitespace-only cleanup.
         output.insert(start + b"else if".len(), b' ');
     }
     output

@@ -34,8 +34,10 @@ pub(super) enum OptionId {
     IndentOnly,
     Full,
     NormalizeOnly,
+    CanonicalizeOnly,
     Wrap,
     NoWrap,
+    Rewrap,
     LineLength,
     UppercaseSingleL,
     Define,
@@ -175,8 +177,9 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
     ),
     spec!(
         WsRemred,
-        "ws-remred",
-        "--ws-remred[=<n>]",
+        "reduce-whitespace",
+        aliases = &["ws-remred"],
+        "--reduce-whitespace[=<n>]",
         "reduce redundant whitespace"
     ),
     spec!(
@@ -301,12 +304,24 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "normalization without structural layout"
     ),
     spec!(
+        CanonicalizeOnly,
+        "canonicalize-only",
+        "--canonicalize-only",
+        "canonical spelling without whitespace or structural layout"
+    ),
+    spec!(
         Wrap,
         "wrap",
         "--wrap[=<BOOL>], --no-wrap[=<BOOL>]",
         "reflow over-long statements (full mode)"
     ),
     spec!(NoWrap, "no-wrap"),
+    spec!(
+        Rewrap,
+        "rewrap",
+        "--rewrap[=<BOOL>]",
+        "repack eligible authored continuations (full mode)"
+    ),
     spec!(
         LineLength,
         "line-length",

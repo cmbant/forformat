@@ -38,6 +38,7 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
     let continued_entity_list = (context.continued_declaration || context.continued_separator)
         && context.open_groups.is_empty()
         && !context.continued_initializer;
+    let normalize_whitespace = cx.config.style.normalize_whitespace;
     let mut edits = EditBuffer::new(line);
     if !is_format_statement(&tokens) && !context.continued_format {
         for pair in tokens.windows(2) {
@@ -46,6 +47,8 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                 && horizontal_gap(line, pair[0].span.end, pair[1].span.start)
                 && is_fortran_2023_multiword_pair(pair[0].text, pair[1].text)
             {
+                // Multiword language tokens have a canonical one-space spelling.
+                // This is a token-spelling edit even in canonicalize-only mode.
                 edits.replace(pair[0].span.end..pair[1].span.start, b" ");
             }
         }
@@ -67,10 +70,24 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
             TokenKind::DotOp => {
                 if cx.config.style.relational_symbols {
                     if let Some(operator) = modern_operator(token.text) {
-                        add_operator_edit(line, &mut edits, token, operator, true, &mut spacing);
+                        add_operator_by_mode(
+                            line,
+                            &mut edits,
+                            token,
+                            operator,
+                            normalize_whitespace,
+                            &mut spacing,
+                        );
                     } else if is_spaced_dotted_operator(token.text) {
                         let operator = dotted_case(token.text, cx.config.style.keyword_case);
-                        add_operator_edit(line, &mut edits, token, &operator, true, &mut spacing);
+                        add_operator_by_mode(
+                            line,
+                            &mut edits,
+                            token,
+                            &operator,
+                            normalize_whitespace,
+                            &mut spacing,
+                        );
                     } else if token.text.eq_ignore_ascii_case(b".nil.") {
                         let cased = dotted_case(token.text, cx.config.style.keyword_case);
                         edits.replace(token.span.clone(), &cased);
@@ -83,7 +100,14 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                     || is_spaced_dotted_operator(token.text)
                 {
                     let operator = dotted_case(token.text, cx.config.style.keyword_case);
-                    add_operator_edit(line, &mut edits, token, &operator, true, &mut spacing);
+                    add_operator_by_mode(
+                        line,
+                        &mut edits,
+                        token,
+                        &operator,
+                        normalize_whitespace,
+                        &mut spacing,
+                    );
                 } else if token.text.eq_ignore_ascii_case(b".nil.") {
                     let cased = dotted_case(token.text, cx.config.style.keyword_case);
                     edits.replace(token.span.clone(), &cased);
@@ -93,7 +117,7 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                     edits.replace(token.span.clone(), &cased);
                 }
             }
-            TokenKind::Operator => {
+            TokenKind::Operator if normalize_whitespace => {
                 if !is_labelled_format_statement(&tokens)
                     && !context.continued_format
                     && is_spaced_operator_token(line, &tokens, index, token)
@@ -221,6 +245,23 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
         }
     }
     edits.finish()
+}
+
+/// Canonicalize an operator token without taking ownership of its surrounding
+/// whitespace unless the active style includes whitespace normalization.
+fn add_operator_by_mode(
+    line: &[u8],
+    edits: &mut EditBuffer<'_>,
+    token: &crate::source::Token<'_>,
+    replacement: &[u8],
+    normalize_whitespace: bool,
+    spacing: &mut OperatorSpacing,
+) {
+    if normalize_whitespace {
+        add_operator_edit(line, edits, token, replacement, true, spacing);
+    } else {
+        edits.replace(token.span.clone(), replacement);
+    }
 }
 
 fn is_fortran_2023_multiword_pair(first: &[u8], second: &[u8]) -> bool {

@@ -95,8 +95,7 @@ where
             draft.config.align_paren = draft.config.align_paren_value != 0;
         }
         OptionId::WsRemred => {
-            draft.config.ws_remred_value =
-                value.as_deref().map(parse_num).transpose()?.unwrap_or(1);
+            draft.config.ws_remred_value = parse_whitespace_reduction(value.as_deref())?;
             draft.config.ws_remred = draft.config.ws_remred_value != 0;
         }
         OptionId::AlignDeclarations => {
@@ -198,14 +197,25 @@ where
         OptionId::IndentOnly => {
             reject_value(name, &value)?;
             draft.config.mode = FormatMode::IndentOnly;
+            draft.config.style.normalize_whitespace = true;
         }
         OptionId::Full => {
             reject_value(name, &value)?;
             draft.config.mode = FormatMode::Full;
+            draft.config.style.normalize_whitespace = true;
         }
         OptionId::NormalizeOnly => {
             reject_value(name, &value)?;
             draft.config.mode = FormatMode::NormalizeOnly;
+            draft.config.style.normalize_whitespace = true;
+        }
+        OptionId::CanonicalizeOnly => {
+            reject_value(name, &value)?;
+            // Canonicalization-only is a normalize-only preset: it takes the
+            // existing no-layout return path while line rules suppress
+            // whitespace-only edits.
+            draft.config.mode = FormatMode::NormalizeOnly;
+            draft.config.style.normalize_whitespace = false;
         }
         OptionId::Wrap => {
             draft.config.wrap.enabled = value
@@ -221,6 +231,13 @@ where
                 .transpose()?
                 .unwrap_or(true);
             draft.config.wrap.enabled = !disabled;
+        }
+        OptionId::Rewrap => {
+            draft.config.rewrap = value
+                .as_deref()
+                .map(parse_bool)
+                .transpose()?
+                .unwrap_or(true);
         }
         OptionId::LineLength => {
             draft.config.wrap.line_length = parse_num(&cursor.required_long(&mut value)?)?
@@ -353,4 +370,16 @@ where
         OptionId::Help | OptionId::Version => unreachable!("handled before long-option parsing"),
     }
     Ok(())
+}
+
+/// Parse the native reduction level while retaining findent's numeric levels.
+/// TOML booleans are serialized through the same option parser, so accepting
+/// `true` and `false` here makes `reduce_whitespace = true/false` natural
+/// without losing `--reduce-whitespace=N` or legacy numeric diagnostics.
+fn parse_whitespace_reduction(value: Option<&str>) -> Result<usize, FormatError> {
+    match value {
+        None | Some("true") => Ok(1),
+        Some("false") => Ok(0),
+        Some(value) => parse_num(value),
+    }
 }
