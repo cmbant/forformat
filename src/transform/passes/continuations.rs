@@ -45,8 +45,12 @@ pub fn normalize_continuations(
     document: &mut Document,
     cx: &PassContext,
 ) -> Result<Changed, FormatError> {
-    let _ = cx;
     let original = document.lines.clone();
+    debug_assert_eq!(
+        original.len(),
+        cx.analysis.buffer.lines.len(),
+        "continuation pass requires analysis of the current document",
+    );
     let (previous_statement_line, next_statement_line) = statement_neighbours(cx);
     let mut normalized = Vec::with_capacity(original.len());
     let mut continuation = false;
@@ -507,8 +511,12 @@ mod tests {
         transform::pipeline::{Changed, PassContext},
     };
 
-    fn cx<'a>(local: &'a FileFacts, project: &'a ProjectContext) -> PassContext<'a> {
-        let analysis = Box::leak(Box::new(Document::from_bytes(b"").analyze().unwrap()));
+    fn cx<'a>(
+        document: &Document,
+        local: &'a FileFacts,
+        project: &'a ProjectContext,
+    ) -> PassContext<'a> {
+        let analysis = Box::leak(Box::new(document.analyze().unwrap()));
         let scopes = Box::leak(Box::new(ScopeTree::build(analysis)));
         let config = Box::leak(Box::new(FormatConfig {
             mode: FormatMode::Full,
@@ -523,13 +531,40 @@ mod tests {
         }
     }
 
+    fn normalize(
+        document: &mut Document,
+        local: &FileFacts,
+        project: &ProjectContext,
+    ) -> Result<Changed, crate::error::FormatError> {
+        let context = cx(document, local, project);
+        normalize_continuations(document, &context)
+    }
+
+    fn run_pass(
+        document: &mut Document,
+        local: &FileFacts,
+        project: &ProjectContext,
+    ) -> Result<Changed, crate::error::FormatError> {
+        let context = cx(document, local, project);
+        run(document, &context)
+    }
+
+    fn normalize_openmp(
+        document: &mut Document,
+        local: &FileFacts,
+        project: &ProjectContext,
+    ) -> Result<Changed, crate::error::FormatError> {
+        let context = cx(document, local, project);
+        normalize_openmp_continuation_sentinels(document, &context)
+    }
+
     #[test]
     fn continuation_markers_are_normalized_without_touching_literals() {
         let mut document = Document::from_bytes(b"x = a &\n  & b\ny = 'a &\n &b'\n");
         let local = FileFacts::default();
         let project = ProjectContext::empty();
         assert_eq!(
-            normalize_continuations(&mut document, &cx(&local, &project)).unwrap(),
+            normalize(&mut document, &local, &project).unwrap(),
             Changed::Text
         );
         assert_eq!(document.lines[0], b"x = a &".to_vec());
@@ -544,7 +579,7 @@ mod tests {
         let local = FileFacts::default();
         let project = ProjectContext::empty();
         assert_eq!(
-            normalize_continuations(&mut document, &cx(&local, &project)).unwrap(),
+            normalize(&mut document, &local, &project).unwrap(),
             Changed::Text
         );
         assert_eq!(document.lines[0], b"!$ call f( &".to_vec());
@@ -556,7 +591,7 @@ mod tests {
         let mut document = Document::from_bytes(b"!$ sub&\n!$&routine sub\n");
         let local = FileFacts::default();
         let project = ProjectContext::empty();
-        normalize_continuations(&mut document, &cx(&local, &project)).unwrap();
+        normalize(&mut document, &local, &project).unwrap();
         assert_eq!(document.lines[0], b"!$ sub&".to_vec());
         assert_eq!(document.lines[1], b"!$&routine sub".to_vec());
     }
@@ -581,7 +616,7 @@ mod tests {
             let mut document = Document::from_bytes(source.as_bytes());
             let local = FileFacts::default();
             let project = ProjectContext::empty();
-            normalize_continuations(&mut document, &cx(&local, &project)).unwrap();
+            normalize(&mut document, &local, &project).unwrap();
             assert_eq!(
                 document.lines[0],
                 b"sub&".to_vec(),
@@ -602,7 +637,7 @@ mod tests {
             let mut document = Document::from_bytes(source.as_bytes());
             let local = FileFacts::default();
             let project = ProjectContext::empty();
-            normalize_continuations(&mut document, &cx(&local, &project)).unwrap();
+            normalize(&mut document, &local, &project).unwrap();
             assert_eq!(
                 document.lines[2],
                 b"  b".to_vec(),
@@ -620,7 +655,7 @@ mod tests {
             let local = FileFacts::default();
             let project = ProjectContext::empty();
             assert_eq!(
-                normalize_continuations(&mut document, &cx(&local, &project)).unwrap(),
+                normalize(&mut document, &local, &project).unwrap(),
                 Changed::No,
                 "literal state was lost at {separator:?}"
             );
@@ -633,7 +668,7 @@ mod tests {
         let mut document = Document::from_bytes(b"x = 'unterminated\ny = a &\n  & b\n");
         let local = FileFacts::default();
         let project = ProjectContext::empty();
-        normalize_continuations(&mut document, &cx(&local, &project)).unwrap();
+        normalize(&mut document, &local, &project).unwrap();
         assert_eq!(document.lines[2], b"  b".to_vec());
     }
 
@@ -646,7 +681,7 @@ mod tests {
             let mut document = Document::from_bytes(source);
             let local = FileFacts::default();
             let project = ProjectContext::empty();
-            run(&mut document, &cx(&local, &project)).unwrap();
+            run_pass(&mut document, &local, &project).unwrap();
 
             assert!(document.lines[0].ends_with(b"sub&"));
             assert!(document.lines[1].ends_with(b"&routine sub"));
@@ -660,7 +695,7 @@ mod tests {
         let mut document = Document::from_bytes(b"sub&\n!$ x = 1\n&routine sub\n");
         let local = FileFacts::default();
         let project = ProjectContext::empty();
-        normalize_continuations(&mut document, &cx(&local, &project)).unwrap();
+        normalize(&mut document, &local, &project).unwrap();
 
         assert_eq!(document.lines[0], b"sub&".to_vec());
         assert_eq!(document.lines[2], b"&routine sub".to_vec());
@@ -671,7 +706,7 @@ mod tests {
         let mut document = Document::from_bytes(b"!$ sub&\nx = 1\n!$ &routine sub\n");
         let local = FileFacts::default();
         let project = ProjectContext::empty();
-        normalize_continuations(&mut document, &cx(&local, &project)).unwrap();
+        normalize(&mut document, &local, &project).unwrap();
 
         assert_eq!(document.lines[0], b"!$ sub&".to_vec());
         assert_eq!(document.lines[2], b"!$ &routine sub".to_vec());
@@ -689,7 +724,7 @@ mod tests {
             let local = FileFacts::default();
             let project = ProjectContext::empty();
             assert_eq!(
-                normalize_continuations(&mut document, &cx(&local, &project)).unwrap(),
+                normalize(&mut document, &local, &project).unwrap(),
                 Changed::No,
                 "literal state was lost across {sep:?}"
             );
@@ -709,8 +744,7 @@ mod tests {
                 value: None,
             }]);
             assert_ne!(
-                normalize_openmp_continuation_sentinels(&mut document, &cx(&local, &project))
-                    .unwrap(),
+                normalize_openmp(&mut document, &local, &project).unwrap(),
                 Changed::No
             );
             let canonical = if sentinel.ends_with('x') {
@@ -725,8 +759,7 @@ mod tests {
                 .any(|w| w == b"PRIVATE"));
             let before = document.lines.clone();
             assert_eq!(
-                normalize_openmp_continuation_sentinels(&mut document, &cx(&local, &project))
-                    .unwrap(),
+                normalize_openmp(&mut document, &local, &project).unwrap(),
                 Changed::No
             );
             assert_eq!(document.lines, before);
