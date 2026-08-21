@@ -1,0 +1,80 @@
+name: Fix continuation test context in PR18
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'fix/conditional-continuation-state'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: fix/conditional-continuation-state
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.85.0
+          components: rustfmt
+      - name: Fix stale continuation test analysis
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('src/transform/passes/continuations.rs')
+          text = path.read_text()
+
+          old = '''    let _ = cx;
+              let original = document.lines.clone();
+          '''
+          new = '''    let original = document.lines.clone();
+              debug_assert_eq!(
+                  original.len(),
+                  cx.analysis.buffer.lines.len(),
+                  "continuation pass requires analysis of the current document",
+              );
+          '''
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          old = '''    fn cx<'a>(local: &'a FileFacts, project: &'a ProjectContext) -> PassContext<'a> {
+              let analysis = Box::leak(Box::new(Document::from_bytes(b"").analyze().unwrap()));
+          '''
+          new = '''    fn cx<'a>(
+              document: &Document,
+              local: &'a FileFacts,
+              project: &'a ProjectContext,
+          ) -> PassContext<'a> {
+              let analysis = Box::leak(Box::new(document.analyze().unwrap()));
+          '''
+          assert text.count(old) == 1
+          text = text.replace(old, new, 1)
+
+          needle = 'cx(&local, &project)'
+          count = text.count(needle)
+          assert count >= 10, count
+          text = text.replace(needle, 'cx(&document, &local, &project)')
+          assert needle not in text
+
+          path.write_text(text)
+      - name: Validate focused and full tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo fmt --all
+          git diff --check
+          cargo test --locked transform::passes::continuations::tests --lib
+          cargo test --locked --all-targets
+      - name: Commit clean fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm .github/workflows/fix-continuation-test-context-pr18.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/transform/passes/continuations.rs
+          git commit -m 'Keep continuation test analysis in sync'
+          git push origin HEAD:fix/conditional-continuation-state
