@@ -235,15 +235,53 @@ fn cpp_directive(line: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 fn is_cpp_directive_line(line: &[u8]) -> bool {
-    let line = trim_left(line);
-    let Some(rest) = line.strip_prefix(b"#") else {
+    let trimmed = trim_left(line);
+    let Some(rest) = trimmed.strip_prefix(b"#") else {
         return false;
     };
-    let rest = trim_left(rest);
-    match rest.first() {
-        None => true,
-        Some(byte) => byte.is_ascii_alphanumeric() || *byte == b'_',
+
+    // Away from the fixed-form continuation column, preserve the detector's
+    // historical broad `#...` treatment. Exactly in column six, however, `#`
+    // is also a legal fixed continuation marker, so only actual CPP directive
+    // spellings may bypass the fixed-form evidence scan.
+    if line.len() - trimmed.len() != 5 {
+        return true;
     }
+
+    let rest = trim_left(rest);
+    if rest.is_empty() || rest.first().is_some_and(u8::is_ascii_digit) {
+        return true;
+    }
+    let keyword_len = rest
+        .iter()
+        .position(|byte| !byte.is_ascii_alphabetic())
+        .unwrap_or(rest.len());
+    matches!(
+        &rest[..keyword_len],
+        b"if"
+            | b"ifdef"
+            | b"ifndef"
+            | b"elif"
+            | b"elifdef"
+            | b"elifndef"
+            | b"else"
+            | b"endif"
+            | b"include"
+            | b"define"
+            | b"undef"
+            | b"line"
+            | b"error"
+            | b"warning"
+            | b"pragma"
+            | b"import"
+            | b"embed"
+            | b"assert"
+            | b"unassert"
+            | b"ident"
+            | b"sccs"
+            | b"region"
+            | b"endregion"
+    )
 }
 
 fn literal_cpp_condition(rest: &[u8]) -> Option<bool> {
