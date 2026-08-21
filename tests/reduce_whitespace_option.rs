@@ -32,9 +32,19 @@ fn assert_success(output: &Output) {
 #[test]
 fn native_reduce_whitespace_matches_findent_alias() {
     let source = b"program p\ncall   work\nend program p\n";
-    let native = run(&["--input-format=free", "--reduce-whitespace"], source);
-    let legacy = run(&["--input-format=free", "--ws_remred"], source);
-    let baseline = run(&["--input-format=free"], source);
+    let native = run(
+        &[
+            "--input-format=free",
+            "--indent-only",
+            "--reduce-whitespace",
+        ],
+        source,
+    );
+    let legacy = run(
+        &["--input-format=free", "--indent-only", "--ws_remred"],
+        source,
+    );
+    let baseline = run(&["--input-format=free", "--indent-only"], source);
 
     assert_success(&native);
     assert_success(&legacy);
@@ -45,6 +55,11 @@ fn native_reduce_whitespace_matches_findent_alias() {
         String::from_utf8_lossy(&native.stdout).contains("call work"),
         "{}",
         String::from_utf8_lossy(&native.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&baseline.stdout).contains("call   work"),
+        "{}",
+        String::from_utf8_lossy(&baseline.stdout)
     );
 }
 
