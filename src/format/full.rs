@@ -1075,7 +1075,7 @@ mod tests {
         analysis::{analyze_project, ProjectContext},
         config::{FormatConfig, FormatMode},
         format_source,
-        source::LogicalGroup,
+        source::{LogicalGroup, SourceBuffer},
         transform::document::Document,
     };
     use std::path::Path;

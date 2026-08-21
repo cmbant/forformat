@@ -178,12 +178,12 @@ fn statement_neighbours(cx: &PassContext) -> (Vec<Option<usize>>, Vec<Option<usi
     let mut previous = vec![None; lines.len()];
     let mut ordinary = None;
     let mut conditional = None;
-    for index in 0..lines.len() {
+    for (index, slot) in previous.iter_mut().enumerate() {
         let nearest = match source_stream(cx, index) {
             SourceStream::Ordinary => &mut ordinary,
             SourceStream::Conditional => &mut conditional,
         };
-        previous[index] = *nearest;
+        *slot = *nearest;
         if carries_statement(cx, index) {
             *nearest = Some(index);
         }
@@ -191,12 +191,12 @@ fn statement_neighbours(cx: &PassContext) -> (Vec<Option<usize>>, Vec<Option<usi
     let mut next = vec![None; lines.len()];
     let mut ordinary = None;
     let mut conditional = None;
-    for index in (0..lines.len()).rev() {
+    for (index, slot) in next.iter_mut().enumerate().rev() {
         let nearest = match source_stream(cx, index) {
             SourceStream::Ordinary => &mut ordinary,
             SourceStream::Conditional => &mut conditional,
         };
-        next[index] = *nearest;
+        *slot = *nearest;
         if carries_statement(cx, index) {
             *nearest = Some(index);
         }
