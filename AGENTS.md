@@ -26,31 +26,24 @@ Two rules I1 keeps re-teaching:
 
 ## Verification
 
-`.githooks/pre-commit` runs `cargo fmt --check` and `cargo clippy` whenever a commit stages a `.rs`
-file or a manifest. Those two are cheap enough to gate a commit (~7s warm); the rest of the bar
-below stays in CI. Enable the hook once per clone (the devcontainer does this on create):
+`.githooks/pre-commit` runs `cargo fmt --check` and Clippy whenever a commit stages a `.rs` file or
+a manifest. Clippy uses CARGO_TARGET_DIR, separate from the default Cargo target, so its metadata-only
+artifacts cannot interfere with `cargo test`. Enable the hook once per clone (the devcontainer does this on create):
 
 ```sh
 git config core.hooksPath .githooks
 ```
 
 Run the full local bar (mirrors `.github/workflows/rust-checks.yml` and the `release` job in
-`ci.yml`):
+`ci.yml`) sequentially:
 
 ```sh
-cargo test --locked --all-targets
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
-./tools/check_fixture_syntax.sh target/debug/forformat
-./tools/check_fuzz_regression.sh
-./tools/check_cli_contract.sh target/debug/forformat
-./tools/check_docs.sh target/debug/forformat
-
-cargo build --locked --release
-./tools/check_cli_contract.sh target/release/forformat
-./tools/check_package.sh
+./tools/check_local.sh
 ```
+
+The devcontainer sets `CARGO_TARGET_DIR=/tmp/forformat-target` for normal builds; Clippy overrides it with
+`CARGO_TARGET_DIR=/tmp/forformat-lint`. Outside the devcontainer, tests and formatter binaries use the
+default `target/` directory.
 
 Only when a change touches packaging (`pyproject.toml`, `setup.py`, `forformat/`, `forformat_runner/`,
 or `.github/workflows/pypi.yml`), also build and check the wheel:
@@ -82,10 +75,11 @@ fixed/free wording, and the quick-start formatter examples; it is not an exhaust
 
 - Do not use `git stash` to A/B a build: it resets the index for stashed paths, and `pop` does not
   put staged work back. Swap file contents in place instead.
-- `cargo test` has been observed running against a stale library after alternating with
-  `cargo clippy`, which shares the dev profile. If a test result contradicts what the release
-  binary does on the same input, do not debug the difference: run `cargo clean -p forformat` and
-  re-run first. Instrumenting a function and seeing *no* output from it is the giveaway.
+- `cargo test` has been observed running against a stale library after alternating with Clippy in
+  the same target directory. Use `./tools/check_local.sh`, or set
+  `CARGO_TARGET_DIR=/tmp/forformat-lint` for manual Clippy runs. If a test result contradicts what the
+  release binary does on the same input, do not debug the difference: run `cargo clean -p forformat`
+  and re-run first. Instrumenting a function and seeing *no* output from it is the giveaway.
 - Full-mode passes must preserve protected literal, Hollerith, preprocessor, and comment bytes
   except for the explicitly documented comment rule.
 - A continuation line has no statement context of its own. Thread facts into line rules rather

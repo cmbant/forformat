@@ -37,9 +37,14 @@ pub(crate) enum ConditionalPrefixKind {
 
 /// Parsed free-form conditional-compilation prefix.
 ///
-/// `body_start` always points at the first byte that belongs to the Fortran
-/// body. For a compact continuation that byte is the `&` itself, because it is
-/// real Fortran continuation syntax rather than part of the sentinel.
+/// `body_start` is the offset just past the sentinel, which is where the
+/// Fortran body *begins*, not necessarily where its first nonblank byte is:
+/// `!$  x` reports the second space, because only the first one is the
+/// sentinel's separator and the rest is the body's own leading indentation. A
+/// caller that wants the first significant byte trims from here.
+///
+/// For a compact continuation the offset lands on the `&` itself, because that
+/// is real Fortran continuation syntax rather than part of the sentinel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ConditionalPrefix {
     pub body_start: usize,
@@ -85,19 +90,16 @@ pub(crate) fn conditional_compilation_body_start(line: &[u8]) -> Option<usize> {
 }
 
 /// Which reserved free-form OpenMP directive sentinel introduced a line.
+///
+/// This says which sentinel was parsed, never how to spell it: the sentinel
+/// word is a keyword and follows `--keyword-case`, so a caller that re-emits
+/// one copies the spelling the document already settled on rather than a
+/// canonical constant. A constant here is what previously made a wrapped
+/// directive disagree with the normalized one and cost the fixed point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OpenMpDirectiveSentinel {
     Omp,
     Ompx,
-}
-
-impl OpenMpDirectiveSentinel {
-    pub(crate) fn canonical(self) -> &'static [u8] {
-        match self {
-            Self::Omp => b"!$OMP ",
-            Self::Ompx => b"!$OMPX ",
-        }
-    }
 }
 
 /// Parsed free-form OpenMP directive prefix.

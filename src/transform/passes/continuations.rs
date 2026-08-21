@@ -17,9 +17,62 @@ use crate::{
 };
 
 /// Step 12-13 driver.
+///
+/// Directive *casing* is deliberately not here: see
+/// [`case_openmp_directives`], which the pipeline runs separately because it is
+/// canonicalization rather than whitespace policy.
 pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
     let changed = normalize_continuations(document, cx)?;
     Ok(changed.or(normalize_openmp_continuation_sentinels(document, cx)?))
+}
+
+/// Spell reserved OpenMP directives — the sentinel word and the directive words
+/// after it — according to `--openmp-case`, touching nothing else on the line.
+///
+/// This is separate from the sentinel *shape* normalization in
+/// [`normalize_openmp_continuation_sentinels`] because the two answer different
+/// questions and are reached by different modes. Repeating a sentinel across a
+/// continuation, removing a body-leading `&` and inserting the canonical blank
+/// after the sentinel are all presentation: they belong to whitespace and
+/// continuation-marker policy, and canonicalize-only does not run them. How a
+/// reserved word is *spelled* is not presentation — it is exactly what
+/// canonicalization means — so it runs in every normalizing mode, and it does
+/// not stop because `--continuation-markers=false` turned the other pass off.
+///
+/// `!$ ` conditional-compilation lines are ordinary Fortran and are not reached
+/// here at all: `openmp_directive_prefix` answers `None` for them, so their
+/// keywords stay with `--keyword-case` like any other statement's.
+pub fn case_openmp_directives(
+    document: &mut Document,
+    cx: &PassContext,
+) -> Result<Changed, FormatError> {
+    let mut changed = Changed::No;
+    let mut updated = document.lines.clone();
+    for line in &mut updated {
+        let Some(prefix) = openmp_directive_prefix(line) else {
+            continue;
+        };
+        let indent_end = line
+            .iter()
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(0);
+        let mut rebuilt = line[..indent_end].to_vec();
+        rebuilt.extend_from_slice(&crate::transform::passes::line_rules::apply_case(
+            &line[indent_end..prefix.sentinel_end],
+            cx.config.style.openmp_keyword_case(),
+        ));
+        // From the sentinel's end rather than the body's start, so the blank
+        // between them is carried through untouched instead of canonicalized.
+        rebuilt.extend_from_slice(&case_openmp_body(&line[prefix.sentinel_end..], cx));
+        if rebuilt != *line {
+            *line = rebuilt;
+            changed = changed.or(Changed::Text);
+        }
+    }
+    if changed != Changed::No {
+        document.set_lines(updated);
+    }
+    Ok(changed)
 }
 
 /// Step 12: normalize continuation markers.
@@ -57,7 +110,7 @@ pub fn normalize_continuations(
     let mut state = LexState::default();
     let mut open_stream: Option<SourceStream> = None;
     for (index, original_line) in original.iter().enumerate() {
-        let stream = source_stream(cx, index);
+        let stream = cx.analysis.buffer.stream(index);
         let passed_over =
             !carries_statement(cx, index) || open_stream.is_some_and(|open| open != stream);
         let incoming_protected = state.in_literal() || state.in_hollerith();
@@ -103,7 +156,9 @@ pub fn normalize_continuations(
 /// `!$OMPX`) on each physical line with valid `&` markers, and the available
 /// width has to account for the sentinel. `--openmp=0` disables OpenMP
 /// *indentation* while directive *text* normalization stays on: two concerns,
-/// two config fields, never one flag.
+/// two config fields, never one flag. `--openmp-case` is the third: it decides
+/// the *spelling* of the sentinel and the directive words, and reaches nothing
+/// else on the line.
 ///
 /// Port target: `normalize_openmp_continuation_sentinels`,
 /// `prepare_sentinel_reflow`, `wrap_sentinel_line`.
@@ -139,7 +194,11 @@ pub fn normalize_openmp_continuation_sentinels(
             .position(|byte| !byte.is_ascii_whitespace())
             .unwrap_or(0);
         let mut rebuilt = current[..indent_end].to_vec();
-        rebuilt.extend_from_slice(prefix.sentinel.canonical());
+        // The sentinel word keeps whatever spelling `case_openmp_directives`
+        // gave it; only the separating blank after it is this pass's to
+        // canonicalize.
+        rebuilt.extend_from_slice(&current[indent_end..prefix.sentinel_end]);
+        rebuilt.push(b' ');
         rebuilt.extend_from_slice(&normalized_body);
         if rebuilt != current {
             current = rebuilt;
@@ -179,7 +238,7 @@ fn statement_neighbours(cx: &PassContext) -> (Vec<Option<usize>>, Vec<Option<usi
     let mut ordinary = None;
     let mut conditional = None;
     for (index, slot) in previous.iter_mut().enumerate() {
-        let nearest = match source_stream(cx, index) {
+        let nearest = match cx.analysis.buffer.stream(index) {
             SourceStream::Ordinary => &mut ordinary,
             SourceStream::Conditional => &mut conditional,
         };
@@ -192,7 +251,7 @@ fn statement_neighbours(cx: &PassContext) -> (Vec<Option<usize>>, Vec<Option<usi
     let mut ordinary = None;
     let mut conditional = None;
     for (index, slot) in next.iter_mut().enumerate().rev() {
-        let nearest = match source_stream(cx, index) {
+        let nearest = match cx.analysis.buffer.stream(index) {
             SourceStream::Ordinary => &mut ordinary,
             SourceStream::Conditional => &mut conditional,
         };
@@ -210,21 +269,6 @@ fn carries_statement(cx: &PassContext, index: usize) -> bool {
         .lines
         .get(index)
         .is_some_and(|line| line.kind == PhysicalLineKind::Code)
-}
-
-/// Which continuation stream a physical line belongs to.
-fn source_stream(cx: &PassContext, index: usize) -> SourceStream {
-    if cx
-        .analysis
-        .buffer
-        .lines
-        .get(index)
-        .is_some_and(|line| line.is_conditional_compilation())
-    {
-        SourceStream::Conditional
-    } else {
-        SourceStream::Ordinary
-    }
 }
 
 fn lexical_prefix_end(line: &[u8]) -> Option<usize> {
@@ -323,84 +367,79 @@ fn openmp_body(line: &[u8]) -> Option<&[u8]> {
     openmp_directive_prefix(line).map(|prefix| &line[prefix.body_start..])
 }
 
-fn uppercase_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
-    const KEYWORDS: &[&[u8]] = &[
-        b"omp",
-        b"do",
-        b"atomic",
-        b"barrier",
-        b"cancel",
-        b"cancellation",
-        b"critical",
-        b"declare",
-        b"distribute",
-        b"end",
-        b"flush",
-        b"loop",
-        b"master",
-        b"masked",
-        b"ordered",
-        b"parallel",
-        b"sections",
-        b"section",
-        b"simd",
-        b"single",
-        b"target",
-        b"task",
-        b"taskgroup",
-        b"taskloop",
-        b"taskwait",
-        b"taskyield",
-        b"teams",
-        b"threadprivate",
-        b"workshare",
-        b"allocate",
-        b"collapse",
-        b"copyin",
-        b"copyprivate",
-        b"default",
-        b"firstprivate",
-        b"if",
-        b"lastprivate",
-        b"linear",
-        b"map",
-        b"nowait",
-        b"num_threads",
-        b"private",
-        b"reduction",
-        b"schedule",
-        b"static",
-        b"dynamic",
-        b"guided",
-        b"runtime",
-        b"shared",
-        b"simdlen",
-        b"proc_bind",
-        b"defaultmap",
-        b"depend",
-        b"device",
-        b"dist_schedule",
-        b"final",
-        b"grainsize",
-        b"hint",
-        b"in_reduction",
-        b"is_device_ptr",
-        b"mergeable",
-        b"nogroup",
-        b"num_tasks",
-        b"order",
-        b"priority",
-        b"safelen",
-        b"thread_limit",
-        b"to",
-        b"from",
-        b"use_device_addr",
-        b"use_device_ptr",
-    ];
+/// Does the clause opening at `rest` use the modifier syntax — one or more
+/// modifiers separated from the kind by a top-level `:`?
+///
+/// `schedule([modifier[, modifier]:] kind[, chunk_size])` spends a comma on two
+/// jobs, and only the colon tells them apart: in
+/// `schedule(monotonic, simd: static, n)` the first comma separates two
+/// modifiers and the second hands over to an expression. Answering that needs
+/// one look ahead, because the words come out as they are read.
+///
+/// `rest` is the remainder of a single code region, so a `:` inside a string
+/// literal cannot reach here. A clause that runs past the end of the region
+/// simply reports no colon, which casts fewer words rather than more.
+fn has_modifier_colon(rest: &[u8]) -> bool {
+    let mut depth = 0usize;
+    for &byte in rest {
+        match byte {
+            b'(' => depth += 1,
+            b')' if depth == 0 => return false,
+            b')' => depth -= 1,
+            b':' if depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Spell the recognized OpenMP directive words in `body` according to
+/// [`StyleConfig::openmp_keyword_case`].
+///
+/// Directive words get their own switch rather than following `--keyword-case`
+/// because uppercase directives over lowercase Fortran is a convention in its
+/// own right; `--openmp-case=false` hands them back to `--keyword-case`, which
+/// is how `preserve` reaches them.
+///
+/// What is *not* re-cased is the point of the two tables. A clause's arguments
+/// are the user's own program — `PRIVATE(i)` names a variable — so matching a
+/// word against one flat keyword table re-spells any identifier that happens to
+/// collide with the OpenMP vocabulary, and that vocabulary contains ordinary
+/// words: `shared`, `static`, `final`, `order`, `device`, `hint`. Legal Fortran
+/// such as `!$omp parallel private(shared)` came out as `PRIVATE(SHARED)`,
+/// renaming the user's variable in the source text. Fortran's own
+/// case-insensitivity makes that harmless to run, but it is still the formatter
+/// rewriting a name it does not own.
+///
+/// So position decides. At the top level of the directive a word can only be a
+/// directive or clause name, and [`DIRECTIVE_WORDS`] applies. Inside a clause's
+/// parentheses the default is that the word is the user's, and the exceptions
+/// are listed one clause at a time in [`CLAUSE_KINDS`]: the handful of clauses
+/// whose argument grammar is a fixed vocabulary rather than a list of names --
+/// and within those, only up to the clause's first top-level comma, because
+/// every one of them spends its vocabulary on the kind and modifiers and leaves
+/// the rest to an expression. `SCHEDULE(STATIC, chunk)` is cased because
+/// `schedule` takes a kind; the chunk size beside it is not, even when it is
+/// spelled `schedule(dynamic, static)`. Nothing in `MAP(to: a)` is cased
+/// either, because `map` takes a list and telling its modifier from the list
+/// would take the clause-by-clause grammar of the whole OpenMP specification.
+///
+/// [`StyleConfig::openmp_keyword_case`]: crate::config::StyleConfig::openmp_keyword_case
+fn case_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
     let mut result = Vec::with_capacity(body.len());
     let mut state = LexState::default();
     let mut regions = Vec::new();
     state.scan(body, |region| regions.push(region));
+    // Depth counts only delimiters the code regions report, so a parenthesis
+    // inside a string literal or a comment cannot open a clause.
+    let mut depth = 0usize;
+    // The word immediately before the `(` that took the depth from zero to one,
+    // resolved to the reserved argument spellings that clause admits.
+    let mut clause_kinds: Option<&[&[u8]]> = None;
+    let mut clause_name: Vec<u8> = Vec::new();
+    // Is the clause's modifier colon still ahead? While it is, a top-level
+    // comma separates two modifiers rather than the kind from its chunk size.
+    let mut before_modifier_colon = false;
     for region in regions {
         let bytes = &body[region.range.clone()];
         if region.kind != RegionKind::Code {
@@ -418,27 +457,183 @@ fn uppercase_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
                     index += 1;
                 }
                 let word = &bytes[start..index];
+                // Depth two and beyond is inside an expression — `if(f(x))`,
+                // `schedule(static, n(1))` — where every word is the user's.
+                let reserved = match depth {
+                    0 => Some(DIRECTIVE_WORDS),
+                    1 => clause_kinds,
+                    _ => None,
+                };
+                // A macro name outranks every case rule (I4).
                 if !cx.project.macros.contains(word)
-                    && KEYWORDS
-                        .iter()
-                        .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                    && reserved.is_some_and(|reserved| {
+                        reserved
+                            .iter()
+                            .any(|keyword| word.eq_ignore_ascii_case(keyword))
+                    })
                 {
-                    result.extend(word.iter().map(u8::to_ascii_uppercase));
+                    result.extend_from_slice(&crate::transform::passes::line_rules::apply_case(
+                        word,
+                        cx.config.style.openmp_keyword_case(),
+                    ));
                 } else {
                     result.extend_from_slice(word);
                 }
-            } else {
-                result.push(bytes[index]);
-                index += 1;
+                if depth == 0 {
+                    clause_name = word.to_vec();
+                }
+                continue;
             }
+            match bytes[index] {
+                b'(' => {
+                    if depth == 0 {
+                        clause_kinds = CLAUSE_KINDS
+                            .iter()
+                            .find(|(clause, _)| clause_name.eq_ignore_ascii_case(clause))
+                            .map(|(_, kinds)| *kinds);
+                        before_modifier_colon =
+                            clause_kinds.is_some() && has_modifier_colon(&bytes[index + 1..]);
+                    }
+                    depth += 1;
+                }
+                b':' if depth == 1 => before_modifier_colon = false,
+                // The kind and its modifiers are a fixed vocabulary; what
+                // follows them is an expression the user wrote, and
+                // `schedule(dynamic, static)` names a chunk-size variable that
+                // re-casing would rename. Which side of that line a comma falls
+                // on is what `before_modifier_colon` answers.
+                b',' if depth == 1 && !before_modifier_colon => clause_kinds = None,
+                b')' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        clause_kinds = None;
+                        clause_name.clear();
+                        before_modifier_colon = false;
+                    }
+                }
+                _ => {}
+            }
+            result.push(bytes[index]);
+            index += 1;
         }
     }
     result
 }
 
+/// Words that name a directive or one of its clauses, recognized only at the
+/// top level of a directive line. Kind words that exist solely as a clause
+/// argument — `static`, `guided` — are deliberately absent: they live in
+/// [`CLAUSE_KINDS`] under the clause that admits them.
+const DIRECTIVE_WORDS: &[&[u8]] = &[
+    b"omp",
+    b"do",
+    b"atomic",
+    b"barrier",
+    b"cancel",
+    b"cancellation",
+    b"critical",
+    b"declare",
+    b"distribute",
+    b"end",
+    b"flush",
+    b"loop",
+    b"master",
+    b"masked",
+    b"ordered",
+    b"parallel",
+    b"sections",
+    b"section",
+    b"simd",
+    b"single",
+    b"target",
+    b"task",
+    b"taskgroup",
+    b"taskloop",
+    b"taskwait",
+    b"taskyield",
+    b"teams",
+    b"threadprivate",
+    b"workshare",
+    b"allocate",
+    b"collapse",
+    b"copyin",
+    b"copyprivate",
+    b"default",
+    b"firstprivate",
+    b"if",
+    b"lastprivate",
+    b"linear",
+    b"map",
+    b"nowait",
+    b"num_threads",
+    b"private",
+    b"reduction",
+    b"schedule",
+    b"shared",
+    b"simdlen",
+    b"proc_bind",
+    b"defaultmap",
+    b"depend",
+    b"device",
+    b"dist_schedule",
+    b"final",
+    b"grainsize",
+    b"hint",
+    b"in_reduction",
+    b"is_device_ptr",
+    b"mergeable",
+    b"nogroup",
+    b"num_tasks",
+    b"order",
+    b"priority",
+    b"safelen",
+    b"thread_limit",
+    b"to",
+    b"from",
+    b"use_device_addr",
+    b"use_device_ptr",
+];
+
+/// Clauses whose arguments are a fixed vocabulary rather than a list of the
+/// user's names, with the spellings each one admits.
+///
+/// Membership is the promise that no *kind* argument of that clause is ever a
+/// program identifier, so casing a word there cannot rename anything. It does
+/// not extend past the clause's first top-level comma: `schedule` and
+/// `dist_schedule` take a chunk-size expression after theirs, and an expression
+/// is the user's, so `schedule(dynamic, static)` keeps its `static`. Clauses
+/// that take a list — `private`, `shared`, `map`, `depend`, `reduction`,
+/// `linear` — are absent however reserved-looking their modifiers are, because
+/// a list is exactly where the user's own names appear.
+const CLAUSE_KINDS: &[(&[u8], &[&[u8]])] = &[
+    (
+        b"default",
+        &[b"none", b"shared", b"private", b"firstprivate"],
+    ),
+    (b"proc_bind", &[b"master", b"primary", b"close", b"spread"]),
+    (
+        b"schedule",
+        &[
+            b"static",
+            b"dynamic",
+            b"guided",
+            b"auto",
+            b"runtime",
+            b"monotonic",
+            b"nonmonotonic",
+            b"simd",
+        ],
+    ),
+    (b"dist_schedule", &[b"static"]),
+    (
+        b"order",
+        &[b"concurrent", b"reproducible", b"unconstrained"],
+    ),
+];
+
 fn normalize_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
-    let upper = uppercase_openmp_body(body, cx);
-    let spaced = crate::transform::passes::line_rules::normalize_delimiter_spacing(&upper, cx);
+    // Casing is [`case_openmp_directives`]'s, and it has already run.
+    let spaced = crate::transform::passes::line_rules::normalize_delimiter_spacing(body, cx);
     normalize_openmp_clause_separators(&spaced)
 }
 
@@ -492,10 +687,13 @@ fn normalize_openmp_clause_separators(body: &[u8]) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_continuations, normalize_openmp_continuation_sentinels, run};
+    use super::{
+        case_openmp_directives, normalize_continuations, normalize_openmp_continuation_sentinels,
+        run,
+    };
     use crate::{
         analysis::{FileFacts, ProjectContext, ScopeTree},
-        config::{FormatConfig, FormatMode},
+        config::{FormatConfig, FormatMode, KeywordCase},
         transform::document::Document,
         transform::pipeline::{Changed, PassContext},
     };
@@ -505,10 +703,26 @@ mod tests {
         local: &'a FileFacts,
         project: &'a ProjectContext,
     ) -> PassContext<'a> {
+        cx_cased(document, local, project, KeywordCase::Lower, true)
+    }
+
+    fn cx_cased<'a>(
+        document: &Document,
+        local: &'a FileFacts,
+        project: &'a ProjectContext,
+        keyword_case: KeywordCase,
+        openmp_case: bool,
+    ) -> PassContext<'a> {
         let analysis = Box::leak(Box::new(document.analyze().unwrap()));
         let scopes = Box::leak(Box::new(ScopeTree::build(analysis)));
+        let style = crate::config::StyleConfig {
+            keyword_case,
+            openmp_case,
+            ..crate::config::StyleConfig::default()
+        };
         let config = Box::leak(Box::new(FormatConfig {
             mode: FormatMode::Full,
+            style,
             ..FormatConfig::default()
         }));
         PassContext {
@@ -543,8 +757,147 @@ mod tests {
         local: &FileFacts,
         project: &ProjectContext,
     ) -> Result<Changed, crate::error::FormatError> {
-        let context = cx(document, local, project);
-        normalize_openmp_continuation_sentinels(document, &context)
+        normalize_openmp_cased(document, local, project, KeywordCase::Lower, true)
+    }
+
+    fn normalize_openmp_cased(
+        document: &mut Document,
+        local: &FileFacts,
+        project: &ProjectContext,
+        keyword_case: KeywordCase,
+        openmp_case: bool,
+    ) -> Result<Changed, crate::error::FormatError> {
+        let context = cx_cased(document, local, project, keyword_case, openmp_case);
+        // The pipeline's order: spelling first, then sentinel shape. These
+        // tests assert what the two produce together, which is what a caller
+        // in full mode sees.
+        let cased = case_openmp_directives(document, &context)?;
+        Ok(cased.or(normalize_openmp_continuation_sentinels(document, &context)?))
+    }
+
+    /// The two halves are separate passes because separate modes reach them, so
+    /// neither may quietly do the other's job.
+    #[test]
+    fn the_sentinel_shape_pass_does_not_case_and_the_case_pass_does_not_respace() {
+        let source = b"!$omp Parallel Do   private(i) &\n!$omp & map(to:X)\n";
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+
+        let mut shape = Document::from_bytes(source);
+        let context = cx_cased(&shape, &local, &project, KeywordCase::Lower, true);
+        normalize_openmp_continuation_sentinels(&mut shape, &context).unwrap();
+        assert_eq!(
+            String::from_utf8(shape.to_bytes()).unwrap(),
+            "!$omp Parallel Do   private(i) &\n!$omp map(to:X)\n",
+        );
+
+        let mut cased = Document::from_bytes(source);
+        let context = cx_cased(&cased, &local, &project, KeywordCase::Lower, true);
+        case_openmp_directives(&mut cased, &context).unwrap();
+        assert_eq!(
+            String::from_utf8(cased.to_bytes()).unwrap(),
+            "!$OMP PARALLEL DO   PRIVATE(i) &\n!$OMP & MAP(to:X)\n",
+        );
+    }
+
+    /// A clause's arguments are the user's program, and the OpenMP vocabulary
+    /// is full of ordinary words, so a flat keyword table re-spells declared
+    /// names: `private(shared)` came out `PRIVATE(SHARED)`. Fortran is
+    /// case-insensitive so it still ran, but the formatter had rewritten a name
+    /// it does not own, against its own documented contract.
+    #[test]
+    fn a_clause_argument_spelled_like_a_keyword_keeps_the_authored_case() {
+        let mut document = Document::from_bytes(
+            b"!$omp parallel private(shared) firstprivate(static) if(final)\n",
+        );
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+        let context = cx_cased(&document, &local, &project, KeywordCase::Lower, true);
+        case_openmp_directives(&mut document, &context).unwrap();
+        assert_eq!(
+            String::from_utf8(document.to_bytes()).unwrap(),
+            "!$OMP PARALLEL PRIVATE(shared) FIRSTPRIVATE(static) IF(final)\n",
+        );
+    }
+
+    /// The exception, and why it is safe: these clauses take a fixed kind
+    /// vocabulary, so no argument of theirs is ever a declared name. The
+    /// chunk-size expression beside a kind still is one.
+    #[test]
+    fn a_kind_clause_cases_its_reserved_argument_but_not_the_expression() {
+        let mut document = Document::from_bytes(
+            b"!$omp do schedule(dynamic, chunk) default(none) proc_bind(close) order(concurrent)\n",
+        );
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+        let context = cx_cased(&document, &local, &project, KeywordCase::Lower, true);
+        case_openmp_directives(&mut document, &context).unwrap();
+        assert_eq!(
+            String::from_utf8(document.to_bytes()).unwrap(),
+            "!$OMP DO SCHEDULE(DYNAMIC, chunk) DEFAULT(NONE) PROC_BIND(CLOSE) ORDER(CONCURRENT)\n",
+        );
+    }
+
+    /// A kind clause's vocabulary stops at its first top-level comma. What
+    /// follows is a chunk-size expression, so a variable named after a
+    /// schedule kind is still the user's name — the same defect as the flat
+    /// table, one clause further in.
+    #[test]
+    fn a_chunk_size_spelled_like_a_schedule_kind_keeps_the_authored_case() {
+        let mut document = Document::from_bytes(
+            b"!$omp do schedule(dynamic, static) dist_schedule(static, guided)
+",
+        );
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+        let context = cx_cased(&document, &local, &project, KeywordCase::Lower, true);
+        case_openmp_directives(&mut document, &context).unwrap();
+        assert_eq!(
+            String::from_utf8(document.to_bytes()).unwrap(),
+            "!$OMP DO SCHEDULE(DYNAMIC, static) DIST_SCHEDULE(STATIC, guided)\n",
+        );
+    }
+
+    /// The modifier syntax puts a colon, not a comma, between the modifiers and
+    /// the kind, so everything up to the colon is still reserved — including
+    /// the comma between two modifiers, which is the same character doing a
+    /// different job from the one before a chunk size.
+    #[test]
+    fn schedule_modifiers_before_the_kind_are_still_cased() {
+        for (source, expected) in [
+            (
+                &b"!$omp do schedule(monotonic: static, dynamic)\n"[..],
+                "!$OMP DO SCHEDULE(MONOTONIC: STATIC, dynamic)\n",
+            ),
+            (
+                &b"!$omp do schedule(monotonic, simd: static, dynamic)\n"[..],
+                "!$OMP DO SCHEDULE(MONOTONIC, SIMD: STATIC, dynamic)\n",
+            ),
+        ] {
+            let mut document = Document::from_bytes(source);
+            let local = FileFacts::default();
+            let project = ProjectContext::empty();
+            let context = cx_cased(&document, &local, &project, KeywordCase::Lower, true);
+            case_openmp_directives(&mut document, &context).unwrap();
+            assert_eq!(String::from_utf8(document.to_bytes()).unwrap(), expected);
+        }
+    }
+
+    /// Nesting is where a kind clause stops applying: depth two is an
+    /// expression, and `default` there is the intrinsic's argument, not a
+    /// clause kind.
+    #[test]
+    fn a_nested_expression_inside_a_kind_clause_is_left_alone() {
+        let mut document =
+            Document::from_bytes(b"!$omp do schedule(static, size(shared)) if(f(none))\n");
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+        let context = cx_cased(&document, &local, &project, KeywordCase::Lower, true);
+        case_openmp_directives(&mut document, &context).unwrap();
+        assert_eq!(
+            String::from_utf8(document.to_bytes()).unwrap(),
+            "!$OMP DO SCHEDULE(STATIC, size(shared)) IF(f(none))\n",
+        );
     }
 
     #[test]
@@ -743,6 +1096,8 @@ mod tests {
             };
             assert!(document.lines[0].starts_with(canonical));
             assert!(document.lines[1].starts_with(canonical));
+            // `private` is a `-D` macro name here, and macro names outrank
+            // every case rule (I4) including the OpenMP one.
             assert!(!document.lines[0]
                 .windows(b"PRIVATE".len())
                 .any(|w| w == b"PRIVATE"));
@@ -752,6 +1107,71 @@ mod tests {
                 Changed::No
             );
             assert_eq!(document.lines, before);
+        }
+    }
+
+    /// `openmp_case` is the near-universal "uppercase directives over lowercase
+    /// Fortran" convention, so it holds the sentinel and the directive words at
+    /// upper case whatever `--keyword-case` says.
+    #[test]
+    fn openmp_directives_are_uppercase_whatever_the_keyword_case_is() {
+        for case in [
+            KeywordCase::Lower,
+            KeywordCase::Upper,
+            KeywordCase::Preserve,
+        ] {
+            let source = b"!$omp Parallel Do private(i)\n!$OMP END parallel do\n";
+            let mut document = Document::from_bytes(source);
+            let local = FileFacts::default();
+            let project = ProjectContext::empty();
+            normalize_openmp_cased(&mut document, &local, &project, case, true).unwrap();
+            assert_eq!(
+                String::from_utf8(document.to_bytes()).unwrap(),
+                "!$OMP PARALLEL DO PRIVATE(i)\n!$OMP END PARALLEL DO\n",
+                "{case:?}"
+            );
+
+            // The spelling this pass settles on has to be a fixed point of it.
+            let before = document.lines.clone();
+            normalize_openmp_cased(&mut document, &local, &project, case, true).unwrap();
+            assert_eq!(document.lines, before, "{case:?}");
+        }
+    }
+
+    /// Turning `openmp_case` off hands directive words back to `--keyword-case`
+    /// like any other keyword. `preserve` in particular then has to leave the
+    /// authored spelling of both the sentinel and the directive words alone.
+    #[test]
+    fn openmp_directive_words_follow_the_keyword_case_setting() {
+        for (case, expected) in [
+            (
+                KeywordCase::Lower,
+                "!$omp parallel do private(i)\n!$omp end parallel do\n",
+            ),
+            (
+                KeywordCase::Upper,
+                "!$OMP PARALLEL DO PRIVATE(i)\n!$OMP END PARALLEL DO\n",
+            ),
+            (
+                KeywordCase::Preserve,
+                "!$omp Parallel Do private(i)\n!$OMP END parallel do\n",
+            ),
+        ] {
+            let source = b"!$omp Parallel Do private(i)\n!$OMP END parallel do\n";
+            let mut document = Document::from_bytes(source);
+            let local = FileFacts::default();
+            let project = ProjectContext::empty();
+            normalize_openmp_cased(&mut document, &local, &project, case, false).unwrap();
+            assert_eq!(
+                String::from_utf8(document.to_bytes()).unwrap(),
+                expected,
+                "{case:?}"
+            );
+
+            // The spelling this pass settles on has to be a fixed point of it.
+            let before = document.lines.clone();
+            normalize_openmp_cased(&mut document, &local, &project, case, false).unwrap();
+            assert_eq!(document.lines, before, "{case:?}");
         }
     }
 }

@@ -3,19 +3,22 @@
 //! Every transform that needs to know "is this byte code, or is it inside a
 //! string literal / comment / Hollerith payload?" asks this module.  Before it
 //! existed the same quote state machine was reimplemented in `comment_start`,
-//! `split_statements`, `is_assignment`, `paren_alignment` and `reduce_line_into`;
-//! each copy was a place where doubled quotes or a Hollerith count could be
-//! handled slightly differently.  The classifier's copies were the last to go,
-//! and they had both failure modes: `is_assignment` left `'a''b'` half-open, and
+//! `split_statements`, `is_assignment`, `paren_alignment` and the
+//! redundant-whitespace reducer; each copy was a place where doubled quotes or a
+//! Hollerith count could be handled slightly differently.  The classifier's
+//! copies had both failure modes: `is_assignment` left `'a''b'` half-open, and
 //! `single_line_after_paren` forgot to advance its cursor inside a literal, so
-//! any `WHERE` or `FORALL` holding one looped forever.  A recognizer that needs
-//! a raw byte scan now takes it from [`for_each_code_byte`].
+//! any `WHERE` or `FORALL` holding one looped forever.  The reducer's was the
+//! last to go, and it knew about delimiters but not about Hollerith, so it
+//! collapsed a payload's blanks — which are positional data — like any other
+//! run.  A recognizer that needs a raw byte scan now takes it from
+//! [`for_each_code_byte`].
 //!
 //! The scanner is byte oriented: it never assumes UTF-8, and it carries its
 //! state across physical lines so a character literal continued with `&` is a
 //! single protected region rather than two unterminated ones.
 
-use super::syntax::{conditional_compilation_prefix, ConditionalPrefixKind};
+use super::syntax::{conditional_compilation_prefix, ConditionalPrefixKind, SourceStream};
 use std::ops::Range;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,7 +313,13 @@ pub fn is_code_offset(s: &[u8], offset: usize) -> bool {
 /// it the literal is merely unterminated, and leaking its state forward would
 /// swallow every later line's comment.
 pub fn line_comment_start(state: &mut LexState, line: &[u8]) -> Option<usize> {
-    scan_group_line(state, line, |_| {}).comment_start
+    line_scan(state, line).comment_start
+}
+
+/// [`line_comment_start`]'s full result, for a caller that also needs to know
+/// whether the line ended in a continuation marker.
+pub(crate) fn line_scan(state: &mut LexState, line: &[u8]) -> LineScan {
+    scan_group_line(state, line, |_| {})
 }
 
 /// [`line_comment_start`]'s sibling for a pass that needs the code bytes rather
@@ -322,6 +331,110 @@ pub fn line_code_spans<F: FnMut(usize, &[u8])>(state: &mut LexState, line: &[u8]
             f(region.range.start, &line[region.range]);
         }
     });
+}
+
+/// The offset before which a line's trailing horizontal whitespace is payload
+/// rather than presentation.
+///
+/// Trailing blanks are normally invisible and always safe to drop, but a blank
+/// inside a character literal or a Hollerith payload is a byte of the constant:
+/// `x = 3Hab ` promises three characters, and trimming the third leaves a `3H`
+/// that no longer has three, which is a different program and not a valid one.
+/// Blanks in code, or in a comment, carry nothing at end of line.
+///
+/// Returns the end offset of the last protected region on the line, or 0 when
+/// nothing on it is protected. `state` is carried so a literal or payload
+/// continued from an earlier physical line is still protected here.
+pub fn protected_trailing_floor(state: &mut LexState, line: &[u8]) -> usize {
+    let mut floor = 0;
+    scan_group_line(state, line, |region| {
+        if matches!(
+            region.kind,
+            RegionKind::StringLiteral | RegionKind::Hollerith
+        ) {
+            floor = floor.max(region.range.end);
+        }
+    });
+    floor
+}
+
+/// Advance `state` over one physical line of a continuation group, reporting
+/// nothing.
+///
+/// For a caller that writes the line's bytes through unchanged and so has no
+/// other reason to scan it, but still owes the next physical line of the group
+/// the lexical state this one leaves behind.
+pub fn advance_group_line(state: &mut LexState, line: &[u8]) {
+    scan_group_line(state, line, |_| {});
+}
+
+/// One `T` per source stream, for a caller that walks whole physical lines
+/// rather than one statement.
+///
+/// Conditional-compilation code and ordinary code carry independent
+/// protected-region state, because a literal continued in one stream steps over
+/// the other stream's physical lines without being closed by them.  Every
+/// line-walking pass needs that pair, and each one used to declare its own:
+/// `SourceBuffer`, the inline-comment detacher, declaration alignment and
+/// trailing-whitespace trimming had four separately-written copies of the same
+/// two fields.  `T` differs — some carry a bare [`LexState`], some pair it with
+/// the pass's own carry — so it is the *pairing* that is shared here, not the
+/// state.
+#[derive(Debug, Default)]
+pub(crate) struct StreamStates<T> {
+    pub(crate) ordinary: T,
+    pub(crate) conditional: T,
+}
+
+impl<T> StreamStates<T> {
+    pub(crate) fn select_mut(&mut self, stream: SourceStream) -> &mut T {
+        match stream {
+            SourceStream::Ordinary => &mut self.ordinary,
+            SourceStream::Conditional => &mut self.conditional,
+        }
+    }
+}
+
+/// The common case: one [`LexState`] per stream.
+pub(crate) type StreamLexStates = StreamStates<LexState>;
+
+impl StreamLexStates {
+    /// [`protected_trailing_floor`] for `line`, advancing whichever stream's
+    /// state the line belongs to.
+    ///
+    /// A compact `!$&` prefix is contextual, and this walker has no statement
+    /// context to resolve it with, so it is left to the ordinary stream exactly
+    /// as [`stepped_over_by_continuation`] leaves it.
+    pub(crate) fn protected_trailing_floor(&mut self, line: &[u8]) -> usize {
+        let body_start = match conditional_compilation_prefix(line) {
+            Some(prefix) if prefix.kind == ConditionalPrefixKind::BlankSeparated => {
+                prefix.body_start
+            }
+            _ => return protected_trailing_floor(&mut self.ordinary, line),
+        };
+        match protected_trailing_floor(&mut self.conditional, &line[body_start..]) {
+            0 => 0,
+            floor => body_start + floor,
+        }
+    }
+}
+
+/// Does a protected region open on an earlier physical line survive onto this
+/// one, given that the caller has already decided the two lines belong to the
+/// same continuation group?
+///
+/// A free-form character literal can only resume on a physical line whose first
+/// nonblank body byte is `&`.  When malformed or inactive source puts some
+/// other code-looking line in between, the safe reading is that the line is
+/// transparent: it is stepped over without consuming or closing the open
+/// literal, exactly as `SourceBuffer` treats it.
+///
+/// This is the strict sibling of [`stepped_over_by_continuation`], which
+/// answers the *shape* question — blank, comment or directive — for a caller
+/// that has no group structure to lean on.  Both are needed: this one is for a
+/// caller walking a known group, that one for a caller walking raw lines.
+pub(crate) fn resumes_protected_region(state: &LexState, body: &[u8]) -> bool {
+    !state.in_literal() || body.trim_ascii_start().starts_with(b"&")
 }
 
 /// Scan one line of a continuation group, then decide whether lexical state

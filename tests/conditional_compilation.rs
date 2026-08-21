@@ -71,6 +71,44 @@ end program p
     assert_eq!(format_source(&output, &config).unwrap().bytes, output);
 }
 
+/// `-i-` takes its own early exit before the conditional handling, so it is the
+/// one writer that sees a compact `!$&` line with its sentinel still attached.
+/// Scanning from byte zero there reads the `!` as a comment and hides the whole
+/// line from the group's lexical state, which then still believes the literal
+/// closed on the compact line is open: the presentation blank after the *next*
+/// line's closing quote looked like payload and survived.
+#[test]
+fn a_compact_continuation_carries_its_lexical_state_with_indentation_disabled() {
+    let source = b"program p
+!$ y = 'ab&
+!$&cd' // &
+!$ 'ef   ' 
+!$ z = 1
+end program p
+";
+    for apply_indent in [true, false] {
+        let config = FormatConfig {
+            mode: FormatMode::IndentOnly,
+            apply_indent,
+            ..FormatConfig::default()
+        };
+        let output = format_source(source, &config).unwrap().bytes;
+        let text = String::from_utf8(output.clone()).unwrap();
+        for line in text.lines() {
+            assert_eq!(
+                line.trim_end(),
+                line,
+                "apply_indent={apply_indent} kept trailing space: {line:?}"
+            );
+        }
+        assert!(
+            text.contains("'ef   '"),
+            "apply_indent={apply_indent} lost literal payload:\n{text}"
+        );
+        assert_eq!(format_source(&output, &config).unwrap().bytes, output);
+    }
+}
+
 #[test]
 fn hollerith_payload_ampersand_does_not_promote_following_compact_prefix() {
     let source = b"program p

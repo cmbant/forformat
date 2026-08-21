@@ -1,7 +1,9 @@
 #!/bin/sh
 set -eu
 
-binary=${1:-target/release/forformat}
+. "$(dirname "$0")/target_dir.sh"
+
+binary=${1:-$(cargo_target_dir)/release/forformat}
 test -x "$binary"
 
 size=$(wc -c < "$binary")

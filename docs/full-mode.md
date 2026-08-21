@@ -6,17 +6,10 @@ findent layout engine. The compatibility boundary is in
 
 ## Validation loop
 
-Run the focused Rust suite while changing a normalization or wrapping rule:
+Run the local verification bar while changing a normalization or wrapping rule:
 
 ```sh
-cargo test --locked --all-targets
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
-cargo build --locked
-./tools/check_fixture_syntax.sh target/debug/forformat
-./tools/check_fuzz_regression.sh
-./tools/check_cli_contract.sh target/debug/forformat
+./tools/check_local.sh
 ```
 
 The property suite exercises I1, `full(full(x)) == full(x)`, and I2,
@@ -93,8 +86,11 @@ boundary.
 `keyword-case` applies to recognized language keywords, intrinsic names, specifiers, intrinsic
 dotted words, and real-literal `e`/`d` markers. It does not change declared or unresolved
 identifiers, macros, components after `%`, user-defined dotted operators, literals, preprocessor
-bytes, or ordinary comment text. `split-compound-keywords=1` performs the existing compound-keyword
-split, while `join-goto=1` contracts `go to` to `goto`. Interior whitespace in recognized multiword
+bytes, or ordinary comment text. Reserved OpenMP directives are the one exception: they have their
+own switch, `openmp-case`, which holds them at upper case by default however `keyword-case` is set
+— see [the options reference](options.md#fullnormalization-style).
+`split-compound-keywords=1` performs the existing compound-keyword split, while `join-goto=1`
+contracts `go to` to `goto`. Interior whitespace in recognized multiword
 keyword pairs is always collapsed. With `keyword-case=preserve`, authored letters are retained
 while splitting or joining, so `EnDiF` becomes `EnD iF` and `Go   To 10` becomes `GoTo 10`. Setting
 either boolean to `0` disables only that switch's named behavior; it does not turn the formatter

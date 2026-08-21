@@ -38,7 +38,7 @@ To build from source, install Rust 1.85 or newer:
 
 ```sh
 cargo build --locked --release
-./target/release/forformat --version
+"${CARGO_TARGET_DIR:-target}/release/forformat" --version
 ```
 
 ## Quick start
@@ -85,11 +85,12 @@ buffer is formatted. Pass a directory instead when the buffer has no correspondi
 
 ### Formatting modes
 
-`--full` is the default. The three modes are:
+`--full` is the default. The four modes are:
 
 - `--full` — normalization, wrapping, and findent-compatible layout.
 - `--indent-only` — findent-compatible indentation and trailing-whitespace handling only.
 - `--normalize-only` — normalization without structural layout or wrapping.
+- `--canonicalize-only` — canonical transformations without whitespace or layout normalization.
 
 For example:
 
@@ -161,12 +162,7 @@ unless `options` explicitly supplies `--config`.
 The Rust implementation is under `src/`; tests and golden fixtures are under `tests/`. Run:
 
 ```sh
-cargo test --locked --all-targets
-cargo fmt --check
-cargo clippy --locked --all-targets -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
-./tools/check_cli_contract.sh target/debug/forformat
-./tools/check_docs.sh target/debug/forformat
+./tools/check_local.sh
 ```
 
 For changes to full-mode normalization, wrapping, or layout, also run

@@ -3,13 +3,13 @@
 
 use super::{
     continuation::ParenAlignmentState,
-    emitter::{emit_line_to_with_quote, EmitStyle, LinePlacement},
+    emitter::{emit_line_to_with_lex, EmitStyle, LinePlacement},
     planner::{GroupPlan, PlanBody, Planner},
 };
 use crate::{
-    config::{FormatConfig, FormatMode},
+    config::FormatConfig,
     error::FormatError,
-    source::{LogicalGroup, PhysicalLineKind, SourceBuffer},
+    source::{LexState, LogicalGroup, PhysicalLineKind, SourceBuffer},
     FormatMeta, FormatResult,
 };
 use std::io::Write;
@@ -111,11 +111,11 @@ pub fn emit_group<B: AsRef<[u8]>, W: Write>(
         apply_indent: plan.apply_indent,
         remred: plan.remred,
     };
-    let mut quote = 0u8;
+    let mut lex = LexState::default();
     match &plan.body {
         PlanBody::Uniform { indent } => {
             for i in plan.lines.clone() {
-                emit_line_to_with_quote(
+                emit_line_to_with_lex(
                     buf,
                     i,
                     LinePlacement {
@@ -126,7 +126,7 @@ pub fn emit_group<B: AsRef<[u8]>, W: Write>(
                     },
                     &style,
                     None,
-                    &mut quote,
+                    &mut lex,
                     out,
                 )?;
             }
@@ -150,12 +150,12 @@ pub fn emit_group<B: AsRef<[u8]>, W: Write>(
                 // The alignment scan below has to see the same bytes the
                 // emitter is about to write, including whatever `--ws-remred`
                 // does to this line's internal whitespace. Snapshot the
-                // string-quote state the write path is about to consume so
+                // lexical state the write path is about to consume so
                 // the scan's own reduction pass agrees with it, without
                 // letting that scan advance the real one.
-                let remred_quote = quote;
+                let remred_lex = lex;
                 if is_pre {
-                    emit_line_to_with_quote(
+                    emit_line_to_with_lex(
                         buf,
                         i,
                         LinePlacement {
@@ -166,11 +166,11 @@ pub fn emit_group<B: AsRef<[u8]>, W: Write>(
                         },
                         &style,
                         None,
-                        &mut quote,
+                        &mut lex,
                         out,
                     )?;
                 } else {
-                    emit_line_to_with_quote(
+                    emit_line_to_with_lex(
                         buf,
                         i,
                         LinePlacement {
@@ -181,7 +181,7 @@ pub fn emit_group<B: AsRef<[u8]>, W: Write>(
                         },
                         &style,
                         if first { replacement.as_deref() } else { None },
-                        &mut quote,
+                        &mut lex,
                         out,
                     )?;
                 }
@@ -203,7 +203,7 @@ pub fn emit_group<B: AsRef<[u8]>, W: Write>(
                             this_align,
                             *group_first_cont,
                             &style,
-                            remred_quote,
+                            remred_lex,
                         );
                     }
                 }
@@ -229,7 +229,7 @@ fn advance_alignment<B: AsRef<[u8]>>(
     this_align: Option<usize>,
     group_first_cont: bool,
     style: &EmitStyle,
-    remred_quote: u8,
+    remred_lex: LexState,
 ) {
     let config = style.config;
     let line = &buf.lines[index];
@@ -284,11 +284,11 @@ fn advance_alignment<B: AsRef<[u8]>>(
     // agree on where every byte ends up.
     let mut reduced = Vec::new();
     let scan_line: &[u8] = if style.remred {
-        let alignment_runs_after = config.mode == FormatMode::Full;
-        let mut quote = remred_quote;
+        let alignment_runs_after = config.mode.aligns_after_layout();
+        let mut lex = remred_lex;
         crate::transform::whitespace::reduce_line_into_protected(
             scan_line,
-            &mut quote,
+            &mut lex,
             alignment_runs_after && config.align_declarations,
             alignment_runs_after && config.align_comments,
             &mut |byte| reduced.push(byte),

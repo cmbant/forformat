@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-binary=${1:-target/debug/forformat}
+. "$(dirname "$0")/target_dir.sh"
+
+binary=${1:-$(cargo_target_dir)/debug/forformat}
 case "$binary" in
     /*) ;;
     *) binary="$(pwd)/$binary" ;;

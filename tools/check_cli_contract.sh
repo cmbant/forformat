@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-binary=${1:-target/release/forformat}
+. "$(dirname "$0")/target_dir.sh"
+
+binary=${1:-$(cargo_target_dir)/release/forformat}
 test -x "$binary"
 
 contract_tmp=$(mktemp -d)

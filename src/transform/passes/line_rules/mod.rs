@@ -18,6 +18,7 @@
 
 mod common;
 
+pub(crate) use common::apply_case;
 pub use common::{
     case::lowercase_line, comment_spacing::normalize_comment_spacing,
     delimiter_spacing::normalize_delimiter_spacing, is_protected,
@@ -363,7 +364,7 @@ fn apply_rules(
         RuleMode::Rejoined => LineContext::default(),
     };
     let physical = matches!(mode, RuleMode::Physical(_));
-    let normalize_whitespace = cx.config.style.normalize_whitespace;
+    let normalize_whitespace = cx.config.mode.normalizes_whitespace();
 
     // The stage order is an architectural invariant. Do not permute it.
     // 1. Case/operator normalization. The case rule itself distinguishes

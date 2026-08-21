@@ -66,6 +66,7 @@ form is skipped unchanged. Use `-ifree` or `--input-format=free` to force free-f
 - `--full` — normalization, wrapping, and structural layout; this is the default.
 - `--indent-only` — findent-compatible indentation and trailing-whitespace handling.
 - `--normalize-only` — normalization without structural layout or wrapping.
+- `--canonicalize-only` — canonical transformations without whitespace or layout normalization.
 
 For example:
 
