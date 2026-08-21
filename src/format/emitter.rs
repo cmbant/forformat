@@ -3,8 +3,7 @@ use crate::{
     config::FormatConfig,
     error::FormatError,
     source::{
-        syntax::{conditional_compilation_prefix, ConditionalPrefixKind},
-        LexState, Newline, PhysicalLineKind, SourceBuffer,
+        syntax::conditional_compilation_prefix, LexState, Newline, PhysicalLineKind, SourceBuffer,
     },
 };
 use std::io::Write;
@@ -131,7 +130,8 @@ pub fn emit_line_to_with_lex<B: AsRef<[u8]>, W: Write>(
                 .map_err(FormatError::Write)?;
             out.write_all(body).map_err(FormatError::Write)?;
         } else {
-            out.write_all(trim_end_horizontal_protected(original, lex))
+            let body_start = conditional_body_start(original, line.omp && config.openmp);
+            out.write_all(trim_end_horizontal_protected(original, body_start, lex))
                 .map_err(FormatError::Write)?;
         }
         write_newline(buf, index, out)?;
@@ -210,14 +210,13 @@ pub fn emit_line_to_with_lex<B: AsRef<[u8]>, W: Write>(
         if !config.mode.normalizes()
             && prefix.kind == crate::source::syntax::ConditionalPrefixKind::CompactContinuation
         {
-            // The group's state tracks the Fortran body, never the sentinel,
-            // so it is advanced over the body this line writes even though the
-            // bytes go out with their authored prefix attached.
-            crate::source::regions::advance_group_line(
-                lex,
-                trim_end_horizontal(&original[prefix.body_start..]),
-            );
-            out.write_all(trim_end_horizontal(trim_start(original)))
+            // The trailing rule is the protected one here like everywhere
+            // else: the bytes go out with their authored prefix attached, but
+            // the scan behind them runs on the body, which is what the group's
+            // state tracks and the only reading under which a payload blank on
+            // a compact continuation is visible as payload.
+            let trimmed = trim_end_horizontal_protected(original, prefix.body_start, lex);
+            out.write_all(trim_start(trimmed))
                 .map_err(FormatError::Write)?;
             write_newline(buf, index, out)?;
             return Ok(());
@@ -301,7 +300,9 @@ fn write_body<W: Write>(
     // advance it at all, and the next physical line of a continued literal
     // would be lexed as though the literal had never opened.
     let mut scanned = *lex;
-    let body = trim_end_horizontal_protected(body, &mut scanned);
+    // The sentinel, if there was one, was stripped before this call: `source`
+    // is the Fortran body and the canonical `!$ ` is written separately.
+    let body = trim_end_horizontal_protected(body, 0, &mut scanned);
     if style.remred {
         // The post-layout alignment passes that would own a protected gap
         // (`declaration_separator_alignment`, `trailing_comment_alignment`)
@@ -322,6 +323,20 @@ fn write_body<W: Write>(
         *lex = scanned;
         out.write_all(body).map_err(FormatError::Write)
     }
+}
+
+/// Where the Fortran body of `line` begins, for the paths that write the line
+/// with its authored sentinel attached.
+///
+/// `conditional` is the caller's already-made decision that this line is
+/// conditional-compilation *code* rather than a comment: with `--openmp` off an
+/// exact `!$` sentinel is an ordinary comment, and its trailing blanks carry
+/// nothing.
+fn conditional_body_start(line: &[u8], conditional: bool) -> usize {
+    if !conditional {
+        return 0;
+    }
+    conditional_compilation_prefix(line).map_or(0, |prefix| prefix.body_start)
 }
 
 fn trim_end_horizontal(mut s: &[u8]) -> &[u8] {
@@ -346,11 +361,18 @@ fn trim_end_horizontal(mut s: &[u8]) -> &[u8] {
 /// line needs, so it advances `lex` rather than a copy. A caller that has
 /// another writer advancing the same state — [`write_body`] under
 /// `--ws-remred` — must hand this one a snapshot instead.
-fn trim_end_horizontal_protected<'a>(s: &'a [u8], lex: &mut LexState) -> &'a [u8] {
-    let body_start = match conditional_compilation_prefix(s) {
-        Some(prefix) if prefix.kind == ConditionalPrefixKind::BlankSeparated => prefix.body_start,
-        _ => 0,
-    };
+///
+/// `body_start` is where the Fortran begins: zero for an ordinary line, and
+/// past the sentinel for a conditional-compilation one, because the group's
+/// state tracks the body and a `!` scanned as code opens a comment that hides
+/// the whole line. Only the caller can supply it — telling a compact `!$&`
+/// prefix from a near-miss comment needs the statement context this emitter
+/// has and [`crate::source::regions`]'s raw line walkers do not.
+fn trim_end_horizontal_protected<'a>(
+    s: &'a [u8],
+    body_start: usize,
+    lex: &mut LexState,
+) -> &'a [u8] {
     let floor = match crate::source::regions::protected_trailing_floor(lex, &s[body_start..]) {
         0 => 0,
         floor => body_start + floor,

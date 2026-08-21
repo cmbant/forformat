@@ -367,6 +367,32 @@ fn openmp_body(line: &[u8]) -> Option<&[u8]> {
     openmp_directive_prefix(line).map(|prefix| &line[prefix.body_start..])
 }
 
+/// Does the clause opening at `rest` use the modifier syntax — one or more
+/// modifiers separated from the kind by a top-level `:`?
+///
+/// `schedule([modifier[, modifier]:] kind[, chunk_size])` spends a comma on two
+/// jobs, and only the colon tells them apart: in
+/// `schedule(monotonic, simd: static, n)` the first comma separates two
+/// modifiers and the second hands over to an expression. Answering that needs
+/// one look ahead, because the words come out as they are read.
+///
+/// `rest` is the remainder of a single code region, so a `:` inside a string
+/// literal cannot reach here. A clause that runs past the end of the region
+/// simply reports no colon, which casts fewer words rather than more.
+fn has_modifier_colon(rest: &[u8]) -> bool {
+    let mut depth = 0usize;
+    for &byte in rest {
+        match byte {
+            b'(' => depth += 1,
+            b')' if depth == 0 => return false,
+            b')' => depth -= 1,
+            b':' if depth == 0 => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Spell the recognized OpenMP directive words in `body` according to
 /// [`StyleConfig::openmp_keyword_case`].
 ///
@@ -411,6 +437,9 @@ fn case_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
     // resolved to the reserved argument spellings that clause admits.
     let mut clause_kinds: Option<&[&[u8]]> = None;
     let mut clause_name: Vec<u8> = Vec::new();
+    // Is the clause's modifier colon still ahead? While it is, a top-level
+    // comma separates two modifiers rather than the kind from its chunk size.
+    let mut before_modifier_colon = false;
     for region in regions {
         let bytes = &body[region.range.clone()];
         if region.kind != RegionKind::Code {
@@ -462,19 +491,24 @@ fn case_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
                             .iter()
                             .find(|(clause, _)| clause_name.eq_ignore_ascii_case(clause))
                             .map(|(_, kinds)| *kinds);
+                        before_modifier_colon =
+                            clause_kinds.is_some() && has_modifier_colon(&bytes[index + 1..]);
                     }
                     depth += 1;
                 }
-                // Only the kind and modifier portion, before the clause's first
-                // top-level comma, is a fixed vocabulary. What follows is an
-                // expression the user wrote: `schedule(dynamic, static)` names a
-                // chunk-size variable, and re-casing it would rename it.
-                b',' if depth == 1 => clause_kinds = None,
+                b':' if depth == 1 => before_modifier_colon = false,
+                // The kind and its modifiers are a fixed vocabulary; what
+                // follows them is an expression the user wrote, and
+                // `schedule(dynamic, static)` names a chunk-size variable that
+                // re-casing would rename. Which side of that line a comma falls
+                // on is what `before_modifier_colon` answers.
+                b',' if depth == 1 && !before_modifier_colon => clause_kinds = None,
                 b')' => {
                     depth = depth.saturating_sub(1);
                     if depth == 0 {
                         clause_kinds = None;
                         clause_name.clear();
+                        before_modifier_colon = false;
                     }
                 }
                 _ => {}
@@ -824,19 +858,29 @@ mod tests {
         );
     }
 
-    /// The modifier syntax puts a colon, not a comma, between the modifier and
-    /// the kind, so both are still reserved.
+    /// The modifier syntax puts a colon, not a comma, between the modifiers and
+    /// the kind, so everything up to the colon is still reserved — including
+    /// the comma between two modifiers, which is the same character doing a
+    /// different job from the one before a chunk size.
     #[test]
-    fn a_schedule_modifier_before_the_kind_is_still_cased() {
-        let mut document = Document::from_bytes(b"!$omp do schedule(monotonic: static, dynamic)\n");
-        let local = FileFacts::default();
-        let project = ProjectContext::empty();
-        let context = cx_cased(&document, &local, &project, KeywordCase::Lower, true);
-        case_openmp_directives(&mut document, &context).unwrap();
-        assert_eq!(
-            String::from_utf8(document.to_bytes()).unwrap(),
-            "!$OMP DO SCHEDULE(MONOTONIC: STATIC, dynamic)\n",
-        );
+    fn schedule_modifiers_before_the_kind_are_still_cased() {
+        for (source, expected) in [
+            (
+                &b"!$omp do schedule(monotonic: static, dynamic)\n"[..],
+                "!$OMP DO SCHEDULE(MONOTONIC: STATIC, dynamic)\n",
+            ),
+            (
+                &b"!$omp do schedule(monotonic, simd: static, dynamic)\n"[..],
+                "!$OMP DO SCHEDULE(MONOTONIC, SIMD: STATIC, dynamic)\n",
+            ),
+        ] {
+            let mut document = Document::from_bytes(source);
+            let local = FileFacts::default();
+            let project = ProjectContext::empty();
+            let context = cx_cased(&document, &local, &project, KeywordCase::Lower, true);
+            case_openmp_directives(&mut document, &context).unwrap();
+            assert_eq!(String::from_utf8(document.to_bytes()).unwrap(), expected);
+        }
     }
 
     /// Nesting is where a kind clause stops applying: depth two is an
