@@ -1,5 +1,5 @@
 use super::{
-    regions::{LexState, RegionKind},
+    regions::LexState,
     syntax::{conditional_compilation_prefix, ConditionalPrefixKind, SourceStream},
     Newline, PhysicalLine, PhysicalLineKind,
 };
@@ -141,16 +141,11 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
                     let can_scan =
                         !stream.lex.in_literal() || code.trim_ascii_start().starts_with(b"&");
                     if can_scan {
-                        let mut comment_start = None;
-                        stream.lex.scan(code, |region| {
-                            if comment_start.is_none() && region.kind == RegionKind::Comment {
-                                comment_start = Some(region.range.start);
-                            }
-                        });
-                        if let Some(i) = comment_start {
+                        let scan = stream.lex.scan_line(code, |_| {});
+                        if let Some(i) = scan.comment_start {
                             comment = Some((span.start + code_offset + i) as u32..span.end as u32);
                         }
-                        stream.continued = ends_with_continuation_before(code, comment_start);
+                        stream.continued = scan.continued;
                         if !stream.continued {
                             stream.lex = LexState::default();
                         }
@@ -194,14 +189,6 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
             .and_then(|previous| self.lines.get(previous))
             .map_or(Newline::Lf, |previous| previous.newline)
     }
-}
-
-fn ends_with_continuation_before(line: &[u8], comment: Option<usize>) -> bool {
-    let mut end = comment.unwrap_or(line.len());
-    while end > 0 && line[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    end > 0 && line[end - 1] == b'&'
 }
 
 pub fn is_fix(s: &[u8]) -> bool {
@@ -259,6 +246,21 @@ mod tests {
         .unwrap();
         assert_eq!(standalone.lines[0].kind, PhysicalLineKind::Comment);
         assert!(!standalone.lines[0].is_conditional_compilation());
+    }
+
+    #[test]
+    fn hollerith_payload_ampersand_does_not_open_conditional_stream() {
+        let buffer = SourceBuffer::new(
+            b"!$ x = 1H&
+!$& standalone
+",
+        )
+        .unwrap();
+        assert!(buffer.lines[0].is_conditional_compilation());
+        assert_eq!(buffer.code_bytes(&buffer.lines[0]), b"x = 1H&");
+        assert_eq!(buffer.lines[1].kind, PhysicalLineKind::Comment);
+        assert!(!buffer.lines[1].is_conditional_compilation());
+        assert_eq!(buffer.line_bytes(&buffer.lines[1]), b"!$& standalone");
     }
 
     #[test]

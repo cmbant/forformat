@@ -289,6 +289,8 @@ fn declaration_separator_info_in(
         return None;
     }
 
+    let mut continuation_lex = *lex;
+    let line_scan = continuation_lex.scan_line(line, |_| {});
     let tokens = tokenize(line, lex);
     let scan = scan_multiple_subscripts(
         &tokens,
@@ -306,14 +308,7 @@ fn declaration_separator_info_in(
         .map(|(_, token)| token.span.start);
 
     let has_code = tokens.iter().any(|token| token.kind != TokenKind::Comment);
-    let trailing_token_marker = tokens
-        .iter()
-        .rev()
-        .find(|token| token.kind != TokenKind::Comment)
-        .is_some_and(|token| token.kind == TokenKind::Ampersand);
-    let protected_trailing_marker =
-        (lex.in_literal() || lex.in_hollerith()) && line.trim_ascii_end().last() == Some(&b'&');
-    let continued = has_code && (trailing_token_marker || protected_trailing_marker);
+    let continued = has_code && line_scan.continued;
     if has_code {
         if continued {
             multiple_subscript.open_depth = scan.end_depth;

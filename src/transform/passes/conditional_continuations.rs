@@ -99,6 +99,18 @@ mod tests {
     }
 
     #[test]
+    fn hollerith_payload_ampersand_does_not_open_compact_continuation() {
+        let mut document = Document::from_bytes(
+            b"!$ x = 1H&
+!$& standalone
+",
+        );
+        let original = document.lines.clone();
+        assert_eq!(run(&mut document).unwrap(), Changed::No);
+        assert_eq!(document.lines, original);
+    }
+
+    #[test]
     fn malformed_literal_continuation_does_not_consume_protected_state() {
         let mut document =
             Document::from_bytes(b"!$ text = 'ab &\n!$ malformed without leading marker\n!$&cd'\n");

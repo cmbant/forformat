@@ -63,13 +63,9 @@ pub fn normalize_continuations(
         let incoming_protected = state.in_literal() || state.in_hollerith();
         let mut line = original_line.clone();
         let code = fortran_code(original_line);
-        let mut comment = None;
+        let mut line_continued = false;
         if !passed_over {
-            state.scan(code, |region| {
-                if comment.is_none() && region.kind == RegionKind::Comment {
-                    comment = Some(region.range.start);
-                }
-            });
+            line_continued = state.scan_line(code, |_| {}).continued;
         }
         let protected = incoming_protected || state.in_literal() || state.in_hollerith();
         let lexical_prefix = previous_statement_line[index]
@@ -80,14 +76,14 @@ pub fn normalize_continuations(
             if continuation && !protected && !lexical_prefix {
                 line = remove_leading_continuation(&line);
             }
-            if !protected && !lexical_suffix {
+            if line_continued && !protected && !lexical_suffix {
                 line = normalize_continuation_marker(&line);
             }
         }
         normalized.push(line);
         if !passed_over {
-            continuation = ends_with_continuation_before(code, comment);
-            if code.trim_ascii_end().last() != Some(&b'&') {
+            continuation = line_continued;
+            if !continuation {
                 state = LexState::default();
             }
             let still_open = continuation || state.in_literal() || state.in_hollerith();
@@ -110,7 +106,7 @@ pub fn normalize_continuations(
 /// two config fields, never one flag.
 ///
 /// Port target: `normalize_openmp_continuation_sentinels`,
-/// `join_openmp_directive`, `wrap_openmp_directive`.
+/// `prepare_sentinel_reflow`, `wrap_sentinel_line`.
 pub fn normalize_openmp_continuation_sentinels(
     document: &mut Document,
     cx: &PassContext,
@@ -271,15 +267,8 @@ fn leading_lexical_suffix_start(line: &[u8]) -> Option<usize> {
 
 fn ends_with_continuation(line: &[u8]) -> bool {
     let line = fortran_code(line);
-    ends_with_continuation_before(line, crate::source::regions::comment_start(line))
-}
-
-fn ends_with_continuation_before(line: &[u8], comment: Option<usize>) -> bool {
-    let mut end = comment.unwrap_or(line.len());
-    while end > 0 && line[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    end > 0 && line.get(end - 1) == Some(&b'&')
+    let mut state = LexState::default();
+    state.scan_line(line, |_| {}).continued
 }
 
 fn remove_leading_continuation(line: &[u8]) -> Vec<u8> {

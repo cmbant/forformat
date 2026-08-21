@@ -45,6 +45,23 @@ fn standalone_compact_prefix_is_not_promoted_to_conditional_code() {
 }
 
 #[test]
+fn hollerith_payload_ampersand_does_not_promote_following_compact_prefix() {
+    let source = b"program p
+!$ x = 1H&
+!$& standalone
+end program p
+";
+    let config = full();
+    let output = format_source(source, &config).unwrap().bytes;
+    let text = String::from_utf8(output.clone()).unwrap();
+
+    assert!(text.lines().any(|line| line == "!$& standalone"), "{text}");
+    assert!(text.lines().any(|line| line.contains("1H&")), "{text}");
+    assert!(!text.lines().any(|line| line.contains("1H &")), "{text}");
+    assert_eq!(format_source(&output, &config).unwrap().bytes, output);
+}
+
+#[test]
 fn compact_conditional_literal_continuation_keeps_the_required_ampersand() {
     let source = b"program p\ncharacter(len=40) :: s\n!$ s = 'abc &\n!$& def!ghi'\nend program p\n";
 

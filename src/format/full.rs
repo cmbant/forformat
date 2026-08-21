@@ -267,7 +267,7 @@ fn reflow_with_context_inner(
     // `--align-paren` in agreement with the pass that will actually place the
     // text; the engine emits one line per physical line.
     //
-    // The authored document laid out, kept for the OpenMP directive path, which
+    // The authored document laid out, kept for the sentinel reflow path, which
     // asks about the group's *authored* lines and so needs a measurement that
     // does not advance with the rounds.  Statements are asked about the round's
     // own layout instead; see `needs_reflow`.
@@ -302,7 +302,7 @@ fn reflow_with_context_inner(
                     replacement: None,
                     ..
                 }
-            ) && join_openmp_directive(document, &analysis.buffer, group).is_none()
+            ) && prepare_sentinel_reflow(document, &analysis.buffer, group).is_none()
                 && eligible(&analysis.buffer, group)
                 && group.statements.len() == 1
         })
@@ -367,7 +367,7 @@ fn reflow_with_context_inner(
                           span: &std::ops::Range<usize>|
          -> (Vec<Vec<u8>>, Option<(usize, Decline)>) {
             let mut out: Vec<Vec<u8>> = Vec::new();
-            if let Some(directive) = join_openmp_directive(document, &analysis.buffer, group) {
+            if let Some(directive) = prepare_sentinel_reflow(document, &analysis.buffer, group) {
                 // A directive is measured and wrapped at the column the layout
                 // engine is about to move it to.  Measuring the authored indent
                 // instead leaves an over-long directive for the next run to find,
@@ -390,7 +390,7 @@ fn reflow_with_context_inner(
                         .clone()
                         .any(|index| unwrapped_width(index) > config.wrap.line_length);
                 if long {
-                    match wrap_openmp_directive(&directive, config.wrap.line_length) {
+                    match wrap_sentinel_line(&directive, config.wrap.line_length) {
                         Ok(wrapped) => out.extend(wrapped),
                         Err(reason) => {
                             decline = Some((group.lines.start, reason));
@@ -780,7 +780,7 @@ fn canonical_reflow_sentinel(line: &[u8]) -> Option<(usize, ReflowSentinel)> {
         .map(|prefix| (prefix.body_start, ReflowSentinel::Conditional))
 }
 
-fn join_openmp_directive<B: AsRef<[u8]>>(
+fn prepare_sentinel_reflow<B: AsRef<[u8]>>(
     document: &Document,
     buffer: &SourceBuffer<B>,
     group: &LogicalGroup,
@@ -823,7 +823,7 @@ fn is_openmp_line(line: &[u8]) -> bool {
     openmp_directive_prefix(line).is_some()
 }
 
-fn wrap_openmp_directive(line: &[u8], line_length: usize) -> Result<Vec<Vec<u8>>, Decline> {
+fn wrap_sentinel_line(line: &[u8], line_length: usize) -> Result<Vec<Vec<u8>>, Decline> {
     let indent_end = line
         .iter()
         .position(|byte| !byte.is_ascii_whitespace())
