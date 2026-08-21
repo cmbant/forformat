@@ -1,29 +1,35 @@
 //! The normalization pass order.
 //!
 //! The order is part of the format contract, and the dependencies between
-//! passes are real. Case replacement runs *before*
-//! the lexical joins, and every pass that changes the line count forces the
-//! statement and scope view to be rebuilt (§5.2 of the port plan).
+//! passes are real. Case replacement runs *before* the lexical joins, and every
+//! pass that changes the line count forces the statement and scope view to be
+//! rebuilt (§5.2 of the port plan).
 //!
 //! Two rules govern any future change here:
 //!
 //! * a pass that changes a line's **width** must either run before wrapping or
-//!   be accounted for by the wrapper.  Step 17
+//!   be accounted for by the wrapper. Step 17
 //!   ([`passes::layout_post::declaration_separator_alignment`]) is the one
 //!   post-layout pass that changes width, in both directions: it adds the
 //!   single space a `::` is entitled to on either side, and it compresses an
-//!   over-wide authored alignment column.  `format::full` pays for both by
+//!   over-wide authored alignment column. `format::full` pays for both by
 //!   measuring the laid-out, step-17-applied document rather than the authored
-//!   one — see the budget comments there.  Any *new* post-layout pass that
+//!   one — see the budget comments there. Any *new* post-layout pass that
 //!   changes width has to extend that measurement, not assume it does not
 //!   matter;
 //! * a deviation from the Python order must be deliberate and written down,
 //!   not discovered by a failing fixture.
+//!
+//! `--canonicalize-only` is a normalize-only preset, not a parallel formatter.
+//! It keeps token/spelling rewrites while suppressing whitespace-only and
+//! structural presentation changes. `--rewrap` similarly prepares safe authored
+//! continuations for the existing full wrapper rather than choosing breakpoints
+//! in a second implementation.
 
 use super::{document::Document, passes};
 use crate::{
     analysis::{names::CaseResolver, FileFacts, ProjectContext, ScopeTree},
-    config::FormatConfig,
+    config::{FormatConfig, FormatMode},
     error::FormatError,
     transform::document::Analysis,
 };
@@ -57,7 +63,7 @@ pub struct PassContext<'a> {
     /// This file's own declarations, which outrank the project's (I4).
     pub local: &'a FileFacts,
     /// The statement view of the document as it was when this context was
-    /// built.  A pass that returns [`Changed::Structure`] invalidates it.
+    /// built. A pass that returns [`Changed::Structure`] invalidates it.
     pub analysis: &'a Analysis,
     pub scopes: &'a ScopeTree,
 }
@@ -78,20 +84,25 @@ impl<'a> PassContext<'a> {
 /// whenever an earlier pass may have changed the text it describes. Passes
 /// that only need stable configuration/project data, or deliberately ignore
 /// `PassContext`, can share the preceding snapshot without observing it. This
-/// keeps the conservative freshness rule while avoiding parses that no code
-/// in the grouped follow-up passes can consume.
+/// keeps the conservative freshness rule while avoiding parses that no code in
+/// the grouped follow-up passes can consume.
 pub fn normalize(
     document: &mut Document,
     project: &ProjectContext,
     local: &FileFacts,
     config: &FormatConfig,
 ) -> Result<(), FormatError> {
+    let normalize_whitespace = config.style.normalize_whitespace;
+    if !normalize_whitespace {
+        document.preserve_original_line_endings();
+    }
+
     // `!$&...` is only a conditional-compilation sentinel while that stream has
     // an open continuation. Resolve that contextual spelling before the first
     // `SourceBuffer` analysis, then let every later pass use the stable `!$ `
     // spelling. This is a deliberate ordering exception for step 12: the later
     // continuation pass still owns removal of the body-leading `&`.
-    let mut changed = if config.style.continuation_markers {
+    let mut changed = if normalize_whitespace && config.style.continuation_markers {
         passes::conditional_continuations::run(document)?
     } else {
         Changed::No
@@ -108,7 +119,9 @@ pub fn normalize(
 
     // Step 5 needs a fresh statement view after macro casing. Steps 6 and 7 do
     // not inspect their PassContext at all, so they can follow on the same
-    // snapshot even though they mutate the document.
+    // snapshot even though they mutate the document. Canonicalization-only
+    // keeps physical line structure, so it deliberately does not join tokens
+    // across authored continuation boundaries.
     changed = changed.or(with_context(
         document,
         project,
@@ -116,9 +129,11 @@ pub fn normalize(
         config,
         |document, cx| {
             let mut stage = passes::case_pass::declared(document, cx)?;
-            stage = stage.or(passes::structure::join_lexical_token_continuations(
-                document, cx,
-            )?);
+            if normalize_whitespace {
+                stage = stage.or(passes::structure::join_lexical_token_continuations(
+                    document, cx,
+                )?);
+            }
             if config.style.remove_redundant_parens {
                 stage = stage.or(passes::structure::remove_redundant_nested_parentheses(
                     document, cx,
@@ -151,7 +166,7 @@ pub fn normalize(
         config,
         |document, cx| {
             let mut stage = passes::line_rules::run(document, cx)?;
-            if config.style.continuation_markers {
+            if normalize_whitespace && config.style.continuation_markers {
                 stage = stage.or(passes::continuations::run(document, cx)?);
             }
             Ok(stage)
@@ -159,9 +174,11 @@ pub fn normalize(
     )?);
 
     // Steps 14-15 consume scope and statement structure, so they get a fresh
-    // view after every preceding text transformation.
-    if config.style.remove_terminal_return {
-        let _ = changed.or(with_context(
+    // view after every preceding text transformation. Removing a whole RETURN
+    // line is presentation/structure policy and therefore outside the
+    // canonicalization-only contract.
+    if normalize_whitespace && config.style.remove_terminal_return {
+        changed = changed.or(with_context(
             document,
             project,
             local,
@@ -169,6 +186,34 @@ pub fn normalize(
             passes::structure::remove_terminal_procedure_returns,
         )?);
     }
+
+    // Full mode normally obtains END completion from the layout planner. The
+    // normalize-only early return used by canonicalization needs the same
+    // scope-aware replacement without taking ownership of the authored column.
+    if !normalize_whitespace && config.refactor_end {
+        changed = changed.or(passes::canonical_end::run(document, config)?);
+    }
+
+    // Rewrap only prepares authored continuations. The existing full wrapper
+    // remains the sole owner of final break decisions and its fixed-point
+    // width measurement. Re-run line rules after a successful join so spacing
+    // at the old continuation seam is normalized by the same rule chain as any
+    // ordinary one-line statement.
+    if config.mode == FormatMode::Full && config.wrap.enabled && config.rewrap {
+        let rejoined = with_context(document, project, local, config, passes::rewrap::prepare)?;
+        changed = changed.or(rejoined);
+        if rejoined == Changed::Structure {
+            changed = changed.or(with_context(
+                document,
+                project,
+                local,
+                config,
+                passes::line_rules::run,
+            )?);
+        }
+    }
+
+    let _ = changed;
     Ok(())
 }
 

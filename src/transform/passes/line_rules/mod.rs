@@ -12,7 +12,9 @@
 //! [`run`] applies the physical-line chain to the document, while
 //! [`respace_joined`] deliberately enables only rules 1, 2 and 4 for a
 //! statement the wrapper has rejoined. Both paths go through the same internal
-//! sequencer so the order has one definition.
+//! sequencer so the order has one definition. Canonicalization-only follows the
+//! same sequence but lets rules 1-2 make spelling edits without enabling the
+//! whitespace-only portions of the chain.
 
 mod common;
 
@@ -361,9 +363,11 @@ fn apply_rules(
         RuleMode::Rejoined => LineContext::default(),
     };
     let physical = matches!(mode, RuleMode::Physical(_));
+    let normalize_whitespace = cx.config.style.normalize_whitespace;
 
     // The stage order is an architectural invariant. Do not permute it.
-    // 1. Case/operator normalization.
+    // 1. Case/operator normalization. The case rule itself distinguishes
+    // token replacement from operator-spacing edits by style.
     let mut text = common::case::lowercase_line_with_context(
         line,
         cx,
@@ -372,31 +376,34 @@ fn apply_rules(
         state,
         &context,
     );
-    // 2. Keyword/layout spacing.
+    // 2. Keyword spelling and, when enabled, layout spacing.
     text = common::keyword_spacing::normalize_keyword_spacing_with_state(
         &text,
         declared_names,
         line_index,
         incoming,
         context.continued_format,
+        normalize_whitespace,
         &cx.config.style,
     );
     // 3. WRITE output spacing (physical lines only).
-    if physical && cx.config.style.delimiter_spacing {
+    if normalize_whitespace && physical && cx.config.style.delimiter_spacing {
         text =
             common::write_spacing::normalize_write_output_spacing_with_state(&text, cx, incoming);
     }
     // 4. Delimiter spacing.
-    text = common::delimiter_spacing::normalize_delimiter_spacing_with_context(
-        &text,
-        cx,
-        incoming,
-        context.continued_statement,
-        context.open_groups.len(),
-        context.multiple_subscript_depths,
-    );
+    if normalize_whitespace {
+        text = common::delimiter_spacing::normalize_delimiter_spacing_with_context(
+            &text,
+            cx,
+            incoming,
+            context.continued_statement,
+            context.open_groups.len(),
+            context.multiple_subscript_depths,
+        );
+    }
     // 5. Comment spacing (physical lines only).
-    if physical {
+    if normalize_whitespace && physical {
         text = common::comment_spacing::normalize_comment_spacing_with_state(
             &text,
             cx,
@@ -409,12 +416,18 @@ fn apply_rules(
 
     match mode {
         RuleMode::Physical(context) => {
-            if context.continued_statement && context.continued_named_parameter {
+            if normalize_whitespace
+                && context.continued_statement
+                && context.continued_named_parameter
+            {
                 compact_continued_named_argument(&text, context.open_groups)
             } else {
                 text
             }
         }
+        // Rejoined statements only exist inside full-mode wrapping, where the
+        // joined named-argument spelling is part of the wrapper's established
+        // canonical output.
         RuleMode::Rejoined => compact_joined_named_arguments(&text),
     }
 }
