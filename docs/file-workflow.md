@@ -72,9 +72,13 @@ directory prefix and all descendants. A leading `/` anchors at the repository ro
 without it are tried at each path-component boundary. Relative paths are normalized to `/` before
 matching.
 
-Every file target is read before formatting and classified with the findent-compatible fixed/free
-format detector. Fixed-form sources are skipped: their bytes are not written, they do not make
-`--check` fail, and `--stdout` returns the original bytes. Each skipped target receives a
+Every file target is read before formatting and classified by an evidence-based fixed/free detector.
+Strong fixed-form evidence wins; otherwise clear free-form syntax is accepted. When a filename is
+available, modern suffixes such as `.f90` and `.F90` add a strong free-form prior, while bare `.f`
+and `.F` remain content-driven. Anonymous stdin has no filename prior, so it is formatted when the
+bytes contain positive free-form evidence and remains conservatively fixed when the content is
+ambiguous. Fixed-form sources are skipped: their bytes are not written, they do not make `--check`
+fail, and `--stdout` returns the original bytes. Each skipped target receives a
 `forformat: <path>: fixed-form source, skipped` diagnostic on stderr. Use `-ifree` or
 `--input-format=free` when a source uses free form despite a legacy-looking layout; this forces
 free-form handling and bypasses detection. `-iauto` and `--input-format=auto` select the default
