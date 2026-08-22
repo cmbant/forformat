@@ -44,8 +44,9 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git show 2633c6206e1f7c6879ead4b4d27c9550d8ee05c7:.github/workflows/rust-checks.yml > .github/workflows/rust-checks.yml
-          git show 2633c6206e1f7c6879ead4b4d27c9550d8ee05c7:.github/workflows/ci.yml > .github/workflows/ci.yml
+          git fetch --depth=1 origin 2633c6206e1f7c6879ead4b4d27c9550d8ee05c7
+          git show FETCH_HEAD:.github/workflows/rust-checks.yml > .github/workflows/rust-checks.yml
+          git show FETCH_HEAD:.github/workflows/ci.yml > .github/workflows/ci.yml
           rm -f .review-fix.patch.gz.b64 .review-fix2.patch.gz.b64 .review-fix3.patch.gz.b64
           git add -A
           git commit -m 'fix: address scoped resolution review findings'
