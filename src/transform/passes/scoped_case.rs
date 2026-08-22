@@ -23,7 +23,7 @@ use crate::{
         pipeline::{Changed, PassContext},
     },
 };
-use std::{ops::Range};
+use std::ops::Range;
 
 pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
     let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
