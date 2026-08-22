@@ -14,5 +14,5 @@ pub use declarations::{
     scoped_declared_names, DeclaredNameIndex, DeclaredSpelling, FileFacts, TypeMaps,
 };
 pub use names::{CaseMap, CaseResolver, CaseTables, ComponentCaseMap, NameSpace};
-pub use project::{analyze_file, analyze_project, ProjectContext};
+pub use project::{analyze_file, analyze_file_at, analyze_project, ProjectContext};
 pub use scope::{Scope, ScopeKind, ScopeTree};
