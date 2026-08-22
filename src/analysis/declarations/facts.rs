@@ -101,19 +101,6 @@ impl FileFacts {
             })
     }
 
-    pub(crate) fn unit_chain(&self, line: usize) -> Vec<&UnitFacts> {
-        let mut chain = Vec::new();
-        let mut current = self.active_unit(line).map(|unit| unit.scope);
-        while let Some(scope) = current {
-            let Some(unit) = self.units.get(&scope) else {
-                break;
-            };
-            chain.push(unit);
-            current = unit.parent;
-        }
-        chain
-    }
-
     /// Compatibility path for the existing case pass while scope-aware lookup
     /// is wired in. It intentionally folds all units and therefore must not be
     /// used by new relevance-sensitive code.
