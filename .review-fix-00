@@ -1,0 +1,257 @@
+diff --git a/docs/file-workflow.md b/docs/file-workflow.md
+index aef063c..2c25570 100644
+--- a/docs/file-workflow.md
++++ b/docs/file-workflow.md
+@@ -32,10 +32,12 @@ stdin file identity and stale on-disk shadowing.
+ A Fortran `INCLUDE` line in a source that project analysis reads is resolved from disk, relative to
+ the directory of the including file, and its declarations are merged into the scope containing the
+ `INCLUDE`. This resolution is deliberately **not** filtered by `context_paths`, `exclude`, or
+-`extend-exclude`: the fragment is part of the text of a file already selected for analysis, exactly
+-as a compiler would see it, so dropping it would mis-analyse that selected file rather than narrow
++`extend-exclude`: the fragment is part of the text of a file already selected for analysis, as part of the selected source, so dropping it would mis-analyse that selected file rather than narrow
+ the project. A fragment therefore contributes even when it lives outside every `--context-path` or
+-matches an `--exclude` pattern, and an absolute include path is read as written. Only files a
++matches an `--exclude` pattern, and an absolute include path is read as written. This models
++absolute paths and paths relative to the including source only; it does not emulate arbitrary
++compiler `-I`/include-directory search paths. Missing, unreadable, or unanalyzable fragments are
++ignored conservatively rather than guessed from another directory. Only files a
+ fragment is actually included by can see it; it never becomes a project-wide source in its own
+ right. The one exception is a fragment that defines a whole program unit rather than a list of
+ declarations: a module or submodule written inside a fragment is registered project-wide, because
+diff --git a/docs/full-mode.md b/docs/full-mode.md
+index b99c736..5d1fae6 100644
+--- a/docs/full-mode.md
++++ b/docs/full-mode.md
+@@ -187,3 +187,11 @@ bits and updates a symlink target rather than replacing the link.
+ - Any new post-layout width change must be included in emitted-width measurement.
+ - A behavioral claim should be explained in terms of Fortran syntax or formatter invariants, not a
+   private input tree.
++
++### Scope-analysis limitation
++
++Project-aware name normalization models program units, interfaces, derived types, `BLOCK`, and
++`ASSOCIATE` lexical scopes. `SELECT TYPE` and `SELECT RANK` branch associate-name refinement is not
++yet represented as a distinct branch scope. Code that depends on a branch-specific refined dynamic
++type is therefore left conservative when project resolution cannot prove a unique spelling; the
++formatter does not guess from unrelated same-named project types.
+diff --git a/docs/options.md b/docs/options.md
+index 3d3f828..2f05427 100644
+--- a/docs/options.md
++++ b/docs/options.md
+@@ -137,7 +137,9 @@ the repository root.
+ 
+ Neither `--context-path` nor the exclusion options restrict Fortran `INCLUDE` resolution. A fragment
+ named by a source that is already being analyzed is read from disk relative to that source, because
+-it is part of that source's text; it is never selected as a project source in its own right. Use
++it is part of that source's text; absolute paths are also honored. Compiler include-directory (`-I`)
++search paths are not modeled, and missing/unreadable/unanalysable fragments are left unresolved
++rather than guessed. An include fragment is never selected as a project source in its own right. Use
+ `--isolated` to disable project analysis, and with it include resolution, entirely.
+ 
+ See [file-workflow.md](file-workflow.md) for repository discovery, non-Git context discovery,
+diff --git a/src/analysis/declarations.rs b/src/analysis/declarations.rs
+index 461849d..5bb0d4a 100644
+--- a/src/analysis/declarations.rs
++++ b/src/analysis/declarations.rs
+@@ -16,7 +16,9 @@ pub use extract::extract;
+ pub use facts::FileFacts;
+ pub use index::{scoped_declared_names, DeclaredNameIndex, DeclaredSpelling};
+ pub use types::TypeMaps;
+-pub(crate) use units::{Accessibility, HostAccess, HostUnit, UnitFacts, UseAssociation, UseName};
++pub(crate) use units::{
++    Accessibility, HostAccess, HostUnit, ModuleNature, UnitFacts, UseAssociation, UseName,
++};
+ 
+ #[cfg(test)]
+ mod tests;
+diff --git a/src/analysis/declarations/extract.rs b/src/analysis/declarations/extract.rs
+index 909b3ad..ed52789 100644
+--- a/src/analysis/declarations/extract.rs
++++ b/src/analysis/declarations/extract.rs
+@@ -5,7 +5,7 @@ use super::{
+         type_definition_parent, type_spec_name,
+     },
+     types::TypeMaps,
+-    Accessibility, HostAccess, HostUnit, UnitFacts, UseAssociation, UseName,
++    Accessibility, HostAccess, HostUnit, ModuleNature, UnitFacts, UseAssociation, UseName,
+ };
+ use crate::{
+     analysis::{
+@@ -84,7 +84,9 @@ pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
+             // accessibility attribute of `TYPE, PUBLIC :: T` does not: that
+             // statement opens the type it names, so it is always seen with the
+             // type already entered.
+-            if owner.is_none() {
++            if let Some(owner) = owner.as_deref() {
++                type_member_access_statement(&statement.text, owner, unit_scope, &mut facts);
++            } else {
+                 access_statement(&statement.text, unit_scope, &mut facts);
+             }
+             type_definition_access(&statement.text, unit_scope, &mut facts);
+@@ -402,6 +404,14 @@ fn entity_declaration(
+                             }
+                         }
+                     }
++                    if let (Some(owner), Some(access)) = (owner, access) {
++                        if let Some(unit) = facts.units.get_mut(&unit_scope) {
++                            unit.member_access
++                                .entry(owner.to_ascii_lowercase())
++                                .or_default()
++                                .mark(token.text, access);
++                        }
++                    }
+                     if first.is(b"generic") {
+                         facts.generic_type_procedures.insert(token.text);
+                         if let Some(owner) = owner {
+@@ -421,6 +431,12 @@ fn entity_declaration(
+                         facts.cases.symbols.insert(token.text);
+                         if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                             unit.components.insert(owner, token.text);
++                            if let Some(access) = access {
++                                unit.member_access
++                                    .entry(owner.to_ascii_lowercase())
++                                    .or_default()
++                                    .mark(token.text, access);
++                            }
+                             if let Some(declared) = declared {
+                                 unit.type_graph
+                                     .insert_component(owner, token.text, declared);
+@@ -690,6 +706,50 @@ fn access_statement(text: &[u8], unit_scope: usize, facts: &mut FileFacts) {
+     }
+ }
+ 
++fn type_member_access_statement(
++    text: &[u8],
++    owner: &[u8],
++    unit_scope: usize,
++    facts: &mut FileFacts,
++) {
++    let tokens = tokenize(text, &mut LexState::default());
++    let Some(first) = tokens
++        .iter()
++        .position(|token| token.kind != TokenKind::Number)
++    else {
++        return;
++    };
++    let access = if tokens[first].is_name(b"private") {
++        Accessibility::Private
++    } else if tokens[first].is_name(b"public") {
++        Accessibility::Public
++    } else {
++        return;
++    };
++    let Some(unit) = facts.units.get_mut(&unit_scope) else {
++        return;
++    };
++    let member_access = unit
++        .member_access
++        .entry(owner.to_ascii_lowercase())
++        .or_default();
++    let separator = tokens
++        .iter()
++        .position(|token| token.depth == 0 && token.text == b"::");
++    let start = separator.map_or(first + 1, |separator| separator + 1);
++    let names = tokens[start..]
++        .iter()
++        .filter(|token| token.depth == 0 && token.kind == TokenKind::Name)
++        .collect::<Vec<_>>();
++    if names.is_empty() {
++        member_access.set_default(access);
++    } else {
++        for name in names {
++            member_access.mark(name.text, access);
++        }
++    }
++}
++
+ fn type_definition_access(text: &[u8], unit_scope: usize, facts: &mut FileFacts) {
+     let tokens = tokenize(text, &mut LexState::default());
+     let Some(first) = tokens
+@@ -740,6 +800,21 @@ fn use_statement(text: &[u8], symbols: &mut CaseMap) -> Option<UseAssociation> {
+         .skip(first + 1)
+         .find(|(_, token)| token.depth == 0 && token.text == b"::")
+         .map(|(index, _)| index);
++    let nature = separator
++        .and_then(|separator| {
++            tokens[first + 1..separator]
++                .iter()
++                .find(|token| token.depth == 0 && token.kind == TokenKind::Name)
++        })
++        .map_or(ModuleNature::Unspecified, |token| {
++            if token.is_name(b"intrinsic") {
++                ModuleNature::Intrinsic
++            } else if token.is_name(b"non_intrinsic") {
++                ModuleNature::NonIntrinsic
++            } else {
++                ModuleNature::Unspecified
++            }
++        });
+     let module_start = separator.map_or(first + 1, |index| index + 1);
+     let (module_index, module) = tokens
+         .iter()
+@@ -760,6 +835,7 @@ fn use_statement(text: &[u8], symbols: &mut CaseMap) -> Option<UseAssociation> {
+     let list_start = only.map_or(module_index + 1, |index| index + 2);
+     let mut association = UseAssociation {
+         module: module.text.to_ascii_lowercase(),
++        nature,
+         only: only.is_some(),
+         names: Vec::new(),
+     };
+diff --git a/src/analysis/declarations/units.rs b/src/analysis/declarations/units.rs
+index 192da65..8bc571f 100644
+--- a/src/analysis/declarations/units.rs
++++ b/src/analysis/declarations/units.rs
+@@ -59,6 +59,14 @@ impl AccessFacts {
+         self.default_access == Accessibility::Public
+     }
+ 
++    pub(crate) fn is_public(&self, name: &[u8]) -> bool {
++        match self.explicit(name) {
++            Some(Accessibility::Public) => true,
++            Some(Accessibility::Private) => false,
++            None => self.default_is_public(),
++        }
++    }
++
+     pub(crate) fn merge(&mut self, other: &Self) {
+         if other.default_access == Accessibility::Private {
+             self.default_access = Accessibility::Private;
+@@ -172,9 +180,18 @@ pub(crate) struct UseTarget {
+     pub(crate) alias_spelling: Option<Vec<u8>>,
+ }
+ 
++#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
++pub(crate) enum ModuleNature {
++    #[default]
++    Unspecified,
++    Intrinsic,
++    NonIntrinsic,
++}
++
+ #[derive(Debug, Clone, Default, PartialEq, Eq)]
+ pub(crate) struct UseAssociation {
+     pub(crate) module: Vec<u8>,
++    pub(crate) nature: ModuleNature,
+     pub(crate) only: bool,
+     pub(crate) names: Vec<UseName>,
+ }
+@@ -224,6 +241,7 @@ pub(crate) struct UnitFacts {
+     pub(crate) components: ComponentCaseMap,
+     pub(crate) bound_type_procedures: ComponentCaseMap,
+     pub(crate) generic_bound_type_procedures: ComponentCaseMap,
++    pub(crate) member_access: HashMap<Vec<u8>, AccessFacts>,
+     pub(crate) type_graph: TypeMaps,
+     pub(crate) variable_types: HashMap<Vec<u8>, Option<Vec<u8>>>,
+     pub(crate) imports: Vec<UseAssociation>,
+@@ -257,6 +275,7 @@ impl UnitFacts {
+             components: ComponentCaseMap::default(),
+             bound_type_procedures: ComponentCaseMap::default(),
+             generic_bound_type_procedures: ComponentCaseMap::default(),
++            member_access: HashMap::default(),
+             type_graph: TypeMaps::default(),
+             variable_types: HashMap::default(),
+             imports: Vec::new(),
+@@ -292,6 +311,12 @@ impl UnitFacts {
+             .merge(&other.bound_type_procedures);
+         self.generic_bound_type_procedures
+             .merge(&other.generic_bound_type_procedures);
