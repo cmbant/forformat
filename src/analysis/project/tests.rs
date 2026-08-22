@@ -663,3 +663,130 @@ end program
         .unwrap()
         .contains("y%FieldName"));
 }
+
+#[test]
+fn select_type_guards_refine_exact_type_identity() {
+    let a = br#"module A
+type :: T
+integer :: FieldName
+end type
+end module
+"#;
+    let b = br#"module B
+type :: T
+integer :: FIELDNAME
+end type
+end module
+"#;
+    let target = br#"program p
+use A, only: AT => T
+use B, only: BT => T
+class(*), allocatable :: x
+select type (ItemAlias => x)
+type is (AT)
+print *, itemalias%fieldname
+class is (BT)
+print *, itemalias%fieldname
+class default
+print *, itemalias
+end select
+end program
+"#;
+    let project = analyze_project([
+        (Path::new("a.f90"), a.as_slice()),
+        (Path::new("b.f90"), b.as_slice()),
+        (Path::new("p.f90"), target.as_slice()),
+    ])
+    .unwrap();
+    let formatted = format_source_with_context(
+        target,
+        &project,
+        &FormatConfig {
+            mode: FormatMode::NormalizeOnly,
+            ..FormatConfig::default()
+        },
+    )
+    .unwrap();
+    let text = String::from_utf8(formatted.bytes).unwrap();
+    assert!(text.contains("ItemAlias%FieldName"));
+    assert!(text.contains("ItemAlias%FIELDNAME"));
+}
+
+#[test]
+fn select_type_without_explicit_alias_keeps_selector_spelling() {
+    let types = br#"module types
+type :: T
+integer :: MemberName
+end type
+end module
+"#;
+    let target = br#"program p
+use types
+class(*), allocatable :: Object
+select type (object)
+type is (T)
+print *, object%membername
+class default
+print *, object
+end select
+end program
+"#;
+    let project = analyze_project([
+        (Path::new("types.f90"), types.as_slice()),
+        (Path::new("p.f90"), target.as_slice()),
+    ])
+    .unwrap();
+    let formatted = format_source_with_context(
+        target,
+        &project,
+        &FormatConfig {
+            mode: FormatMode::NormalizeOnly,
+            ..FormatConfig::default()
+        },
+    )
+    .unwrap();
+    let text = String::from_utf8(formatted.bytes).unwrap();
+    assert!(text.contains("select type (Object)"));
+    assert!(text.contains("Object%MemberName"));
+}
+
+#[test]
+fn select_rank_alias_keeps_type_identity_and_does_not_leak() {
+    let types = br#"module types
+type :: T
+integer :: RankMember
+end type
+end module
+"#;
+    let target = br#"module user
+use types
+contains
+subroutine s(x)
+type(T) :: x(..)
+integer :: ITEM
+select rank (item => x)
+rank (1)
+print *, item(1)%rankmember
+end select
+print *, item
+end subroutine
+end module
+"#;
+    let project = analyze_project([
+        (Path::new("types.f90"), types.as_slice()),
+        (Path::new("user.f90"), target.as_slice()),
+    ])
+    .unwrap();
+    let formatted = format_source_with_context(
+        target,
+        &project,
+        &FormatConfig {
+            mode: FormatMode::NormalizeOnly,
+            ..FormatConfig::default()
+        },
+    )
+    .unwrap();
+    let text = String::from_utf8(formatted.bytes).unwrap();
+    assert!(text.contains("item(1)%RankMember"));
+    assert!(text.contains("end select\nprint *, ITEM"));
+}

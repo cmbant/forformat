@@ -65,6 +65,20 @@ impl ProjectContext {
         None
     }
 
+    /// Resolve a derived-type name in the active lexical/host/USE scope while
+    /// retaining the exact defining entity. SELECT TYPE guard refinement uses
+    /// this rather than a project-wide unqualified type-name table.
+    pub(crate) fn visible_type(
+        &self,
+        local: &FileFacts,
+        line: usize,
+        name: &[u8],
+    ) -> Option<ResolvedType> {
+        let local = self.expanded(local);
+        let scope = local.active_unit(line)?.scope;
+        self.local_type_identity(local, scope, name).into_option()
+    }
+
     /// Spell a member using only the exact derived-type entity reached from the
     /// visible root. Owner-qualified project summaries are deliberately not a
     /// fallback here because their owner key is only an unqualified type name.

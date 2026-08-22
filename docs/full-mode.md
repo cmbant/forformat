@@ -188,10 +188,13 @@ bits and updates a symlink target rather than replacing the link.
 - A behavioral claim should be explained in terms of Fortran syntax or formatter invariants, not a
   private input tree.
 
-### Scope-analysis limitation
+### SELECT TYPE and SELECT RANK association scopes
 
 Project-aware name normalization models program units, interfaces, derived types, `BLOCK`, and
-`ASSOCIATE` lexical scopes. `SELECT TYPE` and `SELECT RANK` branch associate-name refinement is not
-yet represented as a distinct branch scope. Code that depends on a branch-specific refined dynamic
-type is therefore left conservative when project resolution cannot prove a unique spelling; the
-formatter does not guess from unrelated same-named project types.
+association constructs. `SELECT TYPE` and `SELECT RANK` association names are scoped to the select
+construct. A `TYPE IS` or `CLASS IS` guard refines a `SELECT TYPE` association to the exact visible
+derived-type entity for that branch, so same-named types in unrelated modules cannot contribute each
+other's members. `SELECT RANK` retains the selector's exact derived-type identity across rank guards.
+Default, intrinsic-type, or ambiguous guards stay conservative rather than borrowing an unrelated
+project type. The casing pass carries this branch state directly; `ScopeTree` does not expose each
+select guard as a general-purpose lexical scope to other analysis consumers.
