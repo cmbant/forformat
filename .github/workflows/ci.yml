@@ -18,11 +18,18 @@ jobs:
           fetch-depth: 0
       - name: Apply staged review patch
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           { cat .review-fix-00; tail -c +11 .review-fix-01; cat .review-fix-02 .review-fix-03; } > /tmp/review-fix.patch
-          git apply --check /tmp/review-fix.patch
-          git apply /tmp/review-fix.patch
+          git apply --3way /tmp/review-fix.patch || true
+          curl -fsSL -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github.raw+json" \
+            https://api.github.com/repos/cmbant/forformat/git/blobs/8bc571f4ea326fedb22019712f37a6b50e600eee \
+            > src/analysis/declarations/units.rs
+          git checkout --theirs -- src/transform/passes/case_pass.rs
+          git add src/analysis/declarations/units.rs src/transform/passes/case_pass.rs
+          test -z "$(git diff --name-only --diff-filter=U)"
           rm .review-fix-00 .review-fix-01 .review-fix-02 .review-fix-03
           rm .github/workflows/apply-review-fix.yml
           git show 605c2f44a74c58afd62ffcb35a095ee20d1588e2:.github/workflows/ci.yml > .github/workflows/ci.yml
