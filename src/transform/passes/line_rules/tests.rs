@@ -151,11 +151,11 @@ mod tests {
     fn context_sensitive_keywords_are_only_keywords_in_their_own_shape() {
         assert_eq!(
             normalized(b"real(dl) function f(a) BIND(C, name='exported')\n"),
-            "real(dl) function f(a) BIND(C, name='exported')\n"
+            "real(dl) function f(a) bind(c, name='exported')\n"
         );
         assert_eq!(
             normalized(b"subroutine s() BIND(C)\n"),
-            "subroutine s bind(C)\n"
+            "subroutine s bind(c)\n"
         );
         assert_eq!(normalized(b"USE m, ONLY: x\n"), "use m, only: x\n");
         assert_eq!(normalized(b"x = ONLY + 1\n"), "x = ONLY + 1\n");
@@ -173,6 +173,22 @@ mod tests {
             "integer, pointer :: p\n"
         );
         assert_eq!(normalized(b"call sub(POINTER)\n"), "call sub(POINTER)\n");
+    }
+
+    #[test]
+    fn bind_c_marker_is_syntax_even_when_c_is_a_local_name() {
+        assert_eq!(
+            normalized(
+                b"subroutine s(C) BIND(C, NAME='entry')\ninteger :: C\nprint *, C\nend subroutine s\n"
+            ),
+            "subroutine s(C) bind(c, name='entry')\ninteger :: C\nprint *, C\nend subroutine s\n"
+        );
+        assert_eq!(
+            normalized(
+                b"subroutine t(C)\ninteger :: C\nexternal BIND\ncall BIND(C)\nend subroutine t\n"
+            ),
+            "subroutine t(C)\ninteger :: C\nexternal BIND\ncall BIND(C)\nend subroutine t\n"
+        );
     }
 
     #[test]

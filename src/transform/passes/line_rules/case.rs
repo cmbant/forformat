@@ -189,6 +189,19 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                     }
                 }
                 let cased = apply_case(token.text, cx.config.style.keyword_case);
+                // The `C` in a BIND(C) language-binding-spec is syntax, not an
+                // ordinary identifier. A local/project variable named C must
+                // therefore not suppress its keyword-case normalization. Keep
+                // the preceding BIND declaration check so an ordinary declared
+                // procedure call `bind(C)` remains an identifier use.
+                if is_bind_c_marker(&tokens, index)
+                    && !declared_names.suppresses_keyword(line_index, b"bind", false)
+                {
+                    if token.text != cased {
+                        edits.replace(token.span.clone(), &cased);
+                    }
+                    continue;
+                }
                 let specifier_argument =
                     is_specifier_keyword_argument(&tokens, index, &inside_paren, context);
                 if (is_contextual_declaration_name(line, &tokens, index, continued_entity_list)
@@ -305,6 +318,32 @@ fn tracked_component_spelling_governs(cx: &PassContext<'_>, name: &[u8]) -> bool
     false
 }
 
+fn is_bind_clause_head(tokens: &[crate::source::Token<'_>], index: usize) -> bool {
+    if is_call_procedure_designator(tokens, index) {
+        return false;
+    }
+    tokens
+        .get(index + 1)
+        .is_some_and(|token| token.kind == TokenKind::LParen)
+        && tokens
+            .get(index + 2)
+            .is_some_and(|token| token.is_name(b"c"))
+        && tokens.get(index + 3).is_some_and(|token| {
+            matches!(
+                token.kind,
+                TokenKind::RParen | TokenKind::Comma | TokenKind::Ampersand
+            )
+        })
+}
+
+fn is_bind_c_marker(tokens: &[crate::source::Token<'_>], index: usize) -> bool {
+    index >= 2
+        && tokens[index].is_name(b"c")
+        && tokens[index - 1].kind == TokenKind::LParen
+        && tokens[index - 2].is_name(b"bind")
+        && is_bind_clause_head(tokens, index - 2)
+}
+
 fn keyword_in_context(tokens: &[crate::source::Token], index: usize) -> bool {
     let token = &tokens[index];
     let next = tokens.get(index + 1);
@@ -315,11 +354,7 @@ fn keyword_in_context(tokens: &[crate::source::Token], index: usize) -> bool {
         return next.is_some_and(|t| t.text == b":");
     }
     if token.is(b"bind") {
-        return next.is_some_and(|t| t.kind == TokenKind::LParen)
-            && tokens.get(index + 2).is_some_and(|t| t.is_name(b"c"))
-            && tokens
-                .get(index + 3)
-                .is_some_and(|t| t.kind == TokenKind::RParen);
+        return is_bind_clause_head(tokens, index);
     }
     if token.is(b"kind") {
         return next.is_some_and(|t| t.kind == TokenKind::LParen || t.text == b"=");

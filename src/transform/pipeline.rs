@@ -115,7 +115,7 @@ pub fn normalize(
     // keeps physical line structure, so it deliberately does not join tokens
     // across authored continuation boundaries.
     with_context(document, project, local, config, |document, cx| {
-        let mut stage = passes::case_pass::declared(document, cx)?;
+        let mut stage = passes::scoped_case::declared(document, cx)?;
         if normalize_whitespace {
             stage = stage.or(passes::structure::join_lexical_token_continuations(
                 document, cx,

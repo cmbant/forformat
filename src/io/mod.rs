@@ -30,7 +30,11 @@ pub use sources::{repository_root, tracked_sources, validate_extension};
 pub use write::atomic_replace;
 
 use crate::{
-    analysis::analyze_file, cli::Invocation, error::FormatError, format_source, source::SourceForm,
+    analysis::{analyze_file, analyze_file_at},
+    cli::Invocation,
+    error::FormatError,
+    format_source,
+    source::SourceForm,
 };
 use std::{
     env, fs,
@@ -263,7 +267,11 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     };
     let facts = analyze_sources(&loaded.sources, &analysis_indices)?;
     let stdin_local = if stdin_mode && invocation.config.mode.normalizes() {
-        Some(analyze_file(expect_stdin(stdin_source.as_deref()))?)
+        let source = expect_stdin(stdin_source.as_deref());
+        Some(match scope.stdin_path() {
+            Some(path) => analyze_file_at(path, source)?,
+            None => analyze_file(source)?,
+        })
     } else {
         None
     };
