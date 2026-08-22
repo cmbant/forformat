@@ -790,3 +790,30 @@ end module
     assert!(text.contains("item(1)%RankMember"));
     assert!(text.contains("end select\nprint *, ITEM"));
 }
+
+#[test]
+fn select_guard_keywords_remain_contextual_identifiers() {
+    let source = br#"program p
+integer :: RANK, TYPE, CLASS
+rank = 1
+type = 2
+class = 3
+print *, rank, type, class
+end program
+"#;
+    let project = analyze_project([(Path::new("p.f90"), source.as_slice())]).unwrap();
+    let formatted = format_source_with_context(
+        source,
+        &project,
+        &FormatConfig {
+            mode: FormatMode::NormalizeOnly,
+            ..FormatConfig::default()
+        },
+    )
+    .unwrap();
+    let text = String::from_utf8(formatted.bytes).unwrap();
+    assert!(text.contains("RANK = 1"));
+    assert!(text.contains("TYPE = 2"));
+    assert!(text.contains("CLASS = 3"));
+    assert!(text.contains("print *, RANK, TYPE, CLASS"));
+}

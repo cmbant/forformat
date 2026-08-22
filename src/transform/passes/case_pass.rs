@@ -48,7 +48,7 @@ enum AssociationScope {
         kind: SelectAssociationKind,
         alias: Vec<u8>,
         base: AssociateFrame,
-        active: AssociateFrame,
+        active: Box<AssociateFrame>,
     },
 }
 
@@ -1122,17 +1122,19 @@ fn association_opening_scope(
         &mut frame,
         spec.alias,
         spec.selector,
-        spec.explicit_alias,
         line,
         procedure,
         cx,
         outer,
     );
+    if spec.explicit_alias {
+        frame.spellings.insert(alias.clone(), spec.alias.to_vec());
+    }
     Some(AssociationScope::Select {
         kind: spec.kind,
         alias,
         base: frame.clone(),
-        active: frame,
+        active: Box::new(frame),
     })
 }
 
@@ -1156,7 +1158,7 @@ fn apply_select_guard(
             let Some(guard) = select_type_guard_name(tokens) else {
                 return;
             };
-            *active = base.clone();
+            **active = base.clone();
             let Some(type_name) = guard else {
                 return;
             };
@@ -1169,7 +1171,7 @@ fn apply_select_guard(
         }
         SelectAssociationKind::Rank => {
             if is_select_rank_guard(tokens) {
-                *active = base.clone();
+                **active = base.clone();
             }
         }
     }
@@ -1240,9 +1242,10 @@ fn associate_frame(
 ) -> AssociateFrame {
     let mut frame = AssociateFrame::default();
     for (alias, selector) in associate_specs(tokens) {
-        insert_association(
-            &mut frame, alias, selector, true, line, procedure, cx, outer,
-        );
+        insert_association(&mut frame, alias, selector, line, procedure, cx, outer);
+        frame
+            .spellings
+            .insert(alias.to_ascii_lowercase(), alias.to_vec());
     }
     frame
 }
@@ -1251,7 +1254,6 @@ fn insert_association(
     frame: &mut AssociateFrame,
     alias: &[u8],
     selector: &[Token<'_>],
-    preserve_spelling: bool,
     line: usize,
     procedure: Option<&[u8]>,
     cx: &PassContext,
@@ -1259,9 +1261,6 @@ fn insert_association(
 ) {
     let name = alias.to_ascii_lowercase();
     frame.names.insert(name.clone());
-    if preserve_spelling {
-        frame.spellings.insert(name.clone(), alias.to_vec());
-    }
     if let Some(type_name) = designator_type(
         selector,
         procedure,
@@ -1457,13 +1456,17 @@ fn is_select_type_rank_keyword(tokens: &[Token<'_>], index: usize) -> bool {
         return false;
     };
     if tokens[first].is_name(b"type") || tokens[first].is_name(b"class") {
-        return index == first
-            || (index == first + 1
-                && tokens[index].kind == TokenKind::Name
-                && (tokens[index].is_name(b"is") || tokens[index].is_name(b"default")));
+        let guard = tokens
+            .get(first + 1)
+            .is_some_and(|token| token.is_name(b"is") || token.is_name(b"default"));
+        return guard && (index == first || index == first + 1);
     }
     if tokens[first].is_name(b"rank") {
-        return index == first || (index == first + 1 && tokens[index].is_name(b"default"));
+        let guard = tokens
+            .get(first + 1)
+            .is_some_and(|token| token.kind == TokenKind::LParen || token.is_name(b"default"));
+        return guard
+            && (index == first || (index == first + 1 && tokens[index].is_name(b"default")));
     }
     false
 }
