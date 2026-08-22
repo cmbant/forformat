@@ -30,6 +30,7 @@ use std::{
 struct AssociateFrame {
     names: HashSet<Vec<u8>>,
     types: HashMap<Vec<u8>, Vec<u8>>,
+    spellings: HashMap<Vec<u8>, Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,6 +46,24 @@ struct SymbolQuery {
     implicit_guard: ImplicitGuard,
 }
 
+/// Why the base declared-case pass made (or declined) a spelling decision.
+///
+/// `KeepBase` is deliberately the default. Only evidence obtained from the
+/// compatibility/project-wide lookups is eligible for scoped re-resolution.
+/// That makes a new semantic capability in this pass authoritative by
+/// construction instead of requiring a matching syntax guard in `scoped_case`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum CaseEvidence {
+    KeepBase,
+    Alias(Vec<u8>),
+    Symbol { allow_external: bool },
+    Type,
+    UseRemote { module: Vec<u8> },
+    Member { owner: Vec<Vec<u8>> },
+}
+
+pub(super) type CaseEvidenceMap = HashMap<(usize, usize), CaseEvidence>;
+
 impl AssociateFrame {
     fn extend_visible(&mut self, frame: &Self) {
         for name in &frame.names {
@@ -52,8 +71,12 @@ impl AssociateFrame {
             // An untyped inner alias must shadow a typed outer alias with the
             // same name instead of exposing the outer entity by accident.
             self.types.remove(name);
+            self.spellings.remove(name);
             if let Some(type_name) = frame.types.get(name) {
                 self.types.insert(name.clone(), type_name.clone());
+            }
+            if let Some(spelling) = frame.spellings.get(name) {
+                self.spellings.insert(name.clone(), spelling.clone());
             }
         }
     }
@@ -178,25 +201,42 @@ pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, Fo
 }
 
 /// [`declared`] against a name index the caller already has.
-///
-/// `scoped_case` runs this pass and then reconciles its result against project
-/// visibility, and needs the same index for its own decisions. Building it once
-/// and lending it here is the only thing this entry point exists for; the two
-/// callers must never index different name tables.
 pub(super) fn declared_with_names(
     document: &mut Document,
     cx: &PassContext,
     declared_names: &DeclaredNameIndex,
 ) -> Result<Changed, FormatError> {
+    declared_with_names_impl(document, cx, declared_names, None)
+}
+
+/// Run the declared-case pass and report the evidence class for every name
+/// token in the original analysis stream.
+pub(super) fn declared_with_names_and_evidence(
+    document: &mut Document,
+    cx: &PassContext,
+    declared_names: &DeclaredNameIndex,
+) -> Result<(Changed, CaseEvidenceMap), FormatError> {
+    let mut evidence = CaseEvidenceMap::default();
+    let changed = declared_with_names_impl(document, cx, declared_names, Some(&mut evidence))?;
+    Ok((changed, evidence))
+}
+
+fn declared_with_names_impl(
+    document: &mut Document,
+    cx: &PassContext,
+    declared_names: &DeclaredNameIndex,
+    mut evidence_map: Option<&mut CaseEvidenceMap>,
+) -> Result<Changed, FormatError> {
     // An implicit function result is declared in the procedure's local
     // namespace, while calls to that function resolve through the file-wide
-    // procedure namespace.  Capture that one-entity override once so the
+    // procedure namespace. Capture that one-entity override once so the
     // header and every other occurrence use the same spelling in this pass.
     let procedure_spellings = implicit_function_spellings(cx.analysis, declared_names);
     let mut associate_stack: Vec<AssociateFrame> = Vec::new();
     let mut line_edits: Vec<Vec<(Range<usize>, Vec<u8>)>> = vec![Vec::new(); document.lines.len()];
+    let record_evidence = evidence_map.is_some();
 
-    // Work on assembled statements, not independently on physical lines.  A
+    // Work on assembled statements, not independently on physical lines. A
     // USE module, a TYPE(...) name, or a component can be on a continuation
     // line; provenance maps the token back to exactly the bytes that need an
     // edit without touching the continuation markers or surrounding text.
@@ -232,10 +272,12 @@ pub(super) fn declared_with_names(
                     continue;
                 }
                 let spans = source_spans(group, statement, token);
-                let Some(&(line, _)) = spans.first() else {
+                let Some((line, first_span)) = spans.first() else {
                     continue;
                 };
-                let Some(replacement) = classify_spelling(
+                let line = *line;
+                let mut token_evidence = CaseEvidence::KeepBase;
+                let replacement = classify_spelling(
                     &tokens,
                     index,
                     line,
@@ -243,17 +285,30 @@ pub(super) fn declared_with_names(
                     cx,
                     Some(&statement_context),
                     Some(&procedure_spellings),
-                ) else {
+                    record_evidence.then_some(&mut token_evidence),
+                );
+                if record_evidence {
+                    // Macros are an earlier, higher-priority namespace and are
+                    // therefore always base evidence, even when their token
+                    // appears in USE/ASSOCIATE syntax.
+                    if !cx.project.macros.contains(token.text) {
+                        reconcile_occurrence_evidence(
+                            &tokens,
+                            index,
+                            &associate_context,
+                            &mut token_evidence,
+                        );
+                    }
+                    if let Some(map) = evidence_map.as_deref_mut() {
+                        map.insert((line, first_span.start), token_evidence);
+                    }
+                }
+                let Some(replacement) = replacement else {
                     continue;
                 };
                 if replacement.as_slice() == token.text {
                     continue;
                 }
-                // A token the author broke across a continuation is re-cased in
-                // place, one span per line, rather than skipped.  Skipping it
-                // was not a deferral: nothing rejoins the halves before step 16
-                // wraps the statement, so the spelling only settled once the
-                // wrap had put the token back together for the *next* run (I1).
                 let Some(pieces) = spread_replacement(&spans, token, &replacement) else {
                     continue;
                 };
@@ -297,20 +352,11 @@ pub(super) fn declared_with_names(
     Ok(changed)
 }
 
-/// Return the original physical lines and byte spans a token occupies, in
-/// order.  A token the author broke across a continuation — `zer&` / `&o` —
-/// occupies one span per physical line; every other token occupies exactly one.
-///
-/// The group's joined text is concatenated from its pieces with nothing
-/// inserted between them, so intersecting a token's range with each piece
-/// recovers its provenance exactly.
 /// Classify one identifier occurrence and return its canonical spelling.
 ///
-/// The order mirrors the normalization contract: macro names are already handled by the
-/// preceding pass; USE and named END sites have dedicated spaces; `%` sites
-/// are component/type-bound-procedure occurrences; TYPE()/CLASS() names are
-/// type occurrences; everything else is a symbol.  An unresolved component
-/// remains untouched because its typed key cannot be reconstructed.
+/// When evidence reporting is requested, the slot starts as `KeepBase` and is
+/// changed only at the compatibility/project-wide evidence sources below.
+/// Semantic early returns therefore stay protected automatically.
 fn classify_spelling(
     tokens: &[Token<'_>],
     index: usize,
@@ -319,15 +365,10 @@ fn classify_spelling(
     cx: &PassContext,
     associates: Option<&AssociateFrame>,
     procedure_spellings: Option<&CaseMap>,
+    mut evidence: Option<&mut CaseEvidence>,
 ) -> Option<Vec<u8>> {
     let token = &tokens[index];
 
-    // A leading `END` (bare, or opening `END DO`/`END IF`/`END SUBROUTINE`/…)
-    // is the block-end keyword and never a use of a same-spelled declared
-    // name, even when the file also declares a dummy argument or variable
-    // named `end`. Letting the declared-case engine govern it here would
-    // fight with keyword-case on every later pass, since re-tokenizing its
-    // own output feeds this same token straight back in (I1).
     if crate::source::syntax::is_end_construct_keyword(tokens, index)
         || (index > 0 && crate::source::syntax::is_end_construct_keyword(tokens, index - 1))
     {
@@ -340,9 +381,6 @@ fn classify_spelling(
             .contains(token.text.to_ascii_lowercase().as_slice())
     });
 
-    // Indexed member chains whose owner cannot be recovered are deliberately
-    // inert for the same reason as every other unresolved `%` member. The
-    // `err`/`index` cases exercise that boundary in the keyword sweep.
     if preceded_by_percent(tokens, index)
         && matches!(
             token.text.to_ascii_lowercase().as_slice(),
@@ -352,19 +390,20 @@ fn classify_spelling(
             .get(index - 2)
             .is_some_and(|token| token.kind == TokenKind::RParen)
     {
+        record_member_evidence(tokens, index, &mut evidence);
         return None;
     }
-    // A macro is a higher-priority namespace, including when its spelling is
-    // ambiguous.  Silence here prevents a declaration from re-casing it.
     if cx.project.macros.contains(token.text) {
         return None;
     }
 
-    // A kind suffix is a use of the declared kind parameter, including when
-    // the literal has an exponent (`1.0e8_dl`). The tokenizer exposes the
-    // suffix separately from the number, so it follows the same declaration
-    // resolver as an ordinary symbol. An undeclared suffix is inert.
     if is_numeric_literal_kind_name(tokens, index) {
+        record_case_evidence(
+            &mut evidence,
+            CaseEvidence::Symbol {
+                allow_external: false,
+            },
+        );
         return file_symbol_spelling(
             declared_names,
             cx,
@@ -383,10 +422,6 @@ fn classify_spelling(
         return Some(spelling);
     }
     if is_declaration_entity(tokens, index) {
-        // A declaration is normally its own authority, but the one that types
-        // the result of a function without `RESULT(...)` declares the function
-        // itself. It names the same entity as the header, so it follows the
-        // header rather than competing with it.
         return implicit_result_spelling(cx, line, token, procedure_spellings);
     }
 
@@ -403,6 +438,7 @@ fn classify_spelling(
     }
 
     if is_type_spec_name(tokens, index) {
+        record_case_evidence(&mut evidence, CaseEvidence::Type);
         if cx.local.declared_types.contains(token.text)
             || cx.project.declared_types.contains(token.text)
         {
@@ -416,10 +452,13 @@ fn classify_spelling(
         return None;
     }
 
-    // A kind selector in an intrinsic type-spec (REAL(DP), COMPLEX(DP), ...)
-    // is an ordinary declared parameter, not a derived-type
-    // name.  This also reaches legacy declarations without `::`.
     if is_intrinsic_kind_name(tokens, index) {
+        record_case_evidence(
+            &mut evidence,
+            CaseEvidence::Symbol {
+                allow_external: false,
+            },
+        );
         return file_symbol_spelling(
             declared_names,
             cx,
@@ -432,20 +471,9 @@ fn classify_spelling(
         );
     }
 
-    // There is deliberately no "the authored spelling belongs to another scope,
-    // so keep it" clause here.  A name nested in an array bound is a use like
-    // any other and resolves against the declaration that governs its own
-    // scope: `yout(EVout%nvar)` inside a procedure whose dummy list declares
-    // `EVOut` becomes `EVOut`, exactly as the same use would in a statement one
-    // line below.  Retaining the authored root instead reproduces the committed
-    // An authored spelling from another scope cannot justify a rule.
-
     if preceded_by_percent(tokens, index) {
+        record_member_evidence(tokens, index, &mut evidence);
         let procedure = active_procedure(cx.scopes, line);
-        // Ownership may come from another project file (for example a module
-        // variable used through USE), so resolve the complete chain against
-        // both the target file and project maps.  The case table queried below
-        // still applies target-file precedence and suppresses ambiguity.
         let owner_type = member_owner_type(
             tokens,
             index,
@@ -456,10 +484,6 @@ fn classify_spelling(
             associates,
         );
         let Some(owner_type) = owner_type else {
-            // The typed component table cannot safely reproduce the
-            // authoritative (type, component) key when the use-site chain is
-            // unresolved. A genuinely undetermined governing declaration is
-            // inert; it must not fall through to keyword or symbol casing.
             return None;
         };
         let inherited = inherited_component_spelling(cx, &owner_type, token.text, true);
@@ -469,20 +493,13 @@ fn classify_spelling(
         if let Some(spelling) = inherited_type_procedure_spelling(cx, &owner_type, token.text) {
             return Some(spelling);
         }
-        // Once an occurrence is known to be a member, only a declaration on
-        // its owner chain can govern its spelling. A same-named ordinary
-        // symbol or binding on an unrelated type is a different entity.
         return None;
     }
 
-    // Inside the function itself, the header has to win here rather than
-    // below, because the local result declaration would otherwise satisfy the
-    // local lookup first.
     if let Some(spelling) = implicit_result_spelling(cx, line, token, procedure_spellings) {
         return Some(spelling);
     }
 
-    // The B9 procedure map contains spellings, not merely membership.
     match declared_names.governing_local_case(line, token.text) {
         DeclaredSpelling::Spelling(spelling) => return Some(spelling.to_owned()),
         DeclaredSpelling::Ambiguous => return None,
@@ -491,6 +508,12 @@ fn classify_spelling(
     if let Some(spelling) = procedure_spellings.and_then(|spellings| spellings.get(token.text)) {
         return Some(spelling.to_owned());
     }
+    record_case_evidence(
+        &mut evidence,
+        CaseEvidence::Symbol {
+            allow_external: is_external_reference(tokens, index),
+        },
+    );
     file_symbol_spelling(
         declared_names,
         cx,
@@ -505,6 +528,80 @@ fn classify_spelling(
             },
         },
     )
+}
+
+fn record_case_evidence(evidence: &mut Option<&mut CaseEvidence>, value: CaseEvidence) {
+    if let Some(slot) = evidence.as_mut() {
+        **slot = value;
+    }
+}
+
+fn record_member_evidence(
+    tokens: &[Token<'_>],
+    index: usize,
+    evidence: &mut Option<&mut CaseEvidence>,
+) {
+    let Some(owner) = component_owner_names(tokens, index, true) else {
+        return;
+    };
+    record_case_evidence(
+        evidence,
+        CaseEvidence::Member {
+            owner: owner.into_iter().map(ToOwned::to_owned).collect(),
+        },
+    );
+}
+
+/// Reclassify occurrence-level namespaces whose provenance depends on the
+/// statement's semantic context rather than on the generic symbol lookup.
+/// This lives beside the base classifier so `scoped_case` never needs to
+/// recognize these statement shapes itself.
+fn reconcile_occurrence_evidence(
+    tokens: &[Token<'_>],
+    index: usize,
+    enclosing_associates: &AssociateFrame,
+    evidence: &mut CaseEvidence,
+) {
+    let token = &tokens[index];
+
+    if let Some(module_index) = use_module_index(tokens) {
+        if index <= module_index || is_use_only_keyword(tokens, index) {
+            *evidence = CaseEvidence::KeepBase;
+        } else if is_use_rename_local(tokens, index) {
+            *evidence = CaseEvidence::Alias(token.text.to_vec());
+        } else {
+            *evidence = CaseEvidence::UseRemote {
+                module: tokens[module_index].text.to_vec(),
+            };
+        }
+        return;
+    }
+
+    if is_associate_alias_declaration(tokens, index) {
+        *evidence = CaseEvidence::Alias(token.text.to_vec());
+        return;
+    }
+
+    if let CaseEvidence::Member { owner } = evidence {
+        if owner
+            .first()
+            .and_then(|root| associate_spelling(enclosing_associates, root))
+            .is_some()
+        {
+            // The base pass can know this member's owner from the selector
+            // type inferred for the ASSOCIATE alias. The project-scoped
+            // variable resolver cannot reproduce that evidence, so the base
+            // answer is authoritative.
+            *evidence = CaseEvidence::KeepBase;
+            return;
+        }
+    }
+
+    if !preceded_by_percent(tokens, index) {
+        if let Some(spelling) = associate_spelling(enclosing_associates, token.text) {
+            *evidence = CaseEvidence::Alias(spelling.to_vec());
+        }
+    }
 }
 
 /// A type-bound binding and the module procedure it names are one entity.
@@ -549,8 +646,6 @@ fn procedure_definition_spelling(
         .map(ToOwned::to_owned)
 }
 
-/// The header spelling of the function `line` is inside, when `token` names
-/// that function and it takes its result from its own name.
 fn implicit_result_spelling(
     cx: &PassContext,
     line: usize,
@@ -564,14 +659,6 @@ fn implicit_result_spelling(
     procedure_spellings?.get(token.text).map(ToOwned::to_owned)
 }
 
-/// Return the header spelling of each function whose result is its own name.
-///
-/// A function without `RESULT(...)` names one entity twice: in its header, and
-/// in the local declaration that gives its result a type.  The definition is
-/// the header, so its spelling governs the whole entity — the body, the named
-/// `END`, and calls from other procedures, which cannot see the local map at
-/// all.  Resolving every occurrence from this one map is also what makes the
-/// name a fixed point: the header is what the next pass reads back.
 fn implicit_function_spellings(
     analysis: &crate::transform::document::Analysis,
     declared_names: &crate::analysis::DeclaredNameIndex,
@@ -601,8 +688,6 @@ fn implicit_function_spellings(
             else {
                 continue;
             };
-            // RESULT is a header keyword at depth zero; a dummy named
-            // `result` is nested in the argument list and does not count.
             if tokens
                 .iter()
                 .skip(function + 2)
@@ -610,9 +695,6 @@ fn implicit_function_spellings(
             {
                 continue;
             }
-            // Only a function that declares its own result locally is a
-            // two-spelling entity; without that declaration the ordinary
-            // symbol resolver already governs the name.
             if !declared_names.local_contains(group.lines.start, name.text) {
                 continue;
             }
@@ -626,9 +708,6 @@ fn resolver_spelling(cx: &PassContext, space: NameSpace, name: &[u8]) -> Option<
     cx.resolver().spelling(space, name).map(ToOwned::to_owned)
 }
 
-/// Reflow re-runs lexical spacing on a joined statement. Restore only the
-/// component members whose case classifier had no answer; resolved members
-/// keep the canonical spelling produced by the declaration pass.
 pub(crate) fn restore_declined_component_spellings(
     original: &[u8],
     updated: &[u8],
@@ -653,6 +732,7 @@ pub(crate) fn restore_declined_component_spellings(
                 line,
                 declared_names,
                 cx,
+                None,
                 None,
                 None,
             )
@@ -691,9 +771,6 @@ pub(crate) fn restore_declined_component_spellings(
     edits.finish()
 }
 
-/// Resolve a component at its declared owner or one of that type's parents.
-/// An exact declaration at the nearest level wins, including an ambiguity;
-/// only a genuinely absent entry permits the walk to continue.
 fn inherited_component_spelling(
     cx: &PassContext,
     owner: &[u8],
@@ -742,17 +819,11 @@ fn inherited_component_spelling(
     }
 }
 
-/// Resolve a type-bound procedure at its owner type or an inherited parent.
-/// The project-wide type-procedure summary is only a membership guard; its
-/// spelling is not authoritative when unrelated types disagree.
 fn inherited_type_procedure_spelling(
     cx: &PassContext,
     owner: &[u8],
     name: &[u8],
 ) -> Option<Vec<u8>> {
-    // A generic binding declared in the target file is governed by that local
-    // declaration namespace. Its project-wide binding can govern uses in other
-    // files, where the owner type is the available declaration path.
     if cx.local.generic_type_procedures.contains(name) {
         return None;
     }
@@ -764,10 +835,6 @@ fn inherited_type_procedure_spelling(
             return None;
         }
         if let Some(spelling) = resolver.type_procedure_spelling(&current, name) {
-            // The resolved owner is the governing namespace.  Do not veto its
-            // declaration because an unrelated type binds the same name with
-            // another case: that project-wide disagreement is exactly why the
-            // owner chain exists.
             return Some(spelling.to_vec());
         }
         if let Some(spelling) = cx.project.generic_bound_type_procedures.get(&current, name) {
@@ -794,26 +861,16 @@ fn file_symbol_spelling(
     name: &[u8],
     query: SymbolQuery,
 ) -> Option<Vec<u8>> {
-    // Procedure locals and host-associated names were resolved above. Do not
-    // apply a file-wide ambiguity veto here: same-named locals in different
-    // procedures are different entities.
     if cx.local.file_symbols.contains(name) {
         return cx.local.file_symbols.get(name).map(ToOwned::to_owned);
     }
     if !query.associate_alias && declared_names.file_declared_anywhere(name).is_declared() {
-        // Program-unit specification names are visible in the file but are
-        // not part of the project symbol table. Preserve the
-        // authored use rather than borrowing a same-named module component.
         return None;
     }
     if query.implicit_guard == ImplicitGuard::Apply
         && !query.associate_alias
         && declared_names.implicit_allows(query.line, name)
     {
-        // No declaration visible in this file governs the occurrence. If the
-        // active IMPLICIT policy permits a local entity with this initial,
-        // project-wide spelling evidence belongs to a potentially different
-        // entity and cannot safely change the authored case.
         return None;
     }
     resolve(&cx.local.file_symbols, &cx.project.file_symbols, name).map(ToOwned::to_owned)
@@ -872,9 +929,6 @@ fn associate_opening(tokens: &[Token<'_>], first: Option<usize>) -> Option<usize
     .then_some(first + 2)
 }
 
-/// Extract the aliases introduced by one ASSOCIATE statement and infer the
-/// type of selectors that are plain data-reference chains. Arbitrary
-/// expressions remain valid aliases but intentionally have no inferred type.
 fn associate_frame(
     tokens: &[Token<'_>],
     procedure: Option<&[u8]>,
@@ -886,6 +940,7 @@ fn associate_frame(
     for (alias, selector) in associate_specs(tokens) {
         let name = alias.to_ascii_lowercase();
         frame.names.insert(name.clone());
+        frame.spellings.insert(name.clone(), alias.to_vec());
         if let Some(type_name) = designator_type(selector, procedure, local, project, outer) {
             frame.types.insert(name, type_name);
         }
@@ -893,9 +948,6 @@ fn associate_frame(
     frame
 }
 
-/// Return `(association-name, selector-tokens)` for the top-level entries in
-/// `ASSOCIATE(...)`. Commas and arrows inside selector expressions are not
-/// association delimiters.
 fn associate_specs<'a>(tokens: &'a [Token<'a>]) -> Vec<(&'a [u8], &'a [Token<'a>])> {
     let Some(associate) = tokens.iter().position(|token| token.is_name(b"associate")) else {
         return Vec::new();
@@ -980,10 +1032,6 @@ fn designator_type(
     project.and_then(|types| types.resolve_chain(root, &names[1..]))
 }
 
-/// Parse a selector that consists solely of a Fortran data-reference chain,
-/// ignoring array subscripts on each part. Expressions and procedure calls
-/// are deliberately rejected because their result type needs richer semantic
-/// analysis than declaration maps provide.
 fn designator_names<'a>(tokens: &'a [Token<'a>]) -> Option<Vec<&'a [u8]>> {
     let root = tokens.first()?.kind == TokenKind::Name;
     if !root {
@@ -1025,12 +1073,35 @@ fn designator_names<'a>(tokens: &'a [Token<'a>]) -> Option<Vec<&'a [u8]>> {
     Some(names)
 }
 
-fn is_use_module(tokens: &[Token<'_>], index: usize) -> bool {
-    let Some(use_index) = tokens.iter().position(|token| token.is_name(b"use")) else {
+fn associate_spelling<'a>(frame: &'a AssociateFrame, name: &[u8]) -> Option<&'a [u8]> {
+    frame
+        .spellings
+        .get(name.to_ascii_lowercase().as_slice())
+        .map(Vec::as_slice)
+}
+
+fn is_associate_alias_declaration(tokens: &[Token<'_>], index: usize) -> bool {
+    let Some(associate) = tokens.iter().position(|token| token.is_name(b"associate")) else {
         return false;
     };
-    if index <= use_index {
+    let Some(open) = tokens
+        .get(associate + 1)
+        .filter(|token| token.kind == TokenKind::LParen)
+    else {
         return false;
+    };
+    tokens[index].depth == open.depth + 1
+        && tokens
+            .get(index + 1)
+            .is_some_and(|token| token.text == b"=>" && token.depth == tokens[index].depth)
+}
+
+fn use_module_index(tokens: &[Token<'_>]) -> Option<usize> {
+    let use_index = tokens
+        .iter()
+        .position(|token| token.kind != TokenKind::Number)?;
+    if !tokens[use_index].is_name(b"use") {
+        return None;
     }
     let mut cursor = use_index + 1;
     if tokens
@@ -1040,14 +1111,44 @@ fn is_use_module(tokens: &[Token<'_>], index: usize) -> bool {
         while cursor < tokens.len() && tokens[cursor].text != b"::" {
             cursor += 1;
         }
+        if cursor == tokens.len() {
+            return None;
+        }
         cursor += 1;
     } else if tokens.get(cursor).is_some_and(|token| token.text == b"::") {
         cursor += 1;
     }
     tokens
         .get(cursor)
-        .is_some_and(|token| token.kind == TokenKind::Name)
-        && cursor == index
+        .filter(|token| token.kind == TokenKind::Name)
+        .map(|_| cursor)
+}
+
+fn is_use_module(tokens: &[Token<'_>], index: usize) -> bool {
+    use_module_index(tokens) == Some(index)
+}
+
+fn is_use_only_keyword(tokens: &[Token<'_>], index: usize) -> bool {
+    tokens[index].is_name(b"only")
+        && tokens
+            .get(index + 1)
+            .is_some_and(|token| token.text == b":" && token.depth == tokens[index].depth)
+}
+
+fn is_use_rename_local(tokens: &[Token<'_>], index: usize) -> bool {
+    tokens
+        .get(index + 1)
+        .is_some_and(|token| token.text == b"=>" && token.depth == tokens[index].depth)
+}
+
+fn is_external_reference(tokens: &[Token<'_>], index: usize) -> bool {
+    index
+        .checked_sub(1)
+        .and_then(|previous| tokens.get(previous))
+        .is_some_and(|token| token.is_name(b"call"))
+        || tokens
+            .get(index + 1)
+            .is_some_and(|token| token.kind == TokenKind::LParen)
 }
 
 fn is_type_spec_name(tokens: &[Token<'_>], index: usize) -> bool {
@@ -1157,9 +1258,6 @@ fn is_declaration_entity(tokens: &[Token<'_>], index: usize) -> bool {
             initializer = false;
         }
     }
-    // Names inside an entity's shape or initializer are uses, not additional
-    // declaration entities. In particular, a nested member bound must let the
-    // component resolver govern the member name.
     !initializer && array_depth == 0 && tokens[index].depth == 0
 }
 
@@ -1219,9 +1317,6 @@ fn old_style_declaration_entity(tokens: &[Token<'_>], index: usize) -> bool {
         return false;
     }
 
-    // In an old-style declaration each comma starts another entity. Only the
-    // current comma-delimited entity matters; names in earlier entities must
-    // not prevent a later declared name from being recognized.
     let entity_start = tokens[start..index]
         .iter()
         .enumerate()
@@ -1262,10 +1357,6 @@ fn member_owner_type(
             .clone();
         return resolve_component_owner(current, &names[1..], &local.types, project);
     }
-    // A target-file root type is authoritative even when its later component
-    // link cannot be resolved. Falling back to a project-wide type for that
-    // same root would invent an owner (and therefore a component spelling)
-    // that the normalizer leaves authored.
     if local
         .types
         .resolve_chain_with_locals(procedure, root, &[])
@@ -1284,8 +1375,6 @@ fn member_owner_type(
     }
 }
 
-/// Resolve a chain whose root type is target-local while its component
-/// definitions may be supplied by another project file.
 fn member_owner_type_with_project_components(
     tokens: &[Token<'_>],
     index: usize,
@@ -1453,8 +1542,6 @@ end module m\n";
             .unwrap()
             .bytes;
         assert_eq!(twice, once);
-        // The header defines the entity; the result declaration, the body, the
-        // named END and the call in `s` all follow it.
         let output = String::from_utf8(once).unwrap();
         assert!(output.contains("function BETA3(x)"));
         assert!(output.contains("real :: BETA3"));
@@ -1526,10 +1613,7 @@ end module m\n";
         assert_eq!(twice, once);
         let output = String::from_utf8(once).unwrap();
         assert!(output.contains("MYVAR = 1"));
-        // The construct's declaration is out of scope here, so nothing governs
-        // this occurrence and it is left as authored.
         assert!(output.contains("myvar = 2"));
-        // A host declaration still reaches past the construct as before.
         assert!(output.contains("ModuleVar = 3"));
     }
 
@@ -2089,10 +2173,6 @@ end module m\n"
 
     #[test]
     fn nested_declaration_bounds_use_the_active_procedure_local_case() {
-        // Each bound is deliberately spelled the way the *other* procedure
-        // declares the name.  The governing declaration is the local one, so
-        // both must be rewritten; leaving them alone is the shape that made us
-        // reproduce `equations.f90:706` instead of resolving it.
         let source = b"module m\ncontains\nsubroutine first(EV)\ntype(EvolutionVars) EV, EVout\nreal(dl), intent(out) :: yout(EVOut%nvar)\nend subroutine first\nsubroutine second(EV)\ntype(EvolutionVars) EV, EVOut\nreal(dl), intent(out) :: yout(EVout%nvar)\nend subroutine second\nend module m\n";
         let analysis = Document::from_bytes(source).analyze().unwrap();
         let scopes = ScopeTree::build(&analysis);
