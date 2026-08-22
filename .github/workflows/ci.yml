@@ -90,7 +90,22 @@ jobs:
               f'{i}    }}\n'
               f'{i}}}'
           )
-          p.write_text(text[:match.start()] + replacement + text[match.end():])
+          text = text[:match.start()] + replacement + text[match.end():]
+          signature = "fn is_type_spec_name(tokens: &[Token<'_>], index: usize) -> bool {\n"
+          if signature not in text:
+              raise SystemExit('could not find type-spec recognizer')
+          guard = '''fn is_type_spec_name(tokens: &[Token<'_>], index: usize) -> bool {
+              let first = tokens
+                  .iter()
+                  .position(|token| token.kind != TokenKind::Number);
+              if select_association_spec(tokens, first)
+                  .is_some_and(|spec| spec.alias_index == index)
+              {
+                  return false;
+              }
+          '''
+          text = text.replace(signature, guard, 1)
+          p.write_text(text)
           PY
           cargo fmt
           cargo test --locked --all-targets select_type
