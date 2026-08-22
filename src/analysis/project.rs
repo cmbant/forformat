@@ -60,6 +60,43 @@ impl<T: Eq + Clone> Visibility<T> {
     }
 }
 
+/// Ask one question of every registered definition of a program unit and merge
+/// the answers.
+///
+/// Each definition is an independent route to the name and so traverses from
+/// its own copy of `visited`. One shared set would let the first definition
+/// mark a (unit, name) pair on the way down and thereby silence the second's
+/// answer, which turns a disagreement between two vendored copies of a module
+/// into false agreement on whichever definition was registered first. Cycle
+/// protection is unaffected: each branch still carries every pair its own
+/// descent passed through.
+///
+/// The copies are made only where a name really has more than one definition,
+/// which is the rare vendored-duplicate case; the ordinary single-definition
+/// query threads `visited` straight through and allocates nothing.
+fn merge_definitions<K, T>(
+    units: &[UnitFacts],
+    visited: &mut HashSet<K>,
+    mut query: impl FnMut(&UnitFacts, &mut HashSet<K>) -> Visibility<T>,
+) -> Visibility<T>
+where
+    K: Clone + Eq + std::hash::Hash,
+    T: Clone + Eq,
+{
+    let shared = (units.len() > 1).then(|| visited.clone());
+    let mut resolved = Visibility::Absent;
+    for unit in units {
+        match &shared {
+            Some(shared) => {
+                let mut branch = shared.clone();
+                resolved.merge(query(unit, &mut branch));
+            }
+            None => resolved.merge(query(unit, visited)),
+        }
+    }
+    resolved
+}
+
 /// The union of every project source's declarations, plus module export facts
 /// used to build the namespace visible from each formatting target.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -169,27 +206,69 @@ impl ProjectContext {
         self.sources.push(path);
     }
 
+    /// Expand `facts`'s own INCLUDE directives when this context holds no
+    /// expansion that describes them.
+    ///
+    /// [`ProjectContext::expanded`] matches a stored expansion by path *and*
+    /// source fingerprint, so a buffer edited since the context was built — an
+    /// editor's unsaved change — matches nothing and falls back to the local
+    /// facts. Without this it would fall back to *unexpanded* local facts and
+    /// silently lose every declaration its fragments contribute, so a file
+    /// would resolve differently for the sole reason that it was dirty.
+    ///
+    /// This reads files, on the same terms as [`ProjectContext::absorb`].
+    pub(crate) fn expand_uncached(&self, path: &Path, facts: FileFacts) -> FileFacts {
+        if facts.includes.is_empty() || self.holds_expansion_of(&facts) {
+            return facts;
+        }
+        expand_includes_with(path, &facts, &mut |candidate| {
+            fs::read(candidate)
+                .ok()
+                .and_then(|source| analyze_file_at(candidate, &source).ok())
+        })
+    }
+
+    /// Whether `expanded` would answer from this context rather than fall back
+    /// to the caller's own facts.
+    fn holds_expansion_of(&self, facts: &FileFacts) -> bool {
+        facts.source_path.as_deref().is_some_and(|path| {
+            self.expanded_facts
+                .get(path)
+                .is_some_and(|(source_id, _)| *source_id == facts.source_id)
+        })
+    }
+
     fn register_modules(&mut self, facts: &FileFacts) {
         // Scope order rather than map order, so the registered sequence — and
         // with it this context's identity — does not depend on hashing.
         let mut scopes = facts.units.keys().copied().collect::<Vec<_>>();
         scopes.sort_unstable();
         for scope in scopes {
-            let unit = &facts.units[&scope];
-            let Some(host) = unit.project_host.as_ref() else {
-                continue;
-            };
-            let definitions = match host {
-                HostUnit::Module(name) => self.modules.entry(name.clone()).or_default(),
-                HostUnit::Submodule { ancestor, name } => self
-                    .submodules
-                    .entry((ancestor.clone(), name.clone()))
-                    .or_default(),
-            };
-            // Re-absorbing the same source must not register a second copy.
-            if !definitions.iter().any(|existing| existing == unit) {
-                definitions.push(unit.clone());
-            }
+            self.register_unit(&facts.units[&scope]);
+        }
+        // A module defined inside an INCLUDE fragment is a project entity even
+        // though it has no place in the including file's scope tree. Several
+        // files including one fragment register the identical unit, which
+        // deduplicates below rather than reading as a vendored duplicate.
+        for unit in &facts.included_units {
+            self.register_unit(unit);
+        }
+    }
+
+    fn register_unit(&mut self, unit: &UnitFacts) {
+        let Some(host) = unit.project_host.as_ref() else {
+            return;
+        };
+        let definitions = match host {
+            HostUnit::Module(name) => self.modules.entry(name.clone()).or_default(),
+            HostUnit::Submodule { ancestor, name } => self
+                .submodules
+                .entry((ancestor.clone(), name.clone()))
+                .or_default(),
+        };
+        // Re-absorbing the same source must not register a second copy.
+        if !definitions.iter().any(|existing| existing == unit) {
+            definitions.push(unit.clone());
         }
     }
 
@@ -431,11 +510,9 @@ impl ProjectContext {
         if !visited.insert((host.clone(), lower.clone())) {
             return Visibility::Absent;
         }
-        let mut resolved = Visibility::Absent;
-        for unit in self.host_units(host) {
-            resolved.merge(self.unit_visible_symbol(unit, &lower, visited));
-        }
-        resolved
+        merge_definitions(self.host_units(host), visited, |unit, visited| {
+            self.unit_visible_symbol(unit, &lower, visited)
+        })
     }
 
     fn unit_visible_symbol(
@@ -475,11 +552,9 @@ impl ProjectContext {
         if !visited.insert((host.clone(), lower.clone())) {
             return Visibility::Absent;
         }
-        let mut resolved = Visibility::Absent;
-        for unit in self.host_units(host) {
-            resolved.merge(self.unit_visible_type_spelling(unit, &lower, visited));
-        }
-        resolved
+        merge_definitions(self.host_units(host), visited, |unit, visited| {
+            self.unit_visible_type_spelling(unit, &lower, visited)
+        })
     }
 
     fn unit_visible_type_spelling(
@@ -519,11 +594,9 @@ impl ProjectContext {
         if !visited.insert((host.clone(), lower.clone())) {
             return Visibility::Absent;
         }
-        let mut resolved = Visibility::Absent;
-        for unit in self.host_units(host) {
-            resolved.merge(self.unit_visible_type_identity(host, unit, &lower, visited));
-        }
-        resolved
+        merge_definitions(self.host_units(host), visited, |unit, visited| {
+            self.unit_visible_type_identity(host, unit, &lower, visited)
+        })
     }
 
     fn unit_visible_type_identity(
@@ -569,11 +642,9 @@ impl ProjectContext {
         if !visited.insert((host.clone(), lower.clone())) {
             return Visibility::Absent;
         }
-        let mut resolved = Visibility::Absent;
-        for unit in self.host_units(host) {
-            resolved.merge(self.unit_visible_variable_type_identity(host, unit, &lower, visited));
-        }
-        resolved
+        merge_definitions(self.host_units(host), visited, |unit, visited| {
+            self.unit_visible_variable_type_identity(host, unit, &lower, visited)
+        })
     }
 
     fn unit_visible_variable_type_identity(
@@ -750,11 +821,9 @@ impl ProjectContext {
         if !visited.insert((module.clone(), name.clone())) {
             return Visibility::Absent;
         }
-        let mut resolved = Visibility::Absent;
-        for unit in self.module_units(&module) {
-            resolved.merge(self.unit_module_type_identity(&module, unit, &name, visited));
-        }
-        resolved
+        merge_definitions(self.module_units(&module), visited, |unit, visited| {
+            self.unit_module_type_identity(&module, unit, &name, visited)
+        })
     }
 
     fn unit_module_type_identity(
@@ -790,14 +859,12 @@ impl ProjectContext {
         if !visited.insert((module.clone(), name.clone())) {
             return Visibility::Absent;
         }
-        let mut resolved = Visibility::Absent;
-        for unit in self.module_units(&module) {
+        merge_definitions(self.module_units(&module), visited, |unit, visited| {
             if !unit.access.is_public(&name) {
-                continue;
+                return Visibility::Absent;
             }
-            resolved.merge(self.unit_module_type_identity(&module, unit, &name, visited));
-        }
-        resolved
+            self.unit_module_type_identity(&module, unit, &name, visited)
+        })
     }
 
     fn module_export_symbol(
@@ -811,14 +878,12 @@ impl ProjectContext {
         if !visited.insert((module.clone(), name.clone())) {
             return Visibility::Absent;
         }
-        let mut resolved = Visibility::Absent;
-        for unit in self.module_units(&module) {
+        merge_definitions(self.module_units(&module), visited, |unit, visited| {
             if !unit.access.is_public(&name) {
-                continue;
+                return Visibility::Absent;
             }
-            resolved.merge(self.unit_export_symbol(unit, &name, visited));
-        }
-        resolved
+            self.unit_export_symbol(unit, &name, visited)
+        })
     }
 
     fn unit_export_symbol(
@@ -848,14 +913,12 @@ impl ProjectContext {
         if !visited.insert((module.clone(), name.clone())) {
             return Visibility::Absent;
         }
-        let mut resolved = Visibility::Absent;
-        for unit in self.module_units(&module) {
+        merge_definitions(self.module_units(&module), visited, |unit, visited| {
             if !unit.access.is_public(&name) {
-                continue;
+                return Visibility::Absent;
             }
-            resolved.merge(self.unit_export_type(unit, &name, visited));
-        }
-        resolved
+            self.unit_export_type(unit, &name, visited)
+        })
     }
 
     fn unit_export_type(
@@ -885,14 +948,12 @@ impl ProjectContext {
         if !visited.insert((module.clone(), name.clone())) {
             return Visibility::Absent;
         }
-        let mut resolved = Visibility::Absent;
-        for unit in self.module_units(&module) {
+        merge_definitions(self.module_units(&module), visited, |unit, visited| {
             if !unit.access.is_public(&name) {
-                continue;
+                return Visibility::Absent;
             }
-            resolved.merge(self.unit_export_variable_type_identity(&module, unit, &name, visited));
-        }
-        resolved
+            self.unit_export_variable_type_identity(&module, unit, &name, visited)
+        })
     }
 
     fn unit_export_variable_type_identity(
@@ -1192,16 +1253,27 @@ where
     }
 
     let mut context = ProjectContext::empty();
+    // One fragment is typically included by many sources, and a nested include
+    // tree multiplies that again. Analyze each fragment once and hand out
+    // copies, so a shared `constants.inc` is not re-read and re-tokenized once
+    // per including file. `expand_includes_with` normalizes before it asks, so
+    // the path it passes is already the cache key.
+    let mut fragments: HashMap<PathBuf, Option<FileFacts>> = HashMap::new();
     for (path, facts) in &analyzed {
         let expanded = expand_includes_with(path, facts, &mut |candidate| {
-            lookup
-                .get(&normalize_path(candidate))
-                .map(|index| analyzed[*index].1.clone())
-                .or_else(|| {
-                    fs::read(candidate)
-                        .ok()
-                        .and_then(|source| analyze_file_at(candidate, &source).ok())
+            fragments
+                .entry(candidate.to_path_buf())
+                .or_insert_with(|| {
+                    lookup
+                        .get(&normalize_path(candidate))
+                        .map(|index| analyzed[*index].1.clone())
+                        .or_else(|| {
+                            fs::read(candidate)
+                                .ok()
+                                .and_then(|source| analyze_file_at(candidate, &source).ok())
+                        })
                 })
+                .clone()
         });
         context.absorb_expanded(path, facts, expanded);
     }

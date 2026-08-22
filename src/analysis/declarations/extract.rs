@@ -275,9 +275,25 @@ fn import_statement(text: &[u8], unit_scope: usize, facts: &mut FileFacts) {
     let Some(unit) = facts.units.get_mut(&unit_scope) else {
         return;
     };
-    let qualifier = tokens[first + 1..]
+    // `IMPORT, ALL` and `IMPORT :: All` are different productions, not one
+    // production with a special name in it: the host-access forms are
+    // `IMPORT, NONE`, `IMPORT, ALL` and `IMPORT, ONLY : list`, while
+    // `IMPORT [[ :: ] name-list]` names entities. Only the comma tells them
+    // apart, so a scope that imports an entity spelled `all` must not be read
+    // as importing everything.
+    let comma_qualified = tokens[first + 1..]
         .iter()
-        .find(|token| token.depth == 0 && token.kind == TokenKind::Name);
+        .find(|token| {
+            token.depth == 0 && !matches!(token.kind, TokenKind::Ampersand | TokenKind::Comment)
+        })
+        .is_some_and(|token| token.kind == TokenKind::Comma);
+    let qualifier = comma_qualified
+        .then(|| {
+            tokens[first + 1..]
+                .iter()
+                .find(|token| token.depth == 0 && token.kind == TokenKind::Name)
+        })
+        .flatten();
     if qualifier.is_some_and(|token| token.is_name(b"none")) {
         unit.host_access.import_none();
         return;
@@ -457,17 +473,26 @@ fn entity_declaration(
 
 /// The accessibility attribute carried in a declaration's attribute list, if
 /// it has one. Absent means the enclosing scope's default governs.
+///
+/// Only top-level tokens count. An attribute is a member of the comma-separated
+/// list itself, never something nested inside one of its parentheses, so a type
+/// or kind selector that happens to name an entity `public` or `private` —
+/// `type(Public), private :: Secret` — must not be read as the attribute and
+/// invert the declaration's accessibility.
 fn declaration_access(
     tokens: &[crate::source::Token<'_>],
     start: usize,
     separator: usize,
 ) -> Option<Accessibility> {
-    tokens[start..separator].iter().find_map(|token| {
-        token
-            .is_name(b"private")
-            .then_some(Accessibility::Private)
-            .or_else(|| token.is_name(b"public").then_some(Accessibility::Public))
-    })
+    tokens[start..separator]
+        .iter()
+        .filter(|token| token.depth == 0)
+        .find_map(|token| {
+            token
+                .is_name(b"private")
+                .then_some(Accessibility::Private)
+                .or_else(|| token.is_name(b"public").then_some(Accessibility::Public))
+        })
 }
 
 #[allow(clippy::too_many_arguments)]

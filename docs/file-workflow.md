@@ -37,7 +37,11 @@ as a compiler would see it, so dropping it would mis-analyse that selected file 
 the project. A fragment therefore contributes even when it lives outside every `--context-path` or
 matches an `--exclude` pattern, and an absolute include path is read as written. Only files a
 fragment is actually included by can see it; it never becomes a project-wide source in its own
-right. `--isolated` performs no project analysis at all and so resolves no includes.
+right. The one exception is a fragment that defines a whole program unit rather than a list of
+declarations: a module or submodule written inside a fragment is registered project-wide, because
+after inclusion that module exists exactly as if it had been written inline. Its own scope tree is
+not grafted into the including file, so its line numbers never take part in scope lookup there.
+`--isolated` performs no project analysis at all and so resolves no includes.
 
 The policy order is repository discovery, tracked-source enumeration, `context_paths` filtering,
 then `exclude`/`extend-exclude` filtering, followed by project analysis. In Git, exclusions are

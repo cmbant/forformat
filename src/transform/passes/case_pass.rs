@@ -7,7 +7,7 @@
 use crate::{
     analysis::{
         names::{resolve, NameSpace},
-        scoped_declared_names, CaseMap, DeclaredSpelling, TypeMaps,
+        scoped_declared_names, CaseMap, DeclaredNameIndex, DeclaredSpelling, TypeMaps,
     },
     error::FormatError,
     source::{
@@ -174,11 +174,25 @@ fn crossing_macro_names(document: &mut Document, cx: &PassContext) -> Changed {
 /// This is the declared-case pass for the formatter's scoped name tables.
 pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
     let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
+    declared_with_names(document, cx, &declared_names)
+}
+
+/// [`declared`] against a name index the caller already has.
+///
+/// `scoped_case` runs this pass and then reconciles its result against project
+/// visibility, and needs the same index for its own decisions. Building it once
+/// and lending it here is the only thing this entry point exists for; the two
+/// callers must never index different name tables.
+pub(super) fn declared_with_names(
+    document: &mut Document,
+    cx: &PassContext,
+    declared_names: &DeclaredNameIndex,
+) -> Result<Changed, FormatError> {
     // An implicit function result is declared in the procedure's local
     // namespace, while calls to that function resolve through the file-wide
     // procedure namespace.  Capture that one-entity override once so the
     // header and every other occurrence use the same spelling in this pass.
-    let procedure_spellings = implicit_function_spellings(cx.analysis, &declared_names);
+    let procedure_spellings = implicit_function_spellings(cx.analysis, declared_names);
     let mut associate_stack: Vec<AssociateFrame> = Vec::new();
     let mut line_edits: Vec<Vec<(Range<usize>, Vec<u8>)>> = vec![Vec::new(); document.lines.len()];
 
@@ -225,7 +239,7 @@ pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, Fo
                     &tokens,
                     index,
                     line,
-                    &declared_names,
+                    declared_names,
                     cx,
                     Some(&statement_context),
                     Some(&procedure_spellings),

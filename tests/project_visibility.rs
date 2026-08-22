@@ -483,3 +483,151 @@ fn a_member_reached_through_an_associate_alias_resolves_from_the_selector() {
     assert!(output.contains("print *, Held%Width"), "{output}");
     assert!(output.contains("print *, Box%Width"), "{output}");
 }
+
+/// A unique directory for one test that needs real files on disk.
+fn scratch_root(tag: &str) -> std::path::PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root =
+        std::env::temp_dir().join(format!("forformat-{tag}-{}-{unique}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    root
+}
+
+#[test]
+fn a_type_selector_does_not_supply_a_declarations_accessibility() {
+    // Both entities carry a real accessibility attribute, and in both the type
+    // selector names an entity spelled like the opposite one. Reading the
+    // selector as the attribute would invert each declaration.
+    let module = b"module Access\nprivate\ntype :: Public\ninteger :: PublicField\nend type Public\ntype :: Private\ninteger :: PrivateField\nend type Private\ntype(Public), private :: SecretRoot\ntype(Private), public :: ExposedRoot\nend module Access\n";
+    let target =
+        b"program p\nuse Access\nimplicit none\nprint *, secretroot, exposedroot\nend program p\n";
+    let output = String::from_utf8(normalize(
+        target,
+        [
+            (Path::new("access.f90"), module.as_slice()),
+            (Path::new("target.f90"), target.as_slice()),
+        ],
+    ))
+    .unwrap();
+    assert!(
+        output.contains("print *, secretroot, ExposedRoot"),
+        "{output}"
+    );
+}
+
+#[test]
+fn an_entity_named_all_is_imported_by_name_not_as_the_whole_host() {
+    // `IMPORT, ALL` and `IMPORT :: All` are different productions. Only the
+    // comma marks the host-access form, so the second names one entity that
+    // happens to be spelled `all` and leaves the rest of the host invisible.
+    let source = b"module Host\ninteger :: All, OtherName\ncontains\nsubroutine Named\nimport :: All\nprint *, all, othername\nend subroutine Named\nsubroutine Everything\nimport, all\nprint *, all, othername\nend subroutine Everything\nend module Host\n";
+    let output = String::from_utf8(normalize(
+        source,
+        [(Path::new("host.f90"), source.as_slice())],
+    ))
+    .unwrap();
+    assert!(output.contains("print *, All, othername"), "{output}");
+    assert!(output.contains("print *, All, OtherName"), "{output}");
+}
+
+#[test]
+fn duplicate_module_definitions_that_disagree_on_a_reexport_are_ambiguous() {
+    // Both copies of `Utils` re-export the same remote entity under different
+    // spellings. Resolving them must not share one traversal: the first copy's
+    // visit to (Base, RemoteName) would otherwise read as a cycle for the
+    // second and hide the disagreement.
+    let base = b"module Base\ninteger :: RemoteName\nend module Base\n";
+    let one = b"module Utils\nuse Base, only: AliasName => RemoteName\nend module Utils\n";
+    let two = b"module Utils\nuse Base, only: ALIASNAME => RemoteName\nend module Utils\n";
+    let target = b"program p\nuse Utils\nimplicit none\nprint *, aliasname\nend program p\n";
+    let output = String::from_utf8(normalize(
+        target,
+        [
+            (Path::new("base.f90"), base.as_slice()),
+            (Path::new("utils_a.f90"), one.as_slice()),
+            (Path::new("utils_b.f90"), two.as_slice()),
+            (Path::new("target.f90"), target.as_slice()),
+        ],
+    ))
+    .unwrap();
+    assert!(output.contains("print *, aliasname"), "{output}");
+}
+
+#[test]
+fn duplicate_module_definitions_that_agree_on_a_reexport_still_answer() {
+    let base = b"module Base\ninteger :: RemoteName\nend module Base\n";
+    let copy = b"module Utils\nuse Base, only: AliasName => RemoteName\nend module Utils\n";
+    let target = b"program p\nuse Utils\nimplicit none\nprint *, aliasname\nend program p\n";
+    let output = String::from_utf8(normalize(
+        target,
+        [
+            (Path::new("base.f90"), base.as_slice()),
+            (Path::new("utils_a.f90"), copy.as_slice()),
+            (Path::new("utils_b.f90"), copy.as_slice()),
+            (Path::new("target.f90"), target.as_slice()),
+        ],
+    ))
+    .unwrap();
+    assert!(output.contains("print *, AliasName"), "{output}");
+}
+
+#[test]
+fn an_edited_buffer_keeps_the_declarations_its_include_contributes() {
+    // The context caches an expansion per path *and* source fingerprint, so an
+    // unsaved editor edit matches no entry. Falling back to unexpanded local
+    // facts would drop the fragment's declarations, making a file resolve
+    // differently for no reason but being dirty.
+    let root = scratch_root("edited-include");
+    let saved = b"program p\ninclude 'defs.inc'\nprint *, valuecase\nend program p\n";
+    let target_path = root.join("target.f90");
+    std::fs::write(root.join("defs.inc"), b"integer :: ValueCase\n").unwrap();
+    std::fs::write(&target_path, saved).unwrap();
+
+    let project = analyze_project([(target_path.as_path(), saved.as_slice())]).unwrap();
+    let edited =
+        b"program p\ninclude 'defs.inc'\nprint *, valuecase\n! an unsaved edit\nend program p\n";
+    let output = String::from_utf8(
+        project
+            .format_source_at(
+                &target_path,
+                edited,
+                &FormatConfig {
+                    mode: FormatMode::NormalizeOnly,
+                    ..FormatConfig::default()
+                },
+            )
+            .unwrap()
+            .bytes,
+    )
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(output.contains("print *, ValueCase"), "{output}");
+}
+
+#[test]
+fn a_module_defined_inside_an_include_fragment_is_a_project_module() {
+    // A fragment is not always a list of declarations. The units it defines
+    // cannot join the including file's scope tree, because their line numbers
+    // index the fragment, but a module among them exists all the same.
+    let root = scratch_root("include-module");
+    let target = b"include 'held.inc'\nprogram p\nuse Held\nimplicit none\nprint *, valuecase\nend program p\n";
+    let target_path = root.join("target.f90");
+    std::fs::write(
+        root.join("held.inc"),
+        b"module Held\ninteger :: ValueCase\nend module Held\n",
+    )
+    .unwrap();
+    std::fs::write(&target_path, target).unwrap();
+
+    let output = String::from_utf8(normalize(
+        target,
+        [(target_path.as_path(), target.as_slice())],
+    ))
+    .unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(output.contains("print *, ValueCase"), "{output}");
+}

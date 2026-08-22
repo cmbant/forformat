@@ -33,6 +33,14 @@ pub struct FileFacts {
     /// Program-unit/construct-owned declarations and USE associations. Scope
     /// indices are those of the ScopeTree used for extraction.
     pub(crate) units: HashMap<usize, UnitFacts>,
+    /// Whole program units defined inside a textually included fragment.
+    ///
+    /// These are deliberately outside `units`: their scope indices and line
+    /// ranges belong to the fragment's own coordinate space, so grafting them
+    /// into this file's scope tree would alias unrelated lines. A module
+    /// defined in a fragment is still a real project entity, and this is what
+    /// carries it to registration.
+    pub(crate) included_units: Vec<UnitFacts>,
     /// Fortran INCLUDE statements, resolved by project construction where a
     /// source path is available.
     pub(crate) includes: Vec<IncludeDirective>,
@@ -67,6 +75,8 @@ impl FileFacts {
             }
         }
         self.includes.extend(other.includes.iter().cloned());
+        self.included_units
+            .extend(other.included_units.iter().cloned());
     }
 
     /// The narrowest unit covering `line`.
@@ -149,6 +159,28 @@ impl FileFacts {
         if let Some(host) = self.units.get_mut(&host_scope) {
             host.merge_fragment(&fragment);
         }
+
+        // A fragment is not always a list of declarations: it can define whole
+        // program units. Those cannot join this file's scope tree, but a module
+        // among them exists as surely as one written inline, so keep them for
+        // project registration. Scope order rather than map order, so what is
+        // registered does not depend on hashing.
+        let mut nested = included
+            .units
+            .keys()
+            .copied()
+            .filter(|scope| *scope != 0)
+            .collect::<Vec<_>>();
+        nested.sort_unstable();
+        self.included_units.extend(
+            nested
+                .into_iter()
+                .map(|scope| included.units[&scope].clone()),
+        );
+        // `included` has already absorbed its own fragments, so this carries
+        // program units from deeper in a nested include chain.
+        self.included_units
+            .extend(included.included_units.iter().cloned());
 
         // Type members and inheritance are owner-qualified and remain useful
         // wherever the included type is visible. Root variable/type visibility

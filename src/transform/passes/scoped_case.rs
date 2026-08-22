@@ -28,8 +28,10 @@ use crate::{
 use std::{collections::HashMap, ops::Range};
 
 pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
-    let mut changed = case_pass::declared(document, cx)?;
+    // Both passes classify against the same declared names, so the index is
+    // built once and lent to the base pass rather than computed twice.
     let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
+    let mut changed = case_pass::declared_with_names(document, cx, &declared_names)?;
     let mut line_edits: Vec<Vec<(Range<usize>, Vec<u8>)>> = vec![Vec::new(); document.lines.len()];
     let mut associate_stack: Vec<HashMap<Vec<u8>, Vec<u8>>> = Vec::new();
 
@@ -37,13 +39,6 @@ pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, Fo
         for statement in &group.statements {
             let tokens = tokenize(&statement.text, &mut LexState::default());
             let opening_aliases = associate_opening_aliases(&tokens);
-            // Innermost last, so a nested construct that reuses an outer
-            // alias name governs the uses inside it.
-            let active_aliases = associate_stack
-                .iter()
-                .flat_map(|frame| frame.iter())
-                .map(|(name, spelling)| (name.clone(), spelling.clone()))
-                .collect::<HashMap<_, _>>();
 
             for (index, token) in tokens.iter().enumerate() {
                 if token.kind != TokenKind::Name || cx.project.macros.contains(token.text) {
@@ -59,7 +54,7 @@ pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, Fo
                     line,
                     &declared_names,
                     cx,
-                    &active_aliases,
+                    &associate_stack,
                     opening_aliases.as_ref(),
                 );
                 let replacement = match decision {
@@ -124,7 +119,7 @@ fn scoped_spelling(
     line: usize,
     declared_names: &DeclaredNameIndex,
     cx: &PassContext,
-    active_aliases: &HashMap<Vec<u8>, Vec<u8>>,
+    enclosing_aliases: &[HashMap<Vec<u8>, Vec<u8>>],
     opening_aliases: Option<&HashMap<Vec<u8>, Vec<u8>>>,
 ) -> Decision {
     let token = &tokens[index];
@@ -140,7 +135,7 @@ fn scoped_spelling(
     }
 
     if preceded_by_percent(tokens, index) {
-        return scoped_member_spelling(tokens, index, line, cx, active_aliases);
+        return scoped_member_spelling(tokens, index, line, cx, enclosing_aliases);
     }
 
     // The ASSOCIATE statement is the alias's declaration and the alias is
@@ -150,12 +145,8 @@ fn scoped_spelling(
     // recorded nowhere -- so without this a use spelled differently from the
     // alias falls through to `Decision::Restore` and stays as authored, and a
     // same-named module entity elsewhere in the project could claim it.
-    let lower = token.text.to_ascii_lowercase();
-    if let Some(spelling) = opening_aliases
-        .and_then(|aliases| aliases.get(&lower))
-        .or_else(|| active_aliases.get(&lower))
-    {
-        return Decision::Replace(spelling.clone());
+    if let Some(spelling) = alias_spelling(opening_aliases, enclosing_aliases, token.text) {
+        return Decision::Replace(spelling.to_vec());
     }
 
     if is_type_spec_name(tokens, index) {
@@ -198,7 +189,7 @@ fn scoped_member_spelling(
     index: usize,
     line: usize,
     cx: &PassContext,
-    active_aliases: &HashMap<Vec<u8>, Vec<u8>>,
+    enclosing_aliases: &[HashMap<Vec<u8>, Vec<u8>>],
 ) -> Decision {
     let Some(names) = component_owner_names(tokens, index, true) else {
         return Decision::KeepBase;
@@ -207,8 +198,10 @@ fn scoped_member_spelling(
         return Decision::KeepBase;
     };
     // An alias has no entry in the type graph, so a member reached through one
-    // cannot be resolved and must keep whatever the base pass decided.
-    if active_aliases.contains_key(&root.to_ascii_lowercase()) {
+    // cannot be resolved and must keep whatever the base pass decided. Only
+    // enclosing constructs count: Fortran evaluates a selector in the scope
+    // outside its own ASSOCIATE, where the alias is not yet visible.
+    if alias_spelling(None, enclosing_aliases, root).is_some() {
         return Decision::KeepBase;
     }
 
@@ -393,6 +386,28 @@ fn is_declaration_entity(tokens: &[Token<'_>], index: usize) -> bool {
         }
     }
     !initializer && array_depth == 0 && tokens[index].depth == 0
+}
+
+/// The spelling an ASSOCIATE construct gave `name`, or `None` if none did.
+///
+/// `opening` is the statement's own construct, which governs its alias list;
+/// `enclosing` is the stack of constructs already open, searched innermost
+/// first so a nested construct that reuses an outer alias name governs the uses
+/// inside it. Lowercasing is deferred until there is a frame to search: nearly
+/// every file has no ASSOCIATE at all, and this runs on every name token.
+fn alias_spelling<'a>(
+    opening: Option<&'a HashMap<Vec<u8>, Vec<u8>>>,
+    enclosing: &'a [HashMap<Vec<u8>, Vec<u8>>],
+    name: &[u8],
+) -> Option<&'a [u8]> {
+    if opening.is_none_or(HashMap::is_empty) && enclosing.iter().all(HashMap::is_empty) {
+        return None;
+    }
+    let lower = name.to_ascii_lowercase();
+    opening
+        .and_then(|frame| frame.get(&lower))
+        .or_else(|| enclosing.iter().rev().find_map(|frame| frame.get(&lower)))
+        .map(Vec::as_slice)
 }
 
 /// The aliases one ASSOCIATE statement introduces, keyed by their lowercased

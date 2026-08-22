@@ -22,7 +22,10 @@ impl ProjectContext {
         if !config.mode.normalizes() {
             return super::engine::format(source, config);
         }
-        let local = analyze_file_at(path, source)?;
+        // Expanding here rather than trusting the context's cache is what keeps
+        // an edited buffer equivalent to the saved one: the cache is keyed by
+        // source fingerprint, and an unsaved edit matches no entry.
+        let local = self.expand_uncached(path, analyze_file_at(path, source)?);
         super::full::format_with_context_and_local(source, self, &local, config)
     }
 }
