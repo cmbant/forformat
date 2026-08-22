@@ -14,7 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Apply staged review fix
-        run: base64 -d .review-fix2.patch.gz.b64 | gzip -d | git apply
+        run: base64 -d .review-fix3.patch.gz.b64 | gzip -d | git apply
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ matrix.toolchain }}
