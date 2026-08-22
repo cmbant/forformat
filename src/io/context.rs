@@ -6,7 +6,7 @@
 
 use super::{sources::Source, WorkflowError};
 use crate::{
-    analysis::{analyze_file_at, FileFacts, ProjectContext},
+    analysis::{analyze_file_at, project::absorb_analyzed, FileFacts, ProjectContext},
     format_source, FormatResult,
 };
 use std::{
@@ -41,15 +41,19 @@ pub(super) fn project_context(
 ) -> ProjectContext {
     // Source facts are extracted once for the invocation, then reused both to
     // build project tables and as target-local precedence data during format.
+    // Bulk absorption shares one INCLUDE fragment cache across every source.
     let mut context = ProjectContext::empty();
-    for &index in indices {
-        context.absorb(
-            &sources[index].path,
-            facts[index]
-                .as_ref()
-                .expect("every project source must have precomputed facts"),
-        );
-    }
+    absorb_analyzed(
+        &mut context,
+        indices.iter().map(|&index| {
+            (
+                sources[index].path.as_path(),
+                facts[index]
+                    .as_ref()
+                    .expect("every project source must have precomputed facts"),
+            )
+        }),
+    );
     // A file-valued --project-context makes stdin the current version of that
     // tracked source. Its already-extracted facts replace the stale disk copy.
     if let Some((path, local)) = stdin_source {

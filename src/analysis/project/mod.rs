@@ -11,7 +11,10 @@ use super::{
     declarations::{FileFacts, UnitFacts},
     names::{CaseMap, CaseTables},
 };
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 mod context;
 mod includes;
@@ -20,6 +23,13 @@ mod visibility;
 
 pub use includes::{analyze_file, analyze_file_at, analyze_project};
 pub(crate) use type_resolution::ResolvedType;
+
+pub(crate) fn absorb_analyzed<'a, I>(context: &mut ProjectContext, sources: I)
+where
+    I: IntoIterator<Item = (&'a Path, &'a FileFacts)>,
+{
+    includes::absorb_analyzed(context, sources);
+}
 
 /// The union of every project source's declarations, plus module export facts
 /// used to build the namespace visible from each formatting target.

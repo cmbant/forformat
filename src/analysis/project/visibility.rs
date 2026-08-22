@@ -152,19 +152,16 @@ impl ProjectContext {
         None
     }
 
-    /// Resolve a name written inside a USE list. Rename targets are visible on
-    /// the USE statement even though the remote name is hidden by the rename
-    /// everywhere else in the importing scope.
+    /// Resolve a remote identifier written inside one USE statement against the
+    /// module named by that statement. Other USE associations in the same unit
+    /// are irrelevant even when they export a same-spelled entity.
     pub(crate) fn visible_use_symbol_spelling(
         &self,
-        local: &FileFacts,
-        line: usize,
+        module: &[u8],
         name: &[u8],
     ) -> Option<Vec<u8>> {
-        let local = self.expanded(local);
-        let unit = local.unit_chain(line).into_iter().next()?;
         let mut visited = HashSet::new();
-        self.imported_symbol(&unit.imports, name, true, None, &mut visited)
+        self.module_export_symbol(module, name, &mut visited)
             .into_option()
     }
 

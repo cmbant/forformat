@@ -121,6 +121,58 @@ fn analyze_file_with_path(path: Option<&Path>, source: &[u8]) -> Result<FileFact
     Ok(facts)
 }
 
+/// Fold a batch of already-analyzed project sources into one context while
+/// sharing INCLUDE fragment analysis across the whole batch.
+///
+/// A candidate that is itself one of the supplied sources is cloned from the
+/// precomputed facts. Other candidates are loaded at most once, including
+/// nested INCLUDEs and failed lookups, and their cached facts are then reused
+/// by every including source.
+pub(super) fn absorb_analyzed<'a, I>(context: &mut ProjectContext, sources: I)
+where
+    I: IntoIterator<Item = (&'a Path, &'a FileFacts)>,
+{
+    absorb_analyzed_with(context, sources, &mut |candidate| {
+        fs::read(candidate)
+            .ok()
+            .and_then(|source| analyze_file_at(candidate, &source).ok())
+    });
+}
+
+fn absorb_analyzed_with<'a, I>(
+    context: &mut ProjectContext,
+    sources: I,
+    loader: &mut impl FnMut(&Path) -> Option<FileFacts>,
+) where
+    I: IntoIterator<Item = (&'a Path, &'a FileFacts)>,
+{
+    let analyzed = sources.into_iter().collect::<Vec<_>>();
+    let mut lookup = HashMap::with_capacity(analyzed.len());
+    for (index, &(path, _)) in analyzed.iter().enumerate() {
+        lookup.insert(normalize_path(path), index);
+    }
+
+    // One fragment is typically included by many sources, and a nested include
+    // tree multiplies that again. Analyze each fragment once and hand out
+    // copies. `expand_includes_with` normalizes before it asks, so the candidate
+    // path is already the cache key.
+    let mut fragments: HashMap<PathBuf, Option<FileFacts>> = HashMap::new();
+    for &(path, facts) in &analyzed {
+        let expanded = expand_includes_with(path, facts, &mut |candidate| {
+            fragments
+                .entry(candidate.to_path_buf())
+                .or_insert_with(|| {
+                    lookup
+                        .get(candidate)
+                        .map(|index| (*analyzed[*index].1).clone())
+                        .or_else(|| loader(candidate))
+                })
+                .clone()
+        });
+        context.absorb_expanded(path, facts, expanded);
+    }
+}
+
 /// Build a project context from every source in the project.
 ///
 /// The source list is analyzed once up front. INCLUDE resolution first uses
@@ -135,39 +187,55 @@ where
         .map(|(path, source)| (path.to_path_buf(), source))
         .collect::<Vec<_>>();
     let mut analyzed = Vec::with_capacity(inputs.len());
-    // Index into `analyzed` rather than a second copy of the facts: only the
-    // sources some file actually INCLUDEs are ever cloned out of it.
-    let mut lookup = HashMap::with_capacity(inputs.len());
     for (path, source) in &inputs {
-        let facts = analyze_file_at(path, source)?;
-        lookup.insert(normalize_path(path), analyzed.len());
-        analyzed.push((path.clone(), facts));
+        analyzed.push((path.clone(), analyze_file_at(path, source)?));
     }
 
     let mut context = ProjectContext::empty();
-    // One fragment is typically included by many sources, and a nested include
-    // tree multiplies that again. Analyze each fragment once and hand out
-    // copies, so a shared `constants.inc` is not re-read and re-tokenized once
-    // per including file. `expand_includes_with` normalizes before it asks, so
-    // the path it passes is already the cache key.
-    let mut fragments: HashMap<PathBuf, Option<FileFacts>> = HashMap::new();
-    for (path, facts) in &analyzed {
-        let expanded = expand_includes_with(path, facts, &mut |candidate| {
-            fragments
-                .entry(candidate.to_path_buf())
-                .or_insert_with(|| {
-                    lookup
-                        .get(&normalize_path(candidate))
-                        .map(|index| analyzed[*index].1.clone())
-                        .or_else(|| {
-                            fs::read(candidate)
-                                .ok()
-                                .and_then(|source| analyze_file_at(candidate, &source).ok())
-                        })
-                })
-                .clone()
-        });
-        context.absorb_expanded(path, facts, expanded);
-    }
+    absorb_analyzed(
+        &mut context,
+        analyzed
+            .iter()
+            .map(|(path, facts)| (path.as_path(), facts)),
+    );
     Ok(context)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{absorb_analyzed_with, analyze_file_at, ProjectContext};
+    use std::path::Path;
+
+    #[test]
+    fn bulk_absorption_caches_shared_include_analysis() {
+        let first = analyze_file_at(
+            Path::new("first.f90"),
+            b"program First\ninclude 'shared.inc'\nend program First\n",
+        )
+        .unwrap();
+        let second = analyze_file_at(
+            Path::new("second.f90"),
+            b"program Second\ninclude 'shared.inc'\nend program Second\n",
+        )
+        .unwrap();
+        let shared = analyze_file_at(Path::new("shared.inc"), b"integer :: SharedCase\n").unwrap();
+        let mut loads = 0usize;
+        let mut context = ProjectContext::empty();
+
+        absorb_analyzed_with(
+            &mut context,
+            [
+                (Path::new("first.f90"), &first),
+                (Path::new("second.f90"), &second),
+            ],
+            &mut |candidate| {
+                loads += 1;
+                assert_eq!(candidate, Path::new("shared.inc"));
+                Some(shared.clone())
+            },
+        );
+
+        assert_eq!(loads, 1);
+        assert_eq!(context.sources.len(), 2);
+    }
 }

@@ -55,7 +55,6 @@ pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, Fo
                     &declared_names,
                     cx,
                     &associate_stack,
-                    opening_aliases.as_ref(),
                 );
                 let replacement = match decision {
                     Decision::KeepBase => continue,
@@ -120,7 +119,6 @@ fn scoped_spelling(
     declared_names: &DeclaredNameIndex,
     cx: &PassContext,
     enclosing_aliases: &[HashMap<Vec<u8>, Vec<u8>>],
-    opening_aliases: Option<&HashMap<Vec<u8>, Vec<u8>>>,
 ) -> Decision {
     let token = &tokens[index];
 
@@ -128,9 +126,32 @@ fn scoped_spelling(
         || (index > 0 && is_end_construct_keyword(tokens, index - 1))
         || named_end_space(tokens, index)
         || scope_header(tokens, index)
-        || is_use_module(tokens, index)
-        || is_declaration_entity(tokens, index)
     {
+        return Decision::KeepBase;
+    }
+
+    // A remote identifier in a USE statement belongs to that statement's
+    // module, not to the union of every USE association in the active unit.
+    // Handle USE before the generic `::` declaration heuristic as the optional
+    // double colon is part of normal USE syntax too.
+    if let Some(module_index) = use_module_index(tokens) {
+        if index <= module_index || is_use_only_keyword(tokens, index) {
+            return Decision::KeepBase;
+        }
+        // A rename's left-hand name is declared by this USE statement. Its own
+        // authored spelling governs the local alias; only the right-hand remote
+        // name is resolved through the named module.
+        if is_use_rename_local(tokens, index) {
+            return Decision::Restore;
+        }
+        return cx
+            .project
+            .visible_use_symbol_spelling(tokens[module_index].text, token.text)
+            .map(Decision::Replace)
+            .unwrap_or(Decision::Restore);
+    }
+
+    if is_declaration_entity(tokens, index) {
         return Decision::KeepBase;
     }
 
@@ -138,14 +159,18 @@ fn scoped_spelling(
         return scoped_member_spelling(tokens, index, line, cx, enclosing_aliases);
     }
 
-    // The ASSOCIATE statement is the alias's declaration and the alias is
-    // invisible outside its construct, so no project-wide evidence governs it:
-    // every use inside the block takes the spelling the construct gave it.
-    // Neither pass can find that spelling in a declaration table -- an alias is
-    // recorded nowhere -- so without this a use spelled differently from the
-    // alias falls through to `Decision::Restore` and stays as authored, and a
-    // same-named module entity elsewhere in the project could claim it.
-    if let Some(spelling) = alias_spelling(opening_aliases, enclosing_aliases, token.text) {
+    // The alias declaration itself belongs to the opening ASSOCIATE statement,
+    // but its selector is evaluated in the surrounding scope. Restore the
+    // declaration token exactly as authored; the new alias is pushed onto the
+    // stack only after every selector token on this statement has been handled.
+    if is_associate_alias_declaration(tokens, index) {
+        return Decision::Restore;
+    }
+
+    // Only aliases from already-open constructs are visible here. The current
+    // opening ASSOCIATE is deliberately absent: its associate names govern the
+    // block, not the selectors that establish those associations.
+    if let Some(spelling) = alias_spelling(enclosing_aliases, token.text) {
         return Decision::Replace(spelling.to_vec());
     }
 
@@ -164,14 +189,10 @@ fn scoped_spelling(
         return Decision::KeepBase;
     }
 
-    let scoped = if is_use_statement(tokens) {
-        cx.project
-            .visible_use_symbol_spelling(cx.local, line, token.text)
-    } else {
-        cx.project
-            .visible_symbol_spelling(cx.local, line, token.text)
-    };
-    if let Some(spelling) = scoped {
+    if let Some(spelling) = cx
+        .project
+        .visible_symbol_spelling(cx.local, line, token.text)
+    {
         return Decision::Replace(spelling);
     }
 
@@ -201,7 +222,7 @@ fn scoped_member_spelling(
     // cannot be resolved and must keep whatever the base pass decided. Only
     // enclosing constructs count: Fortran evaluates a selector in the scope
     // outside its own ASSOCIATE, where the alias is not yet visible.
-    if alias_spelling(None, enclosing_aliases, root).is_some() {
+    if alias_spelling(enclosing_aliases, root).is_some() {
         return Decision::KeepBase;
     }
 
@@ -283,12 +304,12 @@ fn is_type_spec_name(tokens: &[Token<'_>], index: usize) -> bool {
         && (tokens[index - 2].is_name(b"type") || tokens[index - 2].is_name(b"class"))
 }
 
-fn is_use_module(tokens: &[Token<'_>], index: usize) -> bool {
-    let Some(use_index) = tokens.iter().position(|token| token.is_name(b"use")) else {
-        return false;
-    };
-    if index <= use_index {
-        return false;
+fn use_module_index(tokens: &[Token<'_>]) -> Option<usize> {
+    let use_index = tokens
+        .iter()
+        .position(|token| token.kind != TokenKind::Number)?;
+    if !tokens[use_index].is_name(b"use") {
+        return None;
     }
     let mut cursor = use_index + 1;
     if tokens
@@ -298,21 +319,30 @@ fn is_use_module(tokens: &[Token<'_>], index: usize) -> bool {
         while cursor < tokens.len() && tokens[cursor].text != b"::" {
             cursor += 1;
         }
+        if cursor == tokens.len() {
+            return None;
+        }
         cursor += 1;
     } else if tokens.get(cursor).is_some_and(|token| token.text == b"::") {
         cursor += 1;
     }
     tokens
         .get(cursor)
-        .is_some_and(|token| token.kind == TokenKind::Name)
-        && cursor == index
+        .filter(|token| token.kind == TokenKind::Name)
+        .map(|_| cursor)
 }
 
-fn is_use_statement(tokens: &[Token<'_>]) -> bool {
-    tokens
-        .iter()
-        .find(|token| token.kind != TokenKind::Number)
-        .is_some_and(|token| token.is_name(b"use"))
+fn is_use_only_keyword(tokens: &[Token<'_>], index: usize) -> bool {
+    tokens[index].is_name(b"only")
+        && tokens.get(index + 1).is_some_and(|token| {
+            token.text == b":" && token.depth == tokens[index].depth
+        })
+}
+
+fn is_use_rename_local(tokens: &[Token<'_>], index: usize) -> bool {
+    tokens.get(index + 1).is_some_and(|token| {
+        token.text == b"=>" && token.depth == tokens[index].depth
+    })
 }
 
 fn is_external_reference(tokens: &[Token<'_>], index: usize) -> bool {
@@ -388,25 +418,44 @@ fn is_declaration_entity(tokens: &[Token<'_>], index: usize) -> bool {
     !initializer && array_depth == 0 && tokens[index].depth == 0
 }
 
-/// The spelling an ASSOCIATE construct gave `name`, or `None` if none did.
+fn is_associate_alias_declaration(tokens: &[Token<'_>], index: usize) -> bool {
+    let Some(associate) = tokens
+        .iter()
+        .position(|token| token.is_name(b"associate"))
+    else {
+        return false;
+    };
+    let Some(open) = tokens
+        .get(associate + 1)
+        .filter(|token| token.kind == TokenKind::LParen)
+    else {
+        return false;
+    };
+    tokens[index].depth == open.depth + 1
+        && tokens.get(index + 1).is_some_and(|token| {
+            token.text == b"=>" && token.depth == tokens[index].depth
+        })
+}
+
+/// The spelling an already-open ASSOCIATE construct gave `name`, or `None` if
+/// no enclosing construct declared it.
 ///
-/// `opening` is the statement's own construct, which governs its alias list;
-/// `enclosing` is the stack of constructs already open, searched innermost
-/// first so a nested construct that reuses an outer alias name governs the uses
-/// inside it. Lowercasing is deferred until there is a frame to search: nearly
-/// every file has no ASSOCIATE at all, and this runs on every name token.
+/// Frames are searched innermost first so a nested construct that reuses an
+/// outer alias name governs uses inside it. Lowercasing is deferred until there
+/// is a frame to search: nearly every file has no ASSOCIATE at all, and this
+/// runs on every name token.
 fn alias_spelling<'a>(
-    opening: Option<&'a HashMap<Vec<u8>, Vec<u8>>>,
     enclosing: &'a [HashMap<Vec<u8>, Vec<u8>>],
     name: &[u8],
 ) -> Option<&'a [u8]> {
-    if opening.is_none_or(HashMap::is_empty) && enclosing.iter().all(HashMap::is_empty) {
+    if enclosing.iter().all(HashMap::is_empty) {
         return None;
     }
     let lower = name.to_ascii_lowercase();
-    opening
-        .and_then(|frame| frame.get(&lower))
-        .or_else(|| enclosing.iter().rev().find_map(|frame| frame.get(&lower)))
+    enclosing
+        .iter()
+        .rev()
+        .find_map(|frame| frame.get(&lower))
         .map(Vec::as_slice)
 }
 
