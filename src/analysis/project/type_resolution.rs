@@ -2,7 +2,7 @@ use super::{
     visibility::{export_entity_is_public, export_route_is_public, merge_definitions, Visibility},
     ProjectContext,
 };
-use crate::analysis::declarations::{FileFacts, HostUnit, UnitFacts, UseAssociation};
+use crate::analysis::declarations::{FileFacts, HostUnit, ModuleNature, UnitFacts, UseAssociation};
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -71,11 +71,12 @@ impl ProjectContext {
     pub(crate) fn visible_member_spelling(
         &self,
         local: &FileFacts,
+        line: usize,
         owner: &ResolvedType,
         name: &[u8],
     ) -> Option<Vec<u8>> {
         let local = self.expanded(local);
-        self.member_spelling_from_type(local, owner, name, &mut HashSet::new())
+        self.member_spelling_from_type(local, line, owner, name, &mut HashSet::new())
     }
 
     /// Resolve the derived type of one component while preserving the component
@@ -83,11 +84,12 @@ impl ProjectContext {
     pub(crate) fn visible_component_type(
         &self,
         local: &FileFacts,
+        line: usize,
         owner: &ResolvedType,
         name: &[u8],
     ) -> Option<ResolvedType> {
         let local = self.expanded(local);
-        self.component_type_from_type(local, owner, name, &mut HashSet::new())
+        self.component_type_from_type(local, line, owner, name, &mut HashSet::new())
     }
 
     fn host_origin(host: &HostUnit) -> TypeOrigin {
@@ -200,6 +202,9 @@ impl ProjectContext {
     ) -> Visibility<ResolvedType> {
         let mut resolved = Visibility::Absent;
         for association in imports {
+            if association.nature == ModuleNature::Intrinsic {
+                continue;
+            }
             if exporting_unit.is_some_and(|unit| !export_route_is_public(unit, name, association)) {
                 continue;
             }
@@ -223,6 +228,9 @@ impl ProjectContext {
     ) -> Visibility<ResolvedType> {
         let mut resolved = Visibility::Absent;
         for association in imports {
+            if association.nature == ModuleNature::Intrinsic {
+                continue;
+            }
             if exporting_unit.is_some_and(|unit| !export_route_is_public(unit, name, association)) {
                 continue;
             }
@@ -437,9 +445,62 @@ impl ProjectContext {
         }
     }
 
+    fn member_accessible(
+        &self,
+        local: &FileFacts,
+        line: usize,
+        unit: &UnitFacts,
+        owner: &ResolvedType,
+        name: &[u8],
+    ) -> bool {
+        let Some(access) = unit.member_access.get(&owner.name) else {
+            return true;
+        };
+        if access.is_public(name) {
+            return true;
+        }
+        self.requester_is_owner(local, line, &owner.origin)
+    }
+
+    fn requester_is_owner(&self, local: &FileFacts, line: usize, origin: &TypeOrigin) -> bool {
+        if matches!(origin, TypeOrigin::Local(_)) {
+            return true;
+        }
+        let mut current = local.active_unit(line).map(|unit| unit.scope);
+        while let Some(scope) = current {
+            let Some(unit) = local.units.get(&scope) else {
+                break;
+            };
+            let matches = match origin {
+                TypeOrigin::Local(owner_scope) => *owner_scope == scope,
+                TypeOrigin::Module(module) => {
+                    unit.project_host.as_ref() == Some(&HostUnit::Module(module.clone()))
+                        || match unit.semantic_host.as_ref() {
+                            Some(HostUnit::Module(host)) => host == module,
+                            Some(HostUnit::Submodule { ancestor, .. }) => ancestor == module,
+                            None => false,
+                        }
+                }
+                TypeOrigin::Submodule { ancestor, name } => {
+                    unit.project_host.as_ref()
+                        == Some(&HostUnit::Submodule {
+                            ancestor: ancestor.clone(),
+                            name: name.clone(),
+                        })
+                }
+            };
+            if matches {
+                return true;
+            }
+            current = unit.parent;
+        }
+        false
+    }
+
     fn member_spelling_from_type(
         &self,
         local: &FileFacts,
+        line: usize,
         owner: &ResolvedType,
         name: &[u8],
         visited: &mut HashSet<ResolvedType>,
@@ -450,7 +511,7 @@ impl ProjectContext {
         let mut resolved = Visibility::Absent;
         for unit in self.type_units(local, owner) {
             resolved.merge(
-                self.member_spelling_from_unit(local, unit, owner, name, visited)
+                self.member_spelling_from_unit(local, line, unit, owner, name, visited)
                     .map_or(Visibility::Absent, Visibility::Value),
             );
         }
@@ -460,18 +521,25 @@ impl ProjectContext {
     fn member_spelling_from_unit(
         &self,
         local: &FileFacts,
+        line: usize,
         unit: &UnitFacts,
         owner: &ResolvedType,
         name: &[u8],
         visited: &mut HashSet<ResolvedType>,
     ) -> Option<Vec<u8>> {
         if unit.components.contains(&owner.name, name) {
+            if !self.member_accessible(local, line, unit, owner, name) {
+                return None;
+            }
             return unit
                 .components
                 .get(&owner.name, name)
                 .map(ToOwned::to_owned);
         }
         if unit.bound_type_procedures.contains(&owner.name, name) {
+            if !self.member_accessible(local, line, unit, owner, name) {
+                return None;
+            }
             return unit
                 .bound_type_procedures
                 .get(&owner.name, name)
@@ -481,6 +549,9 @@ impl ProjectContext {
             .generic_bound_type_procedures
             .contains(&owner.name, name)
         {
+            if !self.member_accessible(local, line, unit, owner, name) {
+                return None;
+            }
             return unit
                 .generic_bound_type_procedures
                 .get(&owner.name, name)
@@ -491,12 +562,13 @@ impl ProjectContext {
         }
         let parent_name = unit.type_graph.parent_type(&owner.name)?;
         let parent = self.resolve_type_from_origin(local, &owner.origin, parent_name)?;
-        self.member_spelling_from_type(local, &parent, name, visited)
+        self.member_spelling_from_type(local, line, &parent, name, visited)
     }
 
     fn component_type_from_type(
         &self,
         local: &FileFacts,
+        line: usize,
         owner: &ResolvedType,
         name: &[u8],
         visited: &mut HashSet<ResolvedType>,
@@ -507,7 +579,7 @@ impl ProjectContext {
         let mut resolved = Visibility::Absent;
         for unit in self.type_units(local, owner) {
             resolved.merge(
-                self.component_type_from_unit(local, unit, owner, name, visited)
+                self.component_type_from_unit(local, line, unit, owner, name, visited)
                     .map_or(Visibility::Absent, Visibility::Value),
             );
         }
@@ -517,12 +589,16 @@ impl ProjectContext {
     fn component_type_from_unit(
         &self,
         local: &FileFacts,
+        line: usize,
         unit: &UnitFacts,
         owner: &ResolvedType,
         name: &[u8],
         visited: &mut HashSet<ResolvedType>,
     ) -> Option<ResolvedType> {
         if unit.components.contains(&owner.name, name) {
+            if !self.member_accessible(local, line, unit, owner, name) {
+                return None;
+            }
             if unit
                 .type_graph
                 .direct_component_type_is_ambiguous(&owner.name, name)
@@ -537,6 +613,6 @@ impl ProjectContext {
         }
         let parent_name = unit.type_graph.parent_type(&owner.name)?;
         let parent = self.resolve_type_from_origin(local, &owner.origin, parent_name)?;
-        self.component_type_from_type(local, &parent, name, visited)
+        self.component_type_from_type(local, line, &parent, name, visited)
     }
 }

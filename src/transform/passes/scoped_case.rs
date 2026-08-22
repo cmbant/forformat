@@ -109,7 +109,10 @@ fn scoped_spelling(
             .visible_type_spelling(cx.local, line, name)
             .map(Decision::Replace)
             .unwrap_or(Decision::Restore),
-        CaseEvidence::Member { owner } => scoped_member_spelling(owner, name, line, cx),
+        CaseEvidence::Member {
+            owner,
+            resolved_owner,
+        } => scoped_member_spelling(owner, resolved_owner.as_ref(), name, line, cx),
         CaseEvidence::Symbol { allow_external } => {
             if let Some(spelling) = cx.project.visible_symbol_spelling(cx.local, line, name) {
                 return Decision::Replace(spelling);
@@ -126,21 +129,27 @@ fn scoped_spelling(
 
 fn scoped_member_spelling(
     names: &[Vec<u8>],
+    resolved_owner: Option<&ResolvedType>,
     name: &[u8],
     line: usize,
     cx: &PassContext,
 ) -> Decision {
-    let Some(root) = names.first() else {
-        return Decision::KeepBase;
-    };
-    let Some(current) = cx.project.visible_variable_type(cx.local, line, root) else {
-        return Decision::Restore;
-    };
-    let Some(owner) = resolve_component_owner(current, &names[1..], cx) else {
-        return Decision::Restore;
+    let owner = if let Some(owner) = resolved_owner {
+        owner.clone()
+    } else {
+        let Some(root) = names.first() else {
+            return Decision::KeepBase;
+        };
+        let Some(current) = cx.project.visible_variable_type(cx.local, line, root) else {
+            return Decision::Restore;
+        };
+        let Some(owner) = resolve_component_owner(current, &names[1..], line, cx) else {
+            return Decision::Restore;
+        };
+        owner
     };
     cx.project
-        .visible_member_spelling(cx.local, &owner, name)
+        .visible_member_spelling(cx.local, line, &owner, name)
         .map(Decision::Replace)
         .unwrap_or(Decision::Restore)
 }
@@ -148,12 +157,13 @@ fn scoped_member_spelling(
 fn resolve_component_owner(
     mut current: ResolvedType,
     links: &[Vec<u8>],
+    line: usize,
     cx: &PassContext,
 ) -> Option<ResolvedType> {
     for link in links {
         current = cx
             .project
-            .visible_component_type(cx.local, &current, link)?;
+            .visible_component_type(cx.local, line, &current, link)?;
     }
     Some(current)
 }

@@ -187,3 +187,11 @@ bits and updates a symlink target rather than replacing the link.
 - Any new post-layout width change must be included in emitted-width measurement.
 - A behavioral claim should be explained in terms of Fortran syntax or formatter invariants, not a
   private input tree.
+
+### Scope-analysis limitation
+
+Project-aware name normalization models program units, interfaces, derived types, `BLOCK`, and
+`ASSOCIATE` lexical scopes. `SELECT TYPE` and `SELECT RANK` branch associate-name refinement is not
+yet represented as a distinct branch scope. Code that depends on a branch-specific refined dynamic
+type is therefore left conservative when project resolution cannot prove a unique spelling; the
+formatter does not guess from unrelated same-named project types.

@@ -59,6 +59,14 @@ impl AccessFacts {
         self.default_access == Accessibility::Public
     }
 
+    pub(crate) fn is_public(&self, name: &[u8]) -> bool {
+        match self.explicit(name) {
+            Some(Accessibility::Public) => true,
+            Some(Accessibility::Private) => false,
+            None => self.default_is_public(),
+        }
+    }
+
     pub(crate) fn merge(&mut self, other: &Self) {
         if other.default_access == Accessibility::Private {
             self.default_access = Accessibility::Private;
@@ -172,9 +180,18 @@ pub(crate) struct UseTarget {
     pub(crate) alias_spelling: Option<Vec<u8>>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ModuleNature {
+    #[default]
+    Unspecified,
+    Intrinsic,
+    NonIntrinsic,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct UseAssociation {
     pub(crate) module: Vec<u8>,
+    pub(crate) nature: ModuleNature,
     pub(crate) only: bool,
     pub(crate) names: Vec<UseName>,
 }
@@ -224,6 +241,7 @@ pub(crate) struct UnitFacts {
     pub(crate) components: ComponentCaseMap,
     pub(crate) bound_type_procedures: ComponentCaseMap,
     pub(crate) generic_bound_type_procedures: ComponentCaseMap,
+    pub(crate) member_access: HashMap<Vec<u8>, AccessFacts>,
     pub(crate) type_graph: TypeMaps,
     pub(crate) variable_types: HashMap<Vec<u8>, Option<Vec<u8>>>,
     pub(crate) imports: Vec<UseAssociation>,
@@ -257,6 +275,7 @@ impl UnitFacts {
             components: ComponentCaseMap::default(),
             bound_type_procedures: ComponentCaseMap::default(),
             generic_bound_type_procedures: ComponentCaseMap::default(),
+            member_access: HashMap::default(),
             type_graph: TypeMaps::default(),
             variable_types: HashMap::default(),
             imports: Vec::new(),
@@ -292,6 +311,12 @@ impl UnitFacts {
             .merge(&other.bound_type_procedures);
         self.generic_bound_type_procedures
             .merge(&other.generic_bound_type_procedures);
+        for (owner, access) in &other.member_access {
+            self.member_access
+                .entry(owner.clone())
+                .or_default()
+                .merge(access);
+        }
         self.type_graph.merge_non_roots(&other.type_graph);
         for (name, type_name) in &other.variable_types {
             match type_name {

@@ -4,9 +4,6 @@ on:
   push:
   pull_request:
 
-permissions:
-  contents: write
-
 jobs:
   checks:
     uses: ./.github/workflows/rust-checks.yml

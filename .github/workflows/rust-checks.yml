@@ -13,20 +13,6 @@ jobs:
         toolchain: ["1.85.0", stable]
     steps:
       - uses: actions/checkout@v5
-        with:
-          ref: review-fix-staging
-      - name: Apply staged review fix
-        run: |
-          base64 -d .review-fix2.patch.gz.b64 | gzip -d | git apply
-          python - <<'PY'
-          from pathlib import Path
-          p=Path('src/analysis/declarations/extract.rs'); s=p.read_text().replace('    let Some(first) = tokens.iter().position(|token| token.kind != TokenKind::Number) else {\n        return;\n    };','    let Some(first) = tokens\n        .iter()\n        .position(|token| token.kind != TokenKind::Number)\n    else {\n        return;\n    };').replace('    let member_access = unit.member_access.entry(owner.to_ascii_lowercase()).or_default();','    let member_access = unit\n        .member_access\n        .entry(owner.to_ascii_lowercase())\n        .or_default();'); p.write_text(s)
-          p=Path('src/analysis/declarations/units.rs'); s=p.read_text().replace('            self.member_access.entry(owner.clone()).or_default().merge(access);','            self.member_access\n                .entry(owner.clone())\n                .or_default()\n                .merge(access);'); p.write_text(s)
-          p=Path('src/analysis/declarations.rs'); s=p.read_text().replace('pub(crate) use units::{Accessibility, HostAccess, HostUnit, ModuleNature, UnitFacts, UseAssociation, UseName};','pub(crate) use units::{\n    Accessibility, HostAccess, HostUnit, ModuleNature, UnitFacts, UseAssociation, UseName,\n};'); p.write_text(s)
-          p=Path('src/analysis/project/visibility.rs'); s=p.read_text().replace('Accessibility, FileFacts, HostUnit, UnitFacts, ModuleNature, UseAssociation','Accessibility, FileFacts, HostUnit, ModuleNature, UnitFacts, UseAssociation'); p.write_text(s)
-          p=Path('src/io/mod.rs'); s=p.read_text().replace('    analysis::{analyze_file, analyze_file_at}, cli::Invocation, error::FormatError, format_source, source::SourceForm,','    analysis::{analyze_file, analyze_file_at},\n    cli::Invocation,\n    error::FormatError,\n    format_source,\n    source::SourceForm,'); p.write_text(s)
-          p=Path('src/transform/passes/case_pass.rs'); s=p.read_text().replace('        project::ResolvedType, scoped_declared_names, CaseMap, DeclaredNameIndex, DeclaredSpelling, TypeMaps,','        project::ResolvedType,\n        scoped_declared_names, CaseMap, DeclaredNameIndex, DeclaredSpelling, TypeMaps,').replace('    Symbol { allow_external: bool },','    Symbol {\n        allow_external: bool,\n    },').replace('    UseRemote { module: Vec<u8> },','    UseRemote {\n        module: Vec<u8>,\n    },').replace('        if let Some(type_name) =\n            designator_type(selector, procedure, cx.local, Some(&cx.project.types), outer)\n        {','        if let Some(type_name) = designator_type(\n            selector,\n            procedure,\n            cx.local,\n            Some(&cx.project.types),\n            outer,\n        ) {').replace('        if is_use_intrinsic(tokens) {\n            *evidence = CaseEvidence::KeepBase;\n        } else if index <= module_index || is_use_only_keyword(tokens, index) {','        if is_use_intrinsic(tokens) || index <= module_index || is_use_only_keyword(tokens, index) {').replace('    if let CaseEvidence::Member { owner, .. } = evidence {\n        if owner\n            .first()\n            .and_then(|root| associate_spelling(enclosing_associates, root))\n            .is_some()\n        {','    if let CaseEvidence::Member {\n        owner,\n        resolved_owner,\n    } = evidence\n    {\n        if resolved_owner.is_none()\n            && owner\n                .first()\n                .and_then(|root| associate_spelling(enclosing_associates, root))\n                .is_some()\n        {'); p.write_text(s)
-          PY
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: ${{ matrix.toolchain }}
@@ -39,15 +25,3 @@ jobs:
       - run: ./tools/check_fuzz_regression.sh
       - run: ./tools/check_cli_contract.sh target/debug/forformat
       - run: ./tools/check_docs.sh target/debug/forformat
-      - name: Publish validated fix
-        if: matrix.toolchain == 'stable'
-        run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git fetch --depth=1 origin 2633c6206e1f7c6879ead4b4d27c9550d8ee05c7
-          git show FETCH_HEAD:.github/workflows/rust-checks.yml > .github/workflows/rust-checks.yml
-          git show FETCH_HEAD:.github/workflows/ci.yml > .github/workflows/ci.yml
-          rm -f .review-fix.patch.gz.b64 .review-fix2.patch.gz.b64 .review-fix3.patch.gz.b64
-          git add -A
-          git commit -m 'fix: address scoped resolution review findings'
-          git push origin HEAD:review-fix-staging

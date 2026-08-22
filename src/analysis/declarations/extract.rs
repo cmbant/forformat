@@ -5,7 +5,7 @@ use super::{
         type_definition_parent, type_spec_name,
     },
     types::TypeMaps,
-    Accessibility, HostAccess, HostUnit, UnitFacts, UseAssociation, UseName,
+    Accessibility, HostAccess, HostUnit, ModuleNature, UnitFacts, UseAssociation, UseName,
 };
 use crate::{
     analysis::{
@@ -84,7 +84,9 @@ pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
             // accessibility attribute of `TYPE, PUBLIC :: T` does not: that
             // statement opens the type it names, so it is always seen with the
             // type already entered.
-            if owner.is_none() {
+            if let Some(owner) = owner.as_deref() {
+                type_member_access_statement(&statement.text, owner, unit_scope, &mut facts);
+            } else {
                 access_statement(&statement.text, unit_scope, &mut facts);
             }
             type_definition_access(&statement.text, unit_scope, &mut facts);
@@ -402,6 +404,14 @@ fn entity_declaration(
                             }
                         }
                     }
+                    if let (Some(owner), Some(access)) = (owner, access) {
+                        if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                            unit.member_access
+                                .entry(owner.to_ascii_lowercase())
+                                .or_default()
+                                .mark(token.text, access);
+                        }
+                    }
                     if first.is(b"generic") {
                         facts.generic_type_procedures.insert(token.text);
                         if let Some(owner) = owner {
@@ -421,6 +431,12 @@ fn entity_declaration(
                         facts.cases.symbols.insert(token.text);
                         if let Some(unit) = facts.units.get_mut(&unit_scope) {
                             unit.components.insert(owner, token.text);
+                            if let Some(access) = access {
+                                unit.member_access
+                                    .entry(owner.to_ascii_lowercase())
+                                    .or_default()
+                                    .mark(token.text, access);
+                            }
                             if let Some(declared) = declared {
                                 unit.type_graph
                                     .insert_component(owner, token.text, declared);
@@ -690,6 +706,50 @@ fn access_statement(text: &[u8], unit_scope: usize, facts: &mut FileFacts) {
     }
 }
 
+fn type_member_access_statement(
+    text: &[u8],
+    owner: &[u8],
+    unit_scope: usize,
+    facts: &mut FileFacts,
+) {
+    let tokens = tokenize(text, &mut LexState::default());
+    let Some(first) = tokens
+        .iter()
+        .position(|token| token.kind != TokenKind::Number)
+    else {
+        return;
+    };
+    let access = if tokens[first].is_name(b"private") {
+        Accessibility::Private
+    } else if tokens[first].is_name(b"public") {
+        Accessibility::Public
+    } else {
+        return;
+    };
+    let Some(unit) = facts.units.get_mut(&unit_scope) else {
+        return;
+    };
+    let member_access = unit
+        .member_access
+        .entry(owner.to_ascii_lowercase())
+        .or_default();
+    let separator = tokens
+        .iter()
+        .position(|token| token.depth == 0 && token.text == b"::");
+    let start = separator.map_or(first + 1, |separator| separator + 1);
+    let names = tokens[start..]
+        .iter()
+        .filter(|token| token.depth == 0 && token.kind == TokenKind::Name)
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        member_access.set_default(access);
+    } else {
+        for name in names {
+            member_access.mark(name.text, access);
+        }
+    }
+}
+
 fn type_definition_access(text: &[u8], unit_scope: usize, facts: &mut FileFacts) {
     let tokens = tokenize(text, &mut LexState::default());
     let Some(first) = tokens
@@ -740,6 +800,21 @@ fn use_statement(text: &[u8], symbols: &mut CaseMap) -> Option<UseAssociation> {
         .skip(first + 1)
         .find(|(_, token)| token.depth == 0 && token.text == b"::")
         .map(|(index, _)| index);
+    let nature = separator
+        .and_then(|separator| {
+            tokens[first + 1..separator]
+                .iter()
+                .find(|token| token.depth == 0 && token.kind == TokenKind::Name)
+        })
+        .map_or(ModuleNature::Unspecified, |token| {
+            if token.is_name(b"intrinsic") {
+                ModuleNature::Intrinsic
+            } else if token.is_name(b"non_intrinsic") {
+                ModuleNature::NonIntrinsic
+            } else {
+                ModuleNature::Unspecified
+            }
+        });
     let module_start = separator.map_or(first + 1, |index| index + 1);
     let (module_index, module) = tokens
         .iter()
@@ -760,6 +835,7 @@ fn use_statement(text: &[u8], symbols: &mut CaseMap) -> Option<UseAssociation> {
     let list_start = only.map_or(module_index + 1, |index| index + 2);
     let mut association = UseAssociation {
         module: module.text.to_ascii_lowercase(),
+        nature,
         only: only.is_some(),
         names: Vec::new(),
     };
