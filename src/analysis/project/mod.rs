@@ -21,7 +21,7 @@ mod includes;
 mod type_resolution;
 mod visibility;
 
-pub use includes::{analyze_file, analyze_file_at, analyze_project};
+pub use includes::{analyze_file, analyze_file_at, analyze_project, analyze_project_with_includes};
 pub(crate) use type_resolution::ResolvedType;
 
 pub(crate) fn absorb_analyzed<'a, I>(context: &mut ProjectContext, sources: I)

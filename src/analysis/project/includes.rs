@@ -124,10 +124,10 @@ fn analyze_file_with_path(path: Option<&Path>, source: &[u8]) -> Result<FileFact
 /// Fold a batch of already-analyzed project sources into one context while
 /// sharing INCLUDE fragment analysis across the whole batch.
 ///
-/// A candidate that is itself one of the supplied sources is cloned from the
-/// precomputed facts. Other candidates are loaded at most once, including
-/// nested INCLUDEs and failed lookups, and their cached facts are then reused
-/// by every including source.
+/// Supplied project sources can satisfy INCLUDE lookups for each other, but
+/// every supplied source is still absorbed independently as a project root.
+/// Other candidates are loaded at most once, including nested INCLUDEs and
+/// failed lookups, and their cached facts are reused by every including source.
 pub(super) fn absorb_analyzed<'a, I>(context: &mut ProjectContext, sources: I)
 where
     I: IntoIterator<Item = (&'a Path, &'a FileFacts)>,
@@ -146,10 +146,35 @@ fn absorb_analyzed_with<'a, I>(
 ) where
     I: IntoIterator<Item = (&'a Path, &'a FileFacts)>,
 {
+    absorb_analyzed_with_resources(
+        context,
+        sources,
+        std::iter::empty::<(&Path, &FileFacts)>(),
+        loader,
+    );
+}
+
+fn absorb_analyzed_with_resources<'a, 'b, I, J>(
+    context: &mut ProjectContext,
+    sources: I,
+    include_resources: J,
+    loader: &mut impl FnMut(&Path) -> Option<FileFacts>,
+) where
+    I: IntoIterator<Item = (&'a Path, &'a FileFacts)>,
+    J: IntoIterator<Item = (&'b Path, &'b FileFacts)>,
+{
     let analyzed = sources.into_iter().collect::<Vec<_>>();
-    let mut lookup = HashMap::with_capacity(analyzed.len());
-    for (index, &(path, _)) in analyzed.iter().enumerate() {
-        lookup.insert(normalize_path(path), index);
+    let resources = include_resources.into_iter().collect::<Vec<_>>();
+    let mut lookup = HashMap::with_capacity(analyzed.len() + resources.len());
+
+    // Include resources are lookup-only. Project roots are inserted second so
+    // an explicitly supplied root wins if the caller provides the same path in
+    // both collections.
+    for &(path, facts) in &resources {
+        lookup.insert(normalize_path(path), facts.clone());
+    }
+    for &(path, facts) in &analyzed {
+        lookup.insert(normalize_path(path), facts.clone());
     }
 
     // One fragment is typically included by many sources, and a nested include
@@ -161,36 +186,34 @@ fn absorb_analyzed_with<'a, I>(
         let expanded = expand_includes_with(path, facts, &mut |candidate| {
             fragments
                 .entry(candidate.to_path_buf())
-                .or_insert_with(|| {
-                    lookup
-                        .get(candidate)
-                        .map(|index| (*analyzed[*index].1).clone())
-                        .or_else(|| loader(candidate))
-                })
+                .or_insert_with(|| lookup.get(candidate).cloned().or_else(|| loader(candidate)))
                 .clone()
         });
         context.absorb_expanded(path, facts, expanded);
     }
 }
 
-/// Build a project context from every source in the project.
+fn analyze_inputs<'a, I>(inputs: I) -> Result<Vec<(PathBuf, FileFacts)>, FormatError>
+where
+    I: IntoIterator<Item = (&'a Path, &'a [u8])>,
+{
+    inputs
+        .into_iter()
+        .map(|(path, source)| Ok((path.to_path_buf(), analyze_file_at(path, source)?)))
+        .collect()
+}
+
+/// Build a project context from every supplied project source.
 ///
-/// The source list is analyzed once up front. INCLUDE resolution first uses
-/// that in-memory set (so `.inc` fragments can be supplied without touching
-/// the filesystem), then falls back to the filesystem for ordinary CLI use.
+/// Every item passed here is a project root and is absorbed independently.
+/// Relative INCLUDEs may resolve another supplied root or fall back to the
+/// filesystem, but include-only in-memory buffers should instead be passed via
+/// [`analyze_project_with_includes`].
 pub fn analyze_project<'a, I>(sources: I) -> Result<ProjectContext, FormatError>
 where
     I: IntoIterator<Item = (&'a Path, &'a [u8])>,
 {
-    let inputs = sources
-        .into_iter()
-        .map(|(path, source)| (path.to_path_buf(), source))
-        .collect::<Vec<_>>();
-    let mut analyzed = Vec::with_capacity(inputs.len());
-    for (path, source) in &inputs {
-        analyzed.push((path.clone(), analyze_file_at(path, source)?));
-    }
-
+    let analyzed = analyze_inputs(sources)?;
     let mut context = ProjectContext::empty();
     absorb_analyzed(
         &mut context,
@@ -199,9 +222,44 @@ where
     Ok(context)
 }
 
+/// Build a project context from project roots plus in-memory INCLUDE resources.
+///
+/// `sources` are absorbed independently as project sources. `include_resources`
+/// participate only in path-based INCLUDE lookup (including nested INCLUDEs)
+/// and never become project-wide sources in their own right. Missing resources
+/// still fall back to the filesystem.
+pub fn analyze_project_with_includes<'a, 'b, I, J>(
+    sources: I,
+    include_resources: J,
+) -> Result<ProjectContext, FormatError>
+where
+    I: IntoIterator<Item = (&'a Path, &'a [u8])>,
+    J: IntoIterator<Item = (&'b Path, &'b [u8])>,
+{
+    let analyzed = analyze_inputs(sources)?;
+    let resources = analyze_inputs(include_resources)?;
+    let mut context = ProjectContext::empty();
+    absorb_analyzed_with_resources(
+        &mut context,
+        analyzed.iter().map(|(path, facts)| (path.as_path(), facts)),
+        resources
+            .iter()
+            .map(|(path, facts)| (path.as_path(), facts)),
+        &mut |candidate| {
+            fs::read(candidate)
+                .ok()
+                .and_then(|source| analyze_file_at(candidate, &source).ok())
+        },
+    );
+    Ok(context)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{absorb_analyzed_with, analyze_file_at, ProjectContext};
+    use super::{
+        absorb_analyzed_with, analyze_file_at, analyze_project_with_includes, ProjectContext,
+    };
+    use crate::analysis::names::NameSpace;
     use std::path::Path;
 
     #[test]
@@ -235,5 +293,50 @@ mod tests {
 
         assert_eq!(loads, 1);
         assert_eq!(context.sources.len(), 2);
+    }
+
+    #[test]
+    fn in_memory_include_resources_are_not_project_sources() {
+        let root = b"program p\nend program p\n";
+        let unused = b"module LeakedResource\nend module LeakedResource\n";
+        let project = analyze_project_with_includes(
+            [(Path::new("p.f90"), root.as_slice())],
+            [(Path::new("unused.inc"), unused.as_slice())],
+        )
+        .unwrap();
+
+        assert_eq!(project.sources, vec![Path::new("p.f90")]);
+        let local = analyze_file_at(Path::new("p.f90"), root).unwrap();
+        assert_eq!(
+            project
+                .resolver(&local)
+                .spelling(NameSpace::Module, b"leakedresource"),
+            None
+        );
+    }
+
+    #[test]
+    fn in_memory_include_resources_still_expand_textually() {
+        let host = b"module host\ninclude 'defs.inc'\nend module host\n";
+        let target = b"program p\nuse host\nprint *, includedcase\nend program p\n";
+        let defs = b"integer :: IncludedCase\n";
+        let project = analyze_project_with_includes(
+            [
+                (Path::new("host.f90"), host.as_slice()),
+                (Path::new("target.f90"), target.as_slice()),
+            ],
+            [(Path::new("defs.inc"), defs.as_slice())],
+        )
+        .unwrap();
+
+        assert_eq!(
+            project.sources,
+            vec![Path::new("host.f90"), Path::new("target.f90")]
+        );
+        let local = analyze_file_at(Path::new("target.f90"), target).unwrap();
+        assert_eq!(
+            project.visible_symbol_spelling(&local, 2, b"includedcase"),
+            Some(b"IncludedCase".to_vec())
+        );
     }
 }
