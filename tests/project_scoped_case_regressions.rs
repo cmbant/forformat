@@ -94,3 +94,40 @@ fn use_double_colon_forms_still_resolve_only_names() {
         "{output}"
     );
 }
+
+#[test]
+fn associate_member_keeps_inferred_selector_type_evidence() {
+    let module = b"module M\ntype :: Thing\ninteger :: MemberCase\nend type Thing\ntype(Thing) :: SourceCase\nend module M\n";
+    let target = b"program p\nuse M\nassociate(AliasCase => sourcecase)\nprint *, aliascase%membercase\nend associate\nend program p\n";
+    let output = normalize(
+        target,
+        [
+            (Path::new("m.f90"), module.as_slice()),
+            (Path::new("target.f90"), target.as_slice()),
+        ],
+    );
+
+    assert!(
+        output.contains("associate(AliasCase => SourceCase)"),
+        "{output}"
+    );
+    assert!(output.contains("AliasCase%MemberCase"), "{output}");
+}
+
+#[test]
+fn implicit_function_result_keeps_base_semantic_evidence() {
+    let unrelated = b"module Other\nreal :: RESULTCASE\nend module Other\n";
+    let target = b"module M\ncontains\nfunction ResultCase(x)\nreal :: x\nreal :: resultcase\nresultcase = x\nend function resultcase\nend module M\n";
+    let output = normalize(
+        target,
+        [
+            (Path::new("other.f90"), unrelated.as_slice()),
+            (Path::new("target.f90"), target.as_slice()),
+        ],
+    );
+
+    assert!(output.contains("function ResultCase(x)"), "{output}");
+    assert!(output.contains("real :: ResultCase"), "{output}");
+    assert!(output.contains("ResultCase = x"), "{output}");
+    assert!(output.contains("end function ResultCase"), "{output}");
+}
