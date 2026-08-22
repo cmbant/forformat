@@ -1,5 +1,7 @@
 use super::ProjectContext;
-use crate::analysis::declarations::{FileFacts, HostUnit, UnitFacts, UseAssociation};
+use crate::analysis::declarations::{
+    Accessibility, FileFacts, HostUnit, UnitFacts, UseAssociation,
+};
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +69,54 @@ where
     resolved
 }
 
+/// An accessibility name that is also the name of a USEd module governs that
+/// USE route, not a same-spelled local entity. This distinction cannot live in
+/// `AccessFacts` alone because only the importing unit knows its USE routes.
+fn explicit_entity_access(unit: &UnitFacts, name: &[u8]) -> Option<Accessibility> {
+    let lower = name.to_ascii_lowercase();
+    if unit
+        .imports
+        .iter()
+        .any(|association| association.module == lower)
+    {
+        None
+    } else {
+        unit.access.explicit(&lower)
+    }
+}
+
+/// Accessibility of an entity declared by `unit` itself.
+pub(super) fn export_entity_is_public(unit: &UnitFacts, name: &[u8]) -> bool {
+    match explicit_entity_access(unit, name) {
+        Some(Accessibility::Private) => false,
+        Some(Accessibility::Public) => true,
+        None => unit.access.default_is_public(),
+    }
+}
+
+/// Accessibility of one use-associated route while `unit` re-exports `name`.
+///
+/// Fortran gives an explicit accessibility on the entity precedence over the
+/// route. Otherwise the named module route governs independently; an unnamed
+/// route falls back to the importing module's default. Merging the surviving
+/// route answers then naturally implements "any public route" and "all private
+/// routes" without collapsing distinct USE associations into one flag.
+pub(super) fn export_route_is_public(
+    unit: &UnitFacts,
+    name: &[u8],
+    association: &UseAssociation,
+) -> bool {
+    match explicit_entity_access(unit, name) {
+        Some(Accessibility::Private) => false,
+        Some(Accessibility::Public) => true,
+        None => match unit.access.explicit(&association.module) {
+            Some(Accessibility::Private) => false,
+            Some(Accessibility::Public) => true,
+            None => unit.access.default_is_public(),
+        },
+    }
+}
+
 impl ProjectContext {
     /// Resolve an ordinary symbol through the active construct/program unit,
     /// host association and USE association. Unrelated modules are not queried.
@@ -85,7 +135,7 @@ impl ProjectContext {
                 return unit.symbols.get(name).map(ToOwned::to_owned);
             }
             let mut use_visited = HashSet::new();
-            match self.imported_symbol(&unit.imports, name, false, &mut use_visited) {
+            match self.imported_symbol(&unit.imports, name, false, None, &mut use_visited) {
                 Visibility::Absent => {}
                 found => return found.into_option(),
             }
@@ -114,7 +164,7 @@ impl ProjectContext {
         let local = self.expanded(local);
         let unit = local.unit_chain(line).into_iter().next()?;
         let mut visited = HashSet::new();
-        self.imported_symbol(&unit.imports, name, true, &mut visited)
+        self.imported_symbol(&unit.imports, name, true, None, &mut visited)
             .into_option()
     }
 
@@ -140,7 +190,7 @@ impl ProjectContext {
                 return unit.types.get(name).map(ToOwned::to_owned);
             }
             let mut use_visited = HashSet::new();
-            match self.imported_type(&unit.imports, name, &mut use_visited) {
+            match self.imported_type(&unit.imports, name, None, &mut use_visited) {
                 Visibility::Absent => {}
                 found => return found.into_option(),
             }
@@ -186,7 +236,7 @@ impl ProjectContext {
                 .unwrap_or(Visibility::Ambiguous);
         }
         let mut use_visited = HashSet::new();
-        match self.imported_symbol(&unit.imports, lower, false, &mut use_visited) {
+        match self.imported_symbol(&unit.imports, lower, false, None, &mut use_visited) {
             Visibility::Absent => {}
             found => return found,
         }
@@ -228,7 +278,7 @@ impl ProjectContext {
                 .unwrap_or(Visibility::Ambiguous);
         }
         let mut use_visited = HashSet::new();
-        match self.imported_type(&unit.imports, lower, &mut use_visited) {
+        match self.imported_type(&unit.imports, lower, None, &mut use_visited) {
             Visibility::Absent => {}
             found => return found,
         }
@@ -246,11 +296,17 @@ impl ProjectContext {
         imports: &[UseAssociation],
         name: &[u8],
         include_remote_rename_targets: bool,
+        exporting_unit: Option<&UnitFacts>,
         visited: &mut HashSet<(Vec<u8>, Vec<u8>)>,
     ) -> Visibility<Vec<u8>> {
         let mut resolved = Visibility::Absent;
         let lower = name.to_ascii_lowercase();
         for association in imports {
+            if exporting_unit
+                .is_some_and(|unit| !export_route_is_public(unit, name, association))
+            {
+                continue;
+            }
             for target in association.targets(name) {
                 let remote =
                     self.module_export_symbol(&association.module, &target.remote, visited);
@@ -281,10 +337,16 @@ impl ProjectContext {
         &self,
         imports: &[UseAssociation],
         name: &[u8],
+        exporting_unit: Option<&UnitFacts>,
         visited: &mut HashSet<(Vec<u8>, Vec<u8>)>,
     ) -> Visibility<Vec<u8>> {
         let mut resolved = Visibility::Absent;
         for association in imports {
+            if exporting_unit
+                .is_some_and(|unit| !export_route_is_public(unit, name, association))
+            {
+                continue;
+            }
             for target in association.targets(name) {
                 let remote = self.module_export_type(&association.module, &target.remote, visited);
                 let candidate = match (remote, target.alias_spelling) {
@@ -309,9 +371,6 @@ impl ProjectContext {
             return Visibility::Absent;
         }
         merge_definitions(self.module_units(&module), visited, |unit, visited| {
-            if !unit.access.is_public(&name) {
-                return Visibility::Absent;
-            }
             self.unit_export_symbol(unit, &name, visited)
         })
     }
@@ -323,13 +382,16 @@ impl ProjectContext {
         visited: &mut HashSet<(Vec<u8>, Vec<u8>)>,
     ) -> Visibility<Vec<u8>> {
         if unit.symbols.contains(name) {
+            if !export_entity_is_public(unit, name) {
+                return Visibility::Absent;
+            }
             return unit
                 .symbols
                 .get(name)
                 .map(|spelling| Visibility::Value(spelling.to_vec()))
                 .unwrap_or(Visibility::Ambiguous);
         }
-        self.imported_symbol(&unit.imports, name, false, visited)
+        self.imported_symbol(&unit.imports, name, false, Some(unit), visited)
     }
 
     fn module_export_type(
@@ -344,9 +406,6 @@ impl ProjectContext {
             return Visibility::Absent;
         }
         merge_definitions(self.module_units(&module), visited, |unit, visited| {
-            if !unit.access.is_public(&name) {
-                return Visibility::Absent;
-            }
             self.unit_export_type(unit, &name, visited)
         })
     }
@@ -358,12 +417,15 @@ impl ProjectContext {
         visited: &mut HashSet<(Vec<u8>, Vec<u8>)>,
     ) -> Visibility<Vec<u8>> {
         if unit.types.contains(name) {
+            if !export_entity_is_public(unit, name) {
+                return Visibility::Absent;
+            }
             return unit
                 .types
                 .get(name)
                 .map(|spelling| Visibility::Value(spelling.to_vec()))
                 .unwrap_or(Visibility::Ambiguous);
         }
-        self.imported_type(&unit.imports, name, visited)
+        self.imported_type(&unit.imports, name, Some(unit), visited)
     }
 }

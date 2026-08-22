@@ -1,5 +1,7 @@
 use super::{
-    visibility::{merge_definitions, Visibility},
+    visibility::{
+        export_entity_is_public, export_route_is_public, merge_definitions, Visibility,
+    },
     ProjectContext,
 };
 use crate::analysis::declarations::{FileFacts, HostUnit, UnitFacts, UseAssociation};
@@ -43,7 +45,12 @@ impl ProjectContext {
                     .into_option();
             }
             let mut use_visited = HashSet::new();
-            match self.imported_variable_type_identity(&unit.imports, &lower, &mut use_visited) {
+            match self.imported_variable_type_identity(
+                &unit.imports,
+                &lower,
+                None,
+                &mut use_visited,
+            ) {
                 Visibility::Absent => {}
                 found => return found.into_option(),
             }
@@ -130,7 +137,7 @@ impl ProjectContext {
                 .unwrap_or(Visibility::Ambiguous);
         }
         let mut use_visited = HashSet::new();
-        match self.imported_type_identity(&unit.imports, lower, &mut use_visited) {
+        match self.imported_type_identity(&unit.imports, lower, None, &mut use_visited) {
             Visibility::Absent => {}
             found => return found,
         }
@@ -173,7 +180,12 @@ impl ProjectContext {
             return self.host_visible_type_identity(host, type_name, &mut type_visited);
         }
         let mut use_visited = HashSet::new();
-        match self.imported_variable_type_identity(&unit.imports, lower, &mut use_visited) {
+        match self.imported_variable_type_identity(
+            &unit.imports,
+            lower,
+            None,
+            &mut use_visited,
+        ) {
             Visibility::Absent => {}
             found => return found,
         }
@@ -190,10 +202,16 @@ impl ProjectContext {
         &self,
         imports: &[UseAssociation],
         name: &[u8],
+        exporting_unit: Option<&UnitFacts>,
         visited: &mut HashSet<(Vec<u8>, Vec<u8>)>,
     ) -> Visibility<ResolvedType> {
         let mut resolved = Visibility::Absent;
         for association in imports {
+            if exporting_unit
+                .is_some_and(|unit| !export_route_is_public(unit, name, association))
+            {
+                continue;
+            }
             for target in association.targets(name) {
                 resolved.merge(self.module_export_type_identity(
                     &association.module,
@@ -209,10 +227,16 @@ impl ProjectContext {
         &self,
         imports: &[UseAssociation],
         name: &[u8],
+        exporting_unit: Option<&UnitFacts>,
         visited: &mut HashSet<(Vec<u8>, Vec<u8>)>,
     ) -> Visibility<ResolvedType> {
         let mut resolved = Visibility::Absent;
         for association in imports {
+            if exporting_unit
+                .is_some_and(|unit| !export_route_is_public(unit, name, association))
+            {
+                continue;
+            }
             for target in association.targets(name) {
                 resolved.merge(self.module_export_variable_type_identity(
                     &association.module,
@@ -250,7 +274,7 @@ impl ProjectContext {
                     .unwrap_or(Visibility::Ambiguous);
             }
             let mut use_visited = HashSet::new();
-            match self.imported_type_identity(&unit.imports, &name, &mut use_visited) {
+            match self.imported_type_identity(&unit.imports, &name, None, &mut use_visited) {
                 Visibility::Absent => {}
                 found => return found,
             }
@@ -300,7 +324,7 @@ impl ProjectContext {
                 })
                 .unwrap_or(Visibility::Ambiguous);
         }
-        self.imported_type_identity(&unit.imports, name, visited)
+        self.imported_type_identity(&unit.imports, name, None, visited)
     }
 
     fn module_export_type_identity(
@@ -315,11 +339,33 @@ impl ProjectContext {
             return Visibility::Absent;
         }
         merge_definitions(self.module_units(&module), visited, |unit, visited| {
-            if !unit.access.is_public(&name) {
+            self.unit_export_type_identity(&module, unit, &name, visited)
+        })
+    }
+
+    fn unit_export_type_identity(
+        &self,
+        module: &[u8],
+        unit: &UnitFacts,
+        name: &[u8],
+        visited: &mut HashSet<(Vec<u8>, Vec<u8>)>,
+    ) -> Visibility<ResolvedType> {
+        if unit.types.contains(name) {
+            if !export_entity_is_public(unit, name) {
                 return Visibility::Absent;
             }
-            self.unit_module_type_identity(&module, unit, &name, visited)
-        })
+            return unit
+                .types
+                .get(name)
+                .map(|_| {
+                    Visibility::Value(ResolvedType {
+                        origin: TypeOrigin::Module(module.to_vec()),
+                        name: name.to_vec(),
+                    })
+                })
+                .unwrap_or(Visibility::Ambiguous);
+        }
+        self.imported_type_identity(&unit.imports, name, Some(unit), visited)
     }
 
     fn module_export_variable_type_identity(
@@ -334,9 +380,6 @@ impl ProjectContext {
             return Visibility::Absent;
         }
         merge_definitions(self.module_units(&module), visited, |unit, visited| {
-            if !unit.access.is_public(&name) {
-                return Visibility::Absent;
-            }
             self.unit_export_variable_type_identity(&module, unit, &name, visited)
         })
     }
@@ -349,13 +392,16 @@ impl ProjectContext {
         visited: &mut HashSet<(Vec<u8>, Vec<u8>)>,
     ) -> Visibility<ResolvedType> {
         if unit.variable_types.contains_key(name) {
+            if !export_entity_is_public(unit, name) {
+                return Visibility::Absent;
+            }
             let Some(type_name) = unit.variable_type(name) else {
                 return Visibility::Ambiguous;
             };
             let mut type_visited = HashSet::new();
             return self.module_visible_type_identity(module, type_name, &mut type_visited);
         }
-        self.imported_variable_type_identity(&unit.imports, name, visited)
+        self.imported_variable_type_identity(&unit.imports, name, Some(unit), visited)
     }
 
     fn type_units<'a>(&'a self, local: &'a FileFacts, owner: &ResolvedType) -> &'a [UnitFacts] {

@@ -44,15 +44,27 @@ impl AccessFacts {
         }
     }
 
-    pub(crate) fn is_public(&self, name: &[u8]) -> bool {
+    pub(crate) fn explicit(&self, name: &[u8]) -> Option<Accessibility> {
         let name = name.to_ascii_lowercase();
         if self.explicit_private.contains(&name) {
-            return false;
+            Some(Accessibility::Private)
+        } else if self.explicit_public.contains(&name) {
+            Some(Accessibility::Public)
+        } else {
+            None
         }
-        if self.explicit_public.contains(&name) {
-            return true;
-        }
+    }
+
+    pub(crate) fn default_is_public(&self) -> bool {
         self.default_access == Accessibility::Public
+    }
+
+    pub(crate) fn is_public(&self, name: &[u8]) -> bool {
+        match self.explicit(name) {
+            Some(Accessibility::Private) => false,
+            Some(Accessibility::Public) => true,
+            None => self.default_is_public(),
+        }
     }
 
     pub(crate) fn merge(&mut self, other: &Self) {
