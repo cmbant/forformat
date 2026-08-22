@@ -194,9 +194,7 @@ where
     let mut context = ProjectContext::empty();
     absorb_analyzed(
         &mut context,
-        analyzed
-            .iter()
-            .map(|(path, facts)| (path.as_path(), facts)),
+        analyzed.iter().map(|(path, facts)| (path.as_path(), facts)),
     );
     Ok(context)
 }

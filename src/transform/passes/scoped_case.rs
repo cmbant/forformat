@@ -48,14 +48,8 @@ pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, Fo
                 let Some(&(line, _)) = spans.first() else {
                     continue;
                 };
-                let decision = scoped_spelling(
-                    &tokens,
-                    index,
-                    line,
-                    &declared_names,
-                    cx,
-                    &associate_stack,
-                );
+                let decision =
+                    scoped_spelling(&tokens, index, line, &declared_names, cx, &associate_stack);
                 let replacement = match decision {
                     Decision::KeepBase => continue,
                     Decision::Replace(spelling) => spelling,
@@ -334,15 +328,15 @@ fn use_module_index(tokens: &[Token<'_>]) -> Option<usize> {
 
 fn is_use_only_keyword(tokens: &[Token<'_>], index: usize) -> bool {
     tokens[index].is_name(b"only")
-        && tokens.get(index + 1).is_some_and(|token| {
-            token.text == b":" && token.depth == tokens[index].depth
-        })
+        && tokens
+            .get(index + 1)
+            .is_some_and(|token| token.text == b":" && token.depth == tokens[index].depth)
 }
 
 fn is_use_rename_local(tokens: &[Token<'_>], index: usize) -> bool {
-    tokens.get(index + 1).is_some_and(|token| {
-        token.text == b"=>" && token.depth == tokens[index].depth
-    })
+    tokens
+        .get(index + 1)
+        .is_some_and(|token| token.text == b"=>" && token.depth == tokens[index].depth)
 }
 
 fn is_external_reference(tokens: &[Token<'_>], index: usize) -> bool {
@@ -419,10 +413,7 @@ fn is_declaration_entity(tokens: &[Token<'_>], index: usize) -> bool {
 }
 
 fn is_associate_alias_declaration(tokens: &[Token<'_>], index: usize) -> bool {
-    let Some(associate) = tokens
-        .iter()
-        .position(|token| token.is_name(b"associate"))
-    else {
+    let Some(associate) = tokens.iter().position(|token| token.is_name(b"associate")) else {
         return false;
     };
     let Some(open) = tokens
@@ -432,9 +423,9 @@ fn is_associate_alias_declaration(tokens: &[Token<'_>], index: usize) -> bool {
         return false;
     };
     tokens[index].depth == open.depth + 1
-        && tokens.get(index + 1).is_some_and(|token| {
-            token.text == b"=>" && token.depth == tokens[index].depth
-        })
+        && tokens
+            .get(index + 1)
+            .is_some_and(|token| token.text == b"=>" && token.depth == tokens[index].depth)
 }
 
 /// The spelling an already-open ASSOCIATE construct gave `name`, or `None` if
@@ -444,10 +435,7 @@ fn is_associate_alias_declaration(tokens: &[Token<'_>], index: usize) -> bool {
 /// outer alias name governs uses inside it. Lowercasing is deferred until there
 /// is a frame to search: nearly every file has no ASSOCIATE at all, and this
 /// runs on every name token.
-fn alias_spelling<'a>(
-    enclosing: &'a [HashMap<Vec<u8>, Vec<u8>>],
-    name: &[u8],
-) -> Option<&'a [u8]> {
+fn alias_spelling<'a>(enclosing: &'a [HashMap<Vec<u8>, Vec<u8>>], name: &[u8]) -> Option<&'a [u8]> {
     if enclosing.iter().all(HashMap::is_empty) {
         return None;
     }

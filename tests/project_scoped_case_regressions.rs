@@ -35,8 +35,14 @@ fn use_list_remote_names_resolve_against_the_statement_module() {
         ],
     );
 
-    assert!(output.contains("use A, only: LocalA => RemoteCase"), "{output}");
-    assert!(output.contains("use B, only: LocalB => REMOTECASE"), "{output}");
+    assert!(
+        output.contains("use A, only: LocalA => RemoteCase"),
+        "{output}"
+    );
+    assert!(
+        output.contains("use B, only: LocalB => REMOTECASE"),
+        "{output}"
+    );
     assert!(output.contains("print *, LocalA, LocalB"), "{output}");
 }
 
@@ -83,5 +89,8 @@ fn use_double_colon_forms_still_resolve_only_names() {
         output.contains("use, non_intrinsic :: Secondary, only: SecondCase"),
         "{output}"
     );
-    assert!(output.contains("print *, CamelCase, SecondCase"), "{output}");
+    assert!(
+        output.contains("print *, CamelCase, SecondCase"),
+        "{output}"
+    );
 }
