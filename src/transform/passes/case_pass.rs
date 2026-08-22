@@ -611,7 +611,10 @@ fn reconcile_occurrence_evidence(
     let token = &tokens[index];
 
     if let Some(module_index) = use_module_index(tokens) {
-        if is_use_intrinsic(tokens) || index <= module_index || is_use_only_keyword(tokens, index) {
+        if is_use_intrinsic(tokens)
+            || index <= module_index
+            || is_use_only_keyword(tokens, index)
+        {
             *evidence = CaseEvidence::KeepBase;
         } else if is_use_rename_local(tokens, index) {
             *evidence = CaseEvidence::Alias(token.text.to_vec());
