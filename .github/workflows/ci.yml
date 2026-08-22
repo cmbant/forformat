@@ -20,8 +20,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          { cat .review-fix-00; tail -c +10 .review-fix-01; cat .review-fix-02 .review-fix-03; } > /tmp/review-fix.patch
-          git apply --3way /tmp/review-fix.patch
+          { cat .review-fix-00; tail -c +11 .review-fix-01; cat .review-fix-02 .review-fix-03; } > /tmp/review-fix.patch
+          git apply --check /tmp/review-fix.patch
+          git apply /tmp/review-fix.patch
           rm .review-fix-00 .review-fix-01 .review-fix-02 .review-fix-03
           rm .github/workflows/apply-review-fix.yml
           git show 605c2f44a74c58afd62ffcb35a095ee20d1588e2:.github/workflows/ci.yml > .github/workflows/ci.yml
