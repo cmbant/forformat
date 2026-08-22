@@ -199,6 +199,26 @@ impl Document {
         self.lines = lines;
     }
 
+    /// Canonicalize an empty final line created by editing an unterminated tail.
+    ///
+    /// After an edit turns the final unterminated physical line into empty text,
+    /// a preceding line terminator is also the file terminator: serializing two
+    /// empty-adjacent lines would parse back as one physical line. Collapse that
+    /// ambiguous in-memory shape so `Document::lines` and a fresh `SourceBuffer`
+    /// continue to describe the same physical lines.
+    pub(crate) fn canonicalize_empty_unterminated_tail(&mut self) -> bool {
+        if self.trailing_newline
+            || self.lines.len() <= 1
+            || !self.lines.last().is_some_and(Vec::is_empty)
+        {
+            return false;
+        }
+        self.lines.pop();
+        self.line_endings.pop();
+        self.trailing_newline = true;
+        true
+    }
+
     /// Rebuild the statement view of the current text.
     ///
     /// Every pass that changes the line count must call this before a later

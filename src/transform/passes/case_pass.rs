@@ -10,6 +10,7 @@ use crate::{
         project::ResolvedType,
         scoped_declared_names, CaseMap, DeclaredNameIndex, DeclaredSpelling, TypeMaps,
     },
+    classify::{classify, StatementKind},
     error::FormatError,
     source::{
         tokens::{tokenize, Token, TokenKind},
@@ -289,6 +290,7 @@ fn declared_with_names_impl(
     for group in &cx.analysis.groups {
         for statement in &group.statements {
             let tokens = tokenize(&statement.text, &mut LexState::default());
+            let statement_kind = classify(&statement.text).kind;
             let first = tokens
                 .iter()
                 .position(|token| token.kind != TokenKind::Number);
@@ -296,14 +298,21 @@ fn declared_with_names_impl(
             for scope in &association_stack {
                 associate_context.extend_visible(scope.frame());
             }
-            let opening_scope = association_opening_scope(
-                &tokens,
-                first,
-                group.lines.start,
-                active_procedure(cx.scopes, group.lines.start),
-                cx,
-                &associate_context,
-            );
+            let opening_scope = matches!(
+                statement_kind,
+                StatementKind::Associate | StatementKind::Select
+            )
+            .then(|| {
+                association_opening_scope(
+                    &tokens,
+                    first,
+                    group.lines.start,
+                    active_procedure(cx.scopes, group.lines.start),
+                    cx,
+                    &associate_context,
+                )
+            })
+            .flatten();
             // Association names participate in ordinary spelling resolution
             // on the opening statement, but their types are not visible in
             // their own selectors. Fortran evaluates every selector in the
@@ -377,26 +386,17 @@ fn declared_with_names_impl(
                 association_stack.push(scope);
             }
             apply_select_guard(&tokens, group.lines.start, cx, &mut association_stack);
-            if first.is_some_and(|index| tokens[index].is_name(b"end"))
-                && tokens
-                    .get(first.unwrap_or(0) + 1)
-                    .is_some_and(|token| token.is_name(b"associate"))
+            let closes_associate = statement_kind == StatementKind::EndAssociate
                 && matches!(
                     association_stack.last(),
                     Some(AssociationScope::Associate(_))
-                )
-            {
-                association_stack.pop();
-            }
-            if first.is_some_and(|index| tokens[index].is_name(b"end"))
-                && tokens
-                    .get(first.unwrap_or(0) + 1)
-                    .is_some_and(|token| token.is_name(b"select"))
+                );
+            let closes_select = statement_kind == StatementKind::EndSelect
                 && matches!(
                     association_stack.last(),
                     Some(AssociationScope::Select { .. })
-                )
-            {
+                );
+            if closes_associate || closes_select {
                 association_stack.pop();
             }
         }
@@ -1028,20 +1028,35 @@ fn select_type_rank_opening(
     first: Option<usize>,
 ) -> Option<(usize, SelectAssociationKind)> {
     let first = first?;
-    let select = if tokens[first].is_name(b"select") {
-        first
-    } else if tokens[first].kind == TokenKind::Name
+    let select = if tokens[first].kind == TokenKind::Name
         && tokens
             .get(first + 1)
             .is_some_and(|token| token.text == b":")
-        && tokens
-            .get(first + 2)
-            .is_some_and(|token| token.is_name(b"select"))
     {
         first + 2
     } else {
-        return None;
+        first
     };
+
+    if tokens
+        .get(select)
+        .is_some_and(|token| token.is_name(b"selecttype"))
+    {
+        return Some((select, SelectAssociationKind::Type));
+    }
+    if tokens
+        .get(select)
+        .is_some_and(|token| token.is_name(b"selectrank"))
+    {
+        return Some((select, SelectAssociationKind::Rank));
+    }
+    if !tokens
+        .get(select)
+        .is_some_and(|token| token.is_name(b"select"))
+    {
+        return None;
+    }
+
     let kind = if tokens
         .get(select + 1)
         .is_some_and(|token| token.is_name(b"type"))
@@ -1063,7 +1078,8 @@ fn select_association_spec<'a>(
     first: Option<usize>,
 ) -> Option<SelectAssociationSpec<'a>> {
     let (select, kind) = select_type_rank_opening(tokens, first)?;
-    let open_index = select + 2;
+    let compact = tokens[select].is_name(b"selecttype") || tokens[select].is_name(b"selectrank");
+    let open_index = select + if compact { 1 } else { 2 };
     let open = tokens
         .get(open_index)
         .filter(|token| token.kind == TokenKind::LParen)?;
@@ -1450,7 +1466,7 @@ fn is_select_type_rank_keyword(tokens: &[Token<'_>], index: usize) -> bool {
         .iter()
         .position(|token| token.kind != TokenKind::Number);
     if let Some((select, _)) = select_type_rank_opening(tokens, first) {
-        return index == select || index == select + 1;
+        return index == select || (tokens[select].is_name(b"select") && index == select + 1);
     }
     let Some(first) = first else {
         return false;

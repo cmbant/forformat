@@ -1,10 +1,9 @@
 use super::{
     facts::{FileFacts, IncludeDirective},
     syntax::{
-        is_old_style_type_context, is_type_definition, old_style_type_name, select_type_alias,
-        type_definition_parent, type_spec_name,
+        is_old_style_type_context, is_type_definition, old_style_type_name, type_definition_parent,
+        type_spec_name,
     },
-    types::TypeMaps,
     Accessibility, HostAccess, HostUnit, ModuleNature, UnitFacts, UseAssociation, UseName,
 };
 use crate::{
@@ -113,23 +112,6 @@ pub fn extract(analysis: &Analysis, scopes: &ScopeTree) -> FileFacts {
                 declaring_module.as_deref(),
                 &mut facts,
             );
-            if let Some(alias) = select_type_alias(&statement.text) {
-                if let Some(selector_type) =
-                    selector_type(&statement.text, &facts.types, procedure.as_deref())
-                {
-                    if let Some(unit) = facts.units.get_mut(&unit_scope) {
-                        unit.symbols.insert(&alias);
-                        unit.insert_variable_type(&alias, &selector_type);
-                    }
-                    if let Some(procedure) = procedure.as_deref() {
-                        facts
-                            .types
-                            .insert_procedure_local(procedure, &alias, &selector_type);
-                    } else {
-                        facts.types.insert_local(&alias, &selector_type);
-                    }
-                }
-            }
         }
     }
     facts
@@ -972,52 +954,6 @@ fn auxiliary_declaration(text: &[u8], symbols: &mut CaseMap, unit_symbols: &mut 
             expect_name = false;
         }
     }
-}
-
-/// Resolve the selector of `SELECT TYPE (alias => selector)` using type facts
-/// accumulated earlier in the file.
-fn selector_type(text: &[u8], types: &TypeMaps, procedure: Option<&[u8]>) -> Option<Vec<u8>> {
-    let tokens = tokenize(text, &mut LexState::default());
-    let select = tokens.iter().position(|token| token.is_name(b"select"))?;
-    if !tokens
-        .get(select + 1)
-        .is_some_and(|token| token.is_name(b"type"))
-        || !tokens
-            .get(select + 2)
-            .is_some_and(|token| token.kind == TokenKind::LParen)
-    {
-        return None;
-    }
-    let arrow = tokens
-        .iter()
-        .enumerate()
-        .skip(select + 3)
-        .find(|(_, token)| token.depth == 1 && token.text == b"=>")
-        .map(|(index, _)| index)?;
-    let root = tokens
-        .get(arrow + 1)
-        .filter(|token| token.kind == TokenKind::Name)?;
-    let mut links = Vec::new();
-    let mut index = arrow + 2;
-    while let Some(percent) = tokens.get(index) {
-        if percent.text != b"%" {
-            break;
-        }
-        let link = tokens
-            .get(index + 1)
-            .filter(|token| token.kind == TokenKind::Name)?;
-        links.push(link.text);
-        index += 2;
-    }
-    // Indexed components are deliberately unresolved; exact owner type is not
-    // known well enough to authorize a case rewrite after the alias.
-    if tokens
-        .get(index)
-        .is_some_and(|token| token.kind == TokenKind::LParen)
-    {
-        return None;
-    }
-    types.resolve_chain_with_locals(procedure, root.text, &links)
 }
 
 /// `#define NAME` and `#define NAME(args)`.
