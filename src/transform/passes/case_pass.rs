@@ -46,6 +46,13 @@ struct SymbolQuery {
     implicit_guard: ImplicitGuard,
 }
 
+#[derive(Default)]
+struct ClassificationContext<'a> {
+    associates: Option<&'a AssociateFrame>,
+    procedure_spellings: Option<&'a CaseMap>,
+    evidence: Option<&'a mut CaseEvidence>,
+}
+
 /// Why the base declared-case pass made (or declined) a spelling decision.
 ///
 /// `KeepBase` is deliberately the default. Only evidence obtained from the
@@ -283,9 +290,11 @@ fn declared_with_names_impl(
                     line,
                     declared_names,
                     cx,
-                    Some(&statement_context),
-                    Some(&procedure_spellings),
-                    record_evidence.then_some(&mut token_evidence),
+                    ClassificationContext {
+                        associates: Some(&statement_context),
+                        procedure_spellings: Some(&procedure_spellings),
+                        evidence: record_evidence.then_some(&mut token_evidence),
+                    },
                 );
                 if record_evidence {
                     // Macros are an earlier, higher-priority namespace and are
@@ -363,10 +372,13 @@ fn classify_spelling(
     line: usize,
     declared_names: &crate::analysis::DeclaredNameIndex,
     cx: &PassContext,
-    associates: Option<&AssociateFrame>,
-    procedure_spellings: Option<&CaseMap>,
-    mut evidence: Option<&mut CaseEvidence>,
+    context: ClassificationContext<'_>,
 ) -> Option<Vec<u8>> {
+    let ClassificationContext {
+        associates,
+        procedure_spellings,
+        mut evidence,
+    } = context;
     let token = &tokens[index];
 
     if crate::source::syntax::is_end_construct_keyword(tokens, index)
@@ -482,10 +494,7 @@ fn classify_spelling(
             Some(&cx.project.types),
             true,
             associates,
-        );
-        let Some(owner_type) = owner_type else {
-            return None;
-        };
+        )?;
         let inherited = inherited_component_spelling(cx, &owner_type, token.text, true);
         if let Some(spelling) = inherited {
             return Some(spelling);
@@ -732,9 +741,7 @@ pub(crate) fn restore_declined_component_spellings(
                 line,
                 declared_names,
                 cx,
-                None,
-                None,
-                None,
+                ClassificationContext::default(),
             )
             .is_none()
             .then_some(token.text);
@@ -1748,7 +1755,7 @@ end module ExampleMain\n";
             ),
             (
                 b"subroutine host\nimplicit none\ncontains\nsubroutine s(A)\ndo I = 1, 3\nA(I) = I\nend subroutine s\nend subroutine host\n".as_slice(),
-                b"subroutine host\nimplicit none\ncontains\nsubroutine s(A)\ndo i = 1, 3\nA(i) = i\nend subroutine s\nend subroutine host\n".as_slice(),
+                b"subroutine host\nimplicit none\ncontains\nsubroutine s(A)\ndo i = 1, 3\nA(i) = I\nend subroutine s\nend subroutine host\n".as_slice(),
             ),
             (
                 b"module target\nimplicit none\ninterface\nsubroutine s(A)\ndo I = 1, 3\nA(I) = I\nend subroutine s\nend interface\nend module target\n".as_slice(),
