@@ -1,0 +1,738 @@
+name: Improve SELECT TYPE/RANK associations
+
+on:
+  push:
+    branches: [scope-module-visibility]
+
+permissions:
+  contents: write
+
+jobs:
+  improve-select:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: scope-module-visibility
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Apply SELECT TYPE/RANK refinement
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          def replace(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f"missing expected text in {path}: {old[:80]!r}")
+              p.write_text(text.replace(old, new, 1))
+
+          case_path = "src/transform/passes/case_pass.rs"
+
+          replace(case_path, '''#[derive(Debug, Clone, Default)]
+          struct AssociateFrame {
+              names: HashSet<Vec<u8>>,
+              types: HashMap<Vec<u8>, Vec<u8>>,
+              spellings: HashMap<Vec<u8>, Vec<u8>>,
+              resolved_types: HashMap<Vec<u8>, ResolvedType>,
+          }
+          ''', '''#[derive(Debug, Clone, Default)]
+          struct AssociateFrame {
+              names: HashSet<Vec<u8>>,
+              types: HashMap<Vec<u8>, Vec<u8>>,
+              spellings: HashMap<Vec<u8>, Vec<u8>>,
+              resolved_types: HashMap<Vec<u8>, ResolvedType>,
+          }
+
+          #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+          enum SelectAssociationKind {
+              Type,
+              Rank,
+          }
+
+          #[derive(Debug, Clone)]
+          enum AssociationScope {
+              Associate(AssociateFrame),
+              Select {
+                  kind: SelectAssociationKind,
+                  alias: Vec<u8>,
+                  base: AssociateFrame,
+                  active: AssociateFrame,
+              },
+          }
+
+          impl AssociationScope {
+              fn frame(&self) -> &AssociateFrame {
+                  match self {
+                      Self::Associate(frame) => frame,
+                      Self::Select { active, .. } => active,
+                  }
+              }
+          }
+          ''')
+
+          replace(case_path,
+              '    let mut associate_stack: Vec<AssociateFrame> = Vec::new();\n',
+              '    let mut association_stack: Vec<AssociationScope> = Vec::new();\n')
+
+          replace(case_path, '''            let mut associate_context = AssociateFrame::default();
+              for frame in &associate_stack {
+                  associate_context.extend_visible(frame);
+              }
+              let opening_frame = associate_opening(&tokens, first).map(|_| {
+                  associate_frame(
+                      &tokens,
+                      group.lines.start,
+                      active_procedure(cx.scopes, group.lines.start),
+                      cx,
+                      &associate_context,
+                  )
+              });
+          ''', '''            let mut associate_context = AssociateFrame::default();
+              for scope in &association_stack {
+                  associate_context.extend_visible(scope.frame());
+              }
+              let opening_scope = association_opening_scope(
+                  &tokens,
+                  first,
+                  group.lines.start,
+                  active_procedure(cx.scopes, group.lines.start),
+                  cx,
+                  &associate_context,
+              );
+          ''')
+
+          replace(case_path, '''            let mut statement_context = associate_context.clone();
+              if let Some(frame) = &opening_frame {
+                  statement_context.names.extend(frame.names.iter().cloned());
+              }
+          ''', '''            let mut statement_context = associate_context.clone();
+              if let Some(scope) = &opening_scope {
+                  statement_context
+                      .names
+                      .extend(scope.frame().names.iter().cloned());
+              }
+          ''')
+
+          replace(case_path, '''            if let Some(frame) = opening_frame {
+                  associate_stack.push(frame);
+              }
+              if first.is_some_and(|index| tokens[index].is_name(b"end"))
+                  && tokens
+                      .get(first.unwrap_or(0) + 1)
+                      .is_some_and(|token| token.is_name(b"associate"))
+              {
+                  associate_stack.pop();
+              }
+          ''', '''            if let Some(scope) = opening_scope {
+                  association_stack.push(scope);
+              }
+              apply_select_guard(&tokens, group.lines.start, cx, &mut association_stack);
+              if first.is_some_and(|index| tokens[index].is_name(b"end"))
+                  && tokens
+                      .get(first.unwrap_or(0) + 1)
+                      .is_some_and(|token| token.is_name(b"associate"))
+                  && matches!(association_stack.last(), Some(AssociationScope::Associate(_)))
+              {
+                  association_stack.pop();
+              }
+              if first.is_some_and(|index| tokens[index].is_name(b"end"))
+                  && tokens
+                      .get(first.unwrap_or(0) + 1)
+                      .is_some_and(|token| token.is_name(b"select"))
+                  && matches!(association_stack.last(), Some(AssociationScope::Select { .. }))
+              {
+                  association_stack.pop();
+              }
+          ''')
+
+          replace(case_path, '''    let token = &tokens[index];
+
+              if crate::source::syntax::is_end_construct_keyword(tokens, index)
+          ''', '''    let token = &tokens[index];
+
+              if is_select_type_rank_keyword(tokens, index) {
+                  return None;
+              }
+
+              if crate::source::syntax::is_end_construct_keyword(tokens, index)
+          ''')
+
+          marker = "fn associate_opening(tokens: &[Token<'_>], first: Option<usize>) -> Option<usize> {"
+          helper = r'''#[derive(Debug)]
+          struct SelectAssociationSpec<'a> {
+              kind: SelectAssociationKind,
+              alias_index: usize,
+              alias: &'a [u8],
+              selector: &'a [Token<'a>],
+              explicit_alias: bool,
+          }
+
+          fn select_type_rank_opening(
+              tokens: &[Token<'_>],
+              first: Option<usize>,
+          ) -> Option<(usize, SelectAssociationKind)> {
+              let first = first?;
+              let select = if tokens[first].is_name(b"select") {
+                  first
+              } else if tokens[first].kind == TokenKind::Name
+                  && tokens
+                      .get(first + 1)
+                      .is_some_and(|token| token.text == b":")
+                  && tokens
+                      .get(first + 2)
+                      .is_some_and(|token| token.is_name(b"select"))
+              {
+                  first + 2
+              } else {
+                  return None;
+              };
+              let kind = if tokens
+                  .get(select + 1)
+                  .is_some_and(|token| token.is_name(b"type"))
+              {
+                  SelectAssociationKind::Type
+              } else if tokens
+                  .get(select + 1)
+                  .is_some_and(|token| token.is_name(b"rank"))
+              {
+                  SelectAssociationKind::Rank
+              } else {
+                  return None;
+              };
+              Some((select, kind))
+          }
+
+          fn select_association_spec<'a>(
+              tokens: &'a [Token<'a>],
+              first: Option<usize>,
+          ) -> Option<SelectAssociationSpec<'a>> {
+              let (select, kind) = select_type_rank_opening(tokens, first)?;
+              let open_index = select + 2;
+              let open = tokens
+                  .get(open_index)
+                  .filter(|token| token.kind == TokenKind::LParen)?;
+              let close = tokens
+                  .iter()
+                  .enumerate()
+                  .skip(open_index + 1)
+                  .find(|(_, token)| token.kind == TokenKind::RParen && token.depth == open.depth)
+                  .map(|(index, _)| index)?;
+              let entry = &tokens[open_index + 1..close];
+              if let [alias, arrow, selector @ ..] = entry {
+                  if alias.kind == TokenKind::Name
+                      && alias.depth == open.depth + 1
+                      && arrow.text == b"=>"
+                      && arrow.depth == alias.depth
+                      && !selector.is_empty()
+                  {
+                      return Some(SelectAssociationSpec {
+                          kind,
+                          alias_index: open_index + 1,
+                          alias: alias.text,
+                          selector,
+                          explicit_alias: true,
+                      });
+                  }
+              }
+              let alias = entry
+                  .first()
+                  .filter(|token| entry.len() == 1 && token.kind == TokenKind::Name)?;
+              Some(SelectAssociationSpec {
+                  kind,
+                  alias_index: open_index + 1,
+                  alias: alias.text,
+                  selector: entry,
+                  explicit_alias: false,
+              })
+          }
+
+          fn association_opening_scope(
+              tokens: &[Token<'_>],
+              first: Option<usize>,
+              line: usize,
+              procedure: Option<&[u8]>,
+              cx: &PassContext,
+              outer: &AssociateFrame,
+          ) -> Option<AssociationScope> {
+              if associate_opening(tokens, first).is_some() {
+                  return Some(AssociationScope::Associate(associate_frame(
+                      tokens, line, procedure, cx, outer,
+                  )));
+              }
+              let spec = select_association_spec(tokens, first)?;
+              let alias = spec.alias.to_ascii_lowercase();
+              let mut frame = AssociateFrame::default();
+              insert_association(
+                  &mut frame,
+                  spec.alias,
+                  spec.selector,
+                  spec.explicit_alias,
+                  line,
+                  procedure,
+                  cx,
+                  outer,
+              );
+              Some(AssociationScope::Select {
+                  kind: spec.kind,
+                  alias,
+                  base: frame.clone(),
+                  active: frame,
+              })
+          }
+
+          fn apply_select_guard(
+              tokens: &[Token<'_>],
+              line: usize,
+              cx: &PassContext,
+              stack: &mut [AssociationScope],
+          ) {
+              let Some(AssociationScope::Select {
+                  kind,
+                  alias,
+                  base,
+                  active,
+              }) = stack.last_mut()
+              else {
+                  return;
+              };
+              match kind {
+                  SelectAssociationKind::Type => {
+                      let Some(guard) = select_type_guard_name(tokens) else {
+                          return;
+                      };
+                      *active = base.clone();
+                      let Some(type_name) = guard else {
+                          return;
+                      };
+                      active.types.remove(alias.as_slice());
+                      active.resolved_types.remove(alias.as_slice());
+                      if let Some(owner) = cx.project.visible_type(cx.local, line, type_name) {
+                          active.types.insert(alias.clone(), owner.name.clone());
+                          active.resolved_types.insert(alias.clone(), owner);
+                      }
+                  }
+                  SelectAssociationKind::Rank => {
+                      if is_select_rank_guard(tokens) {
+                          *active = base.clone();
+                      }
+                  }
+              }
+          }
+
+          fn select_type_guard_name<'a>(tokens: &'a [Token<'a>]) -> Option<Option<&'a [u8]>> {
+              let first = tokens
+                  .iter()
+                  .position(|token| token.kind != TokenKind::Number)?;
+              if !(tokens[first].is_name(b"type") || tokens[first].is_name(b"class")) {
+                  return None;
+              }
+              if tokens
+                  .get(first + 1)
+                  .is_some_and(|token| token.is_name(b"default"))
+              {
+                  return Some(None);
+              }
+              if !tokens
+                  .get(first + 1)
+                  .is_some_and(|token| token.is_name(b"is"))
+              {
+                  return None;
+              }
+              let open = tokens
+                  .get(first + 2)
+                  .filter(|token| token.kind == TokenKind::LParen)?;
+              let name = tokens
+                  .get(first + 3)
+                  .filter(|token| token.kind == TokenKind::Name && token.depth == open.depth + 1)?;
+              Some(Some(name.text))
+          }
+
+          fn is_select_rank_guard(tokens: &[Token<'_>]) -> bool {
+              let Some(first) = tokens
+                  .iter()
+                  .position(|token| token.kind != TokenKind::Number)
+              else {
+                  return false;
+              };
+              tokens[first].is_name(b"rank")
+                  && tokens.get(first + 1).is_some_and(|token| {
+                      token.kind == TokenKind::LParen || token.is_name(b"default")
+                  })
+          }
+
+          '''
+          replace(case_path, marker, helper + marker)
+
+          old_associate_frame = r'''fn associate_frame(
+              tokens: &[Token<'_>],
+              line: usize,
+              procedure: Option<&[u8]>,
+              cx: &PassContext,
+              outer: &AssociateFrame,
+          ) -> AssociateFrame {
+              let mut frame = AssociateFrame::default();
+              for (alias, selector) in associate_specs(tokens) {
+                  let name = alias.to_ascii_lowercase();
+                  frame.names.insert(name.clone());
+                  frame.spellings.insert(name.clone(), alias.to_vec());
+                  if let Some(type_name) = designator_type(
+                      selector,
+                      procedure,
+                      cx.local,
+                      Some(&cx.project.types),
+                      outer,
+                  ) {
+                      frame.types.insert(name.clone(), type_name);
+                  }
+                  if let Some(names) = designator_names(selector) {
+                      let root = names[0].to_ascii_lowercase();
+                      let mut resolved = outer
+                          .resolved_types
+                          .get(root.as_slice())
+                          .cloned()
+                          .or_else(|| cx.project.visible_variable_type(cx.local, line, &root));
+                      for link in &names[1..] {
+                          resolved = resolved.and_then(|owner| {
+                              cx.project
+                                  .visible_component_type(cx.local, line, &owner, link)
+                          });
+                      }
+                      if let Some(resolved) = resolved {
+                          frame.resolved_types.insert(name, resolved);
+                      }
+                  }
+              }
+              frame
+          }
+          '''
+          new_associate_frame = r'''fn associate_frame(
+              tokens: &[Token<'_>],
+              line: usize,
+              procedure: Option<&[u8]>,
+              cx: &PassContext,
+              outer: &AssociateFrame,
+          ) -> AssociateFrame {
+              let mut frame = AssociateFrame::default();
+              for (alias, selector) in associate_specs(tokens) {
+                  insert_association(
+                      &mut frame,
+                      alias,
+                      selector,
+                      true,
+                      line,
+                      procedure,
+                      cx,
+                      outer,
+                  );
+              }
+              frame
+          }
+
+          fn insert_association(
+              frame: &mut AssociateFrame,
+              alias: &[u8],
+              selector: &[Token<'_>],
+              preserve_spelling: bool,
+              line: usize,
+              procedure: Option<&[u8]>,
+              cx: &PassContext,
+              outer: &AssociateFrame,
+          ) {
+              let name = alias.to_ascii_lowercase();
+              frame.names.insert(name.clone());
+              if preserve_spelling {
+                  frame.spellings.insert(name.clone(), alias.to_vec());
+              }
+              if let Some(type_name) = designator_type(
+                  selector,
+                  procedure,
+                  cx.local,
+                  Some(&cx.project.types),
+                  outer,
+              ) {
+                  frame.types.insert(name.clone(), type_name);
+              }
+              if let Some(names) = designator_names(selector) {
+                  let root = names[0].to_ascii_lowercase();
+                  let mut resolved = outer
+                      .resolved_types
+                      .get(root.as_slice())
+                      .cloned()
+                      .or_else(|| cx.project.visible_variable_type(cx.local, line, &root));
+                  for link in &names[1..] {
+                      resolved = resolved.and_then(|owner| {
+                          cx.project
+                              .visible_component_type(cx.local, line, &owner, link)
+                      });
+                  }
+                  if let Some(resolved) = resolved {
+                      frame.resolved_types.insert(name, resolved);
+                  }
+              }
+          }
+          '''
+          replace(case_path, old_associate_frame, new_associate_frame)
+
+          replace(case_path, '''    if is_associate_alias_declaration(tokens, index) {
+                  *evidence = CaseEvidence::Alias(token.text.to_vec());
+                  return;
+              }
+          ''', '''    if is_associate_alias_declaration(tokens, index)
+                  || is_select_alias_declaration(tokens, index)
+              {
+                  *evidence = CaseEvidence::Alias(token.text.to_vec());
+                  return;
+              }
+          ''')
+
+          insert_before_use = r'''fn is_select_alias_declaration(tokens: &[Token<'_>], index: usize) -> bool {
+              let first = tokens
+                  .iter()
+                  .position(|token| token.kind != TokenKind::Number);
+              select_association_spec(tokens, first).is_some_and(|spec| {
+                  spec.explicit_alias && spec.alias_index == index
+              })
+          }
+
+          fn is_select_type_rank_keyword(tokens: &[Token<'_>], index: usize) -> bool {
+              let first = tokens
+                  .iter()
+                  .position(|token| token.kind != TokenKind::Number);
+              if let Some((select, _)) = select_type_rank_opening(tokens, first) {
+                  return index == select || index == select + 1;
+              }
+              let Some(first) = first else {
+                  return false;
+              };
+              if tokens[first].is_name(b"type") || tokens[first].is_name(b"class") {
+                  return index == first
+                      || (index == first + 1
+                          && tokens[index].kind == TokenKind::Name
+                          && (tokens[index].is_name(b"is")
+                              || tokens[index].is_name(b"default")));
+              }
+              if tokens[first].is_name(b"rank") {
+                  return index == first
+                      || (index == first + 1 && tokens[index].is_name(b"default"));
+              }
+              false
+          }
+
+          '''
+          replace(case_path, "fn use_module_index(tokens: &[Token<'_>]) -> Option<usize> {", insert_before_use + "fn use_module_index(tokens: &[Token<'_>]) -> Option<usize> {")
+
+          old_type_spec = r'''fn is_type_spec_name(tokens: &[Token<'_>], index: usize) -> bool {
+              index >= 2
+                  && tokens[index - 1].kind == TokenKind::LParen
+                  && tokens[index - 2].kind == TokenKind::Name
+                  && (tokens[index - 2].is_name(b"type") || tokens[index - 2].is_name(b"class"))
+          }
+          '''
+          new_type_spec = r'''fn is_type_spec_name(tokens: &[Token<'_>], index: usize) -> bool {
+              if index < 2 || tokens[index - 1].kind != TokenKind::LParen {
+                  return false;
+              }
+              if tokens[index - 2].kind == TokenKind::Name
+                  && (tokens[index - 2].is_name(b"type")
+                      || tokens[index - 2].is_name(b"class"))
+              {
+                  return true;
+              }
+              index >= 3
+                  && tokens[index - 2].is_name(b"is")
+                  && (tokens[index - 3].is_name(b"type")
+                      || tokens[index - 3].is_name(b"class"))
+          }
+          '''
+          replace(case_path, old_type_spec, new_type_spec)
+
+          type_path = "src/analysis/project/type_resolution.rs"
+          type_marker = "    /// Spell a member using only the exact derived-type entity reached from the\n"
+          type_method = r'''    /// Resolve a derived-type name in the active lexical/host/USE scope while
+              /// retaining the exact defining entity. SELECT TYPE guard refinement uses
+              /// this rather than a project-wide unqualified type-name table.
+              pub(crate) fn visible_type(
+                  &self,
+                  local: &FileFacts,
+                  line: usize,
+                  name: &[u8],
+              ) -> Option<ResolvedType> {
+                  let local = self.expanded(local);
+                  let scope = local.active_unit(line)?.scope;
+                  self.local_type_identity(local, scope, name).into_option()
+              }
+
+          '''
+          replace(type_path, type_marker, type_method + type_marker)
+
+          docs_path = "docs/full-mode.md"
+          old_docs = '''### Scope-analysis limitation
+
+          Project-aware name normalization models program units, interfaces, derived types, `BLOCK`, and
+          `ASSOCIATE` lexical scopes. `SELECT TYPE` and `SELECT RANK` branch associate-name refinement is not
+          yet represented as a distinct branch scope. Code that depends on a branch-specific refined dynamic
+          type is therefore left conservative when project resolution cannot prove a unique spelling; the
+          formatter does not guess from unrelated same-named project types.'''
+          new_docs = '''### SELECT TYPE and SELECT RANK association scopes
+
+          Project-aware name normalization models program units, interfaces, derived types, `BLOCK`, and
+          association constructs. `SELECT TYPE` and `SELECT RANK` association names are scoped to the select
+          construct. A `TYPE IS` or `CLASS IS` guard refines a `SELECT TYPE` association to the exact visible
+          derived-type entity for that branch, so same-named types in unrelated modules cannot contribute each
+          other's members. `SELECT RANK` retains the selector's exact derived-type identity across rank guards.
+          Default, intrinsic-type, or ambiguous guards stay conservative rather than borrowing an unrelated
+          project type. The casing pass carries this branch state directly; `ScopeTree` does not expose each
+          select guard as a general-purpose lexical scope to other analysis consumers.'''
+          replace(docs_path, old_docs, new_docs)
+
+          tests_path = Path("src/analysis/project/tests.rs")
+          tests = tests_path.read_text()
+          if "select_type_guards_refine_exact_type_identity" in tests:
+              raise SystemExit("SELECT tests already present")
+          tests += r'''
+
+          #[test]
+          fn select_type_guards_refine_exact_type_identity() {
+              let a = br#"module A
+          type :: T
+          integer :: FieldName
+          end type
+          end module
+          "#;
+              let b = br#"module B
+          type :: T
+          integer :: FIELDNAME
+          end type
+          end module
+          "#;
+              let target = br#"program p
+          use A, only: AT => T
+          use B, only: BT => T
+          class(*), allocatable :: x
+          select type (ItemAlias => x)
+          type is (AT)
+          print *, itemalias%fieldname
+          class is (BT)
+          print *, itemalias%fieldname
+          class default
+          print *, itemalias
+          end select
+          end program
+          "#;
+              let project = analyze_project([
+                  (Path::new("a.f90"), a.as_slice()),
+                  (Path::new("b.f90"), b.as_slice()),
+                  (Path::new("p.f90"), target.as_slice()),
+              ])
+              .unwrap();
+              let formatted = format_source_with_context(
+                  target,
+                  &project,
+                  &FormatConfig {
+                      mode: FormatMode::NormalizeOnly,
+                      ..FormatConfig::default()
+                  },
+              )
+              .unwrap();
+              let text = String::from_utf8(formatted.bytes).unwrap();
+              assert!(text.contains("ItemAlias%FieldName"));
+              assert!(text.contains("ItemAlias%FIELDNAME"));
+          }
+
+          #[test]
+          fn select_type_without_explicit_alias_keeps_selector_spelling() {
+              let types = br#"module types
+          type :: T
+          integer :: MemberName
+          end type
+          end module
+          "#;
+              let target = br#"program p
+          use types
+          class(*), allocatable :: Object
+          select type (object)
+          type is (T)
+          print *, object%membername
+          class default
+          print *, object
+          end select
+          end program
+          "#;
+              let project = analyze_project([
+                  (Path::new("types.f90"), types.as_slice()),
+                  (Path::new("p.f90"), target.as_slice()),
+              ])
+              .unwrap();
+              let formatted = format_source_with_context(
+                  target,
+                  &project,
+                  &FormatConfig {
+                      mode: FormatMode::NormalizeOnly,
+                      ..FormatConfig::default()
+                  },
+              )
+              .unwrap();
+              let text = String::from_utf8(formatted.bytes).unwrap();
+              assert!(text.contains("select type (Object)"));
+              assert!(text.contains("Object%MemberName"));
+          }
+
+          #[test]
+          fn select_rank_alias_keeps_type_identity_and_does_not_leak() {
+              let types = br#"module types
+          type :: T
+          integer :: RankMember
+          end type
+          end module
+          "#;
+              let target = br#"module user
+          use types
+          contains
+          subroutine s(x)
+          type(T) :: x(..)
+          integer :: ITEM
+          select rank (item => x)
+          rank (1)
+          print *, item(1)%rankmember
+          end select
+          print *, item
+          end subroutine
+          end module
+          "#;
+              let project = analyze_project([
+                  (Path::new("types.f90"), types.as_slice()),
+                  (Path::new("user.f90"), target.as_slice()),
+              ])
+              .unwrap();
+              let formatted = format_source_with_context(
+                  target,
+                  &project,
+                  &FormatConfig {
+                      mode: FormatMode::NormalizeOnly,
+                      ..FormatConfig::default()
+                  },
+              )
+              .unwrap();
+              let text = String::from_utf8(formatted.bytes).unwrap();
+              assert!(text.contains("item(1)%RankMember"));
+              assert!(text.contains("end select\nprint *, ITEM"));
+          }
+          '''
+          tests_path.write_text(tests)
+          PY
+          cargo fmt
+          cargo test --locked --all-targets select_type
+          cargo test --locked --all-targets select_rank
+          rm .github/workflows/improve-select-association.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "improve SELECT TYPE and SELECT RANK scoping"
+          git push origin HEAD:scope-module-visibility
