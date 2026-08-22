@@ -63,11 +63,35 @@ jobs:
           p.write_text(text.replace(old, new, 1))
           PY
           python /tmp/improve-select.py
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('src/transform/passes/case_pass.rs')
+          text = p.read_text()
+          old = '''            if let Some(scope) = &opening_scope {
+                  statement_context
+                      .names
+                      .extend(scope.frame().names.iter().cloned());
+              }
+          '''
+          new = '''            if let Some(scope) = &opening_scope {
+                  let selector_only = select_association_spec(&tokens, first)
+                      .is_some_and(|spec| !spec.explicit_alias);
+                  if !selector_only {
+                      statement_context
+                          .names
+                          .extend(scope.frame().names.iter().cloned());
+                  }
+              }
+          '''
+          if old not in text:
+              raise SystemExit('could not find opening association visibility block')
+          p.write_text(text.replace(old, new, 1))
+          PY
           cargo fmt
           cargo test --locked --all-targets select_type
           cargo test --locked --all-targets select_rank
           rm .github/workflows/improve-select-association.yml
-          git show HEAD^:.github/workflows/ci.yml > .github/workflows/ci.yml
+          git show bbc88c1c18a3a80c1deac511b38a809375d4b098:.github/workflows/ci.yml > .github/workflows/ci.yml
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
