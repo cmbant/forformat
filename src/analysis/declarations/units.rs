@@ -59,14 +59,6 @@ impl AccessFacts {
         self.default_access == Accessibility::Public
     }
 
-    pub(crate) fn is_public(&self, name: &[u8]) -> bool {
-        match self.explicit(name) {
-            Some(Accessibility::Private) => false,
-            Some(Accessibility::Public) => true,
-            None => self.default_is_public(),
-        }
-    }
-
     pub(crate) fn merge(&mut self, other: &Self) {
         if other.default_access == Accessibility::Private {
             self.default_access = Accessibility::Private;

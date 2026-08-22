@@ -19,7 +19,7 @@ mod type_resolution;
 mod visibility;
 
 pub use includes::{analyze_file, analyze_file_at, analyze_project};
-pub(crate) use type_resolution::{ResolvedType, TypeOrigin};
+pub(crate) use type_resolution::ResolvedType;
 
 /// The union of every project source's declarations, plus module export facts
 /// used to build the namespace visible from each formatting target.
