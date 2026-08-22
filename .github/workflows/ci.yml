@@ -111,7 +111,7 @@ jobs:
           cargo test --locked --all-targets select_type
           cargo test --locked --all-targets select_rank
           rm .github/workflows/improve-select-association.yml
-          git show bbc88c1c18a3a80c1deac511b38a809375d4b098:.github/workflows/ci.yml > .github/workflows/ci.yml
+          git show 605c2f44a74c58afd62ffcb35a095ee20d1588e2:.github/workflows/ci.yml > .github/workflows/ci.yml
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git add -A
