@@ -30,6 +30,38 @@ jobs:
             copy { sub(/^          /, ""); print }
           ' .github/workflows/improve-select-association.yml > /tmp/improve-select.py
           test -s /tmp/improve-select.py
+          python - <<'PY'
+          from pathlib import Path
+          p = Path('/tmp/improve-select.py')
+          text = p.read_text()
+          old = '''def replace(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f"missing expected text in {path}: {old[:80]!r}")
+              p.write_text(text.replace(old, new, 1))
+          '''
+          new = '''import re
+
+          def replace(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if old in text:
+                  p.write_text(text.replace(old, new, 1))
+                  return
+              pattern = ''.join(
+                  r'[ \\t]*' + re.escape(line.lstrip(' \\t'))
+                  for line in old.splitlines(keepends=True)
+              )
+              match = re.search(pattern, text)
+              if match is None:
+                  raise SystemExit(f"missing expected text in {path}: {old[:80]!r}")
+              p.write_text(text[:match.start()] + new + text[match.end():])
+          '''
+          if old not in text:
+              raise SystemExit('could not patch staging helper')
+          p.write_text(text.replace(old, new, 1))
+          PY
           python /tmp/improve-select.py
           cargo fmt
           cargo test --locked --all-targets select_type
