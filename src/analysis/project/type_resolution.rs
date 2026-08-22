@@ -1,7 +1,5 @@
 use super::{
-    visibility::{
-        export_entity_is_public, export_route_is_public, merge_definitions, Visibility,
-    },
+    visibility::{export_entity_is_public, export_route_is_public, merge_definitions, Visibility},
     ProjectContext,
 };
 use crate::analysis::declarations::{FileFacts, HostUnit, UnitFacts, UseAssociation};
@@ -180,12 +178,7 @@ impl ProjectContext {
             return self.host_visible_type_identity(host, type_name, &mut type_visited);
         }
         let mut use_visited = HashSet::new();
-        match self.imported_variable_type_identity(
-            &unit.imports,
-            lower,
-            None,
-            &mut use_visited,
-        ) {
+        match self.imported_variable_type_identity(&unit.imports, lower, None, &mut use_visited) {
             Visibility::Absent => {}
             found => return found,
         }
@@ -207,9 +200,7 @@ impl ProjectContext {
     ) -> Visibility<ResolvedType> {
         let mut resolved = Visibility::Absent;
         for association in imports {
-            if exporting_unit
-                .is_some_and(|unit| !export_route_is_public(unit, name, association))
-            {
+            if exporting_unit.is_some_and(|unit| !export_route_is_public(unit, name, association)) {
                 continue;
             }
             for target in association.targets(name) {
@@ -232,9 +223,7 @@ impl ProjectContext {
     ) -> Visibility<ResolvedType> {
         let mut resolved = Visibility::Absent;
         for association in imports {
-            if exporting_unit
-                .is_some_and(|unit| !export_route_is_public(unit, name, association))
-            {
+            if exporting_unit.is_some_and(|unit| !export_route_is_public(unit, name, association)) {
                 continue;
             }
             for target in association.targets(name) {

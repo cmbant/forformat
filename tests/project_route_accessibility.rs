@@ -56,7 +56,8 @@ fn public_named_use_route_overrides_private_default() {
 #[test]
 fn explicit_public_entity_overrides_private_route() {
     let base = b"module Base\ninteger :: ExportedName\nend module Base\n";
-    let middle = b"module Middle\nuse Base\nprivate :: Base\npublic :: ExportedName\nend module Middle\n";
+    let middle =
+        b"module Middle\nuse Base\nprivate :: Base\npublic :: ExportedName\nend module Middle\n";
     let target = b"program p\nuse Middle\nprint *, exportedname\nend program p\n";
     let output = normalize(
         target,
@@ -86,7 +87,8 @@ fn named_use_routes_are_merged_independently() {
     );
     assert!(output.contains("print *, SHAREDNAME"));
 
-    let all_private = b"module Middle\nuse First\nuse Second\nprivate :: First, Second\nend module Middle\n";
+    let all_private =
+        b"module Middle\nuse First\nuse Second\nprivate :: First, Second\nend module Middle\n";
     let output = normalize(
         target,
         [

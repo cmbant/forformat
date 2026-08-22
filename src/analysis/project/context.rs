@@ -47,12 +47,7 @@ impl ProjectContext {
 
     /// `expanded` is consumed: it is retained verbatim as this path's scope
     /// facts, and every caller has already finished with it.
-    pub(super) fn absorb_expanded(
-        &mut self,
-        path: &Path,
-        facts: &FileFacts,
-        expanded: FileFacts,
-    ) {
+    pub(super) fn absorb_expanded(&mut self, path: &Path, facts: &FileFacts, expanded: FileFacts) {
         self.cases.merge(&facts.cases);
         // Included owner-qualified members are safe to add to the project type
         // graph; included root declarations remain in expanded scope facts.

@@ -48,12 +48,14 @@ end program p
         (
             Path::new("../defs.inc"),
             br#"integer :: ValueCase
-"#.as_slice(),
+"#
+            .as_slice(),
         ),
         (
             Path::new("defs.inc"),
             br#"integer :: VALUECASE
-"#.as_slice(),
+"#
+            .as_slice(),
         ),
     ])
     .unwrap();
@@ -71,9 +73,11 @@ fn a_project_wide_agreement_applies_to_a_file_that_does_not_declare_the_name() {
         (Path::new("user.f90"), USER),
     ])
     .unwrap();
-    let local = analyze_file(br#"program r
+    let local = analyze_file(
+        br#"program r
 end program r
-"#)
+"#,
+    )
     .unwrap();
     let resolver = project.resolver(&local);
     assert_eq!(
@@ -90,9 +94,11 @@ end program r
 fn project_wide_disagreement_leaves_the_name_alone() {
     let project =
         analyze_project([(Path::new("a.f90"), MODULE), (Path::new("b.f90"), SHOUTER)]).unwrap();
-    let local = analyze_file(br#"program r
+    let local = analyze_file(
+        br#"program r
 end program r
-"#)
+"#,
+    )
     .unwrap();
     assert_eq!(
         project
@@ -105,9 +111,11 @@ end program r
 #[test]
 fn a_local_spelling_still_wins_over_the_project() {
     let project = analyze_project([(Path::new("a.f90"), MODULE)]).unwrap();
-    let local = analyze_file(br#"module PRECISION
+    let local = analyze_file(
+        br#"module PRECISION
 end module PRECISION
-"#)
+"#,
+    )
     .unwrap();
     assert_eq!(
         project
@@ -131,9 +139,11 @@ fn command_line_defines_join_the_macro_table() {
         name: "MPI_Enabled".to_string(),
         value: None,
     }]);
-    let local = analyze_file(br#"program p
+    let local = analyze_file(
+        br#"program p
 end
-"#)
+"#,
+    )
     .unwrap();
     assert_eq!(
         project
@@ -149,12 +159,15 @@ fn synthetic_project_cases_cover_local_and_project_precedence() {
         Path::new("declared.f90"),
         br#"module SharedName
 end module SharedName
-"#.as_slice(),
+"#
+        .as_slice(),
     )])
     .unwrap();
-    let no_local = analyze_file(br#"program p
+    let no_local = analyze_file(
+        br#"program p
 end program p
-"#)
+"#,
+    )
     .unwrap();
     assert_eq!(
         declared
@@ -168,13 +181,15 @@ end program p
             Path::new("a.f90"),
             br#"module SplitName
 end module
-"#.as_slice(),
+"#
+            .as_slice(),
         ),
         (
             Path::new("b.f90"),
             br#"module SPLITNAME
 end module
-"#.as_slice(),
+"#
+            .as_slice(),
         ),
     ])
     .unwrap();
@@ -190,13 +205,16 @@ end module
         br#"module M
 integer :: Colliding
 end module M
-"#.as_slice(),
+"#
+        .as_slice(),
     )])
     .unwrap();
-    let local = analyze_file(br#"module Local
+    let local = analyze_file(
+        br#"module Local
 integer :: COLLIDING
 end module Local
-"#)
+"#,
+    )
     .unwrap();
     assert_eq!(
         project
@@ -212,16 +230,19 @@ type :: T
 integer :: Component
 end type T
 end module C
-"#.as_slice(),
+"#
+        .as_slice(),
     )])
     .unwrap();
-    let component_local = analyze_file(br#"module L
+    let component_local = analyze_file(
+        br#"module L
 type :: T
 integer :: COMPONENT
 end type T
 integer :: Component
 end module L
-"#)
+"#,
+    )
     .unwrap();
     let resolver = component_project.resolver(&component_local);
     assert_eq!(

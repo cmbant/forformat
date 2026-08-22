@@ -302,9 +302,7 @@ impl ProjectContext {
         let mut resolved = Visibility::Absent;
         let lower = name.to_ascii_lowercase();
         for association in imports {
-            if exporting_unit
-                .is_some_and(|unit| !export_route_is_public(unit, name, association))
-            {
+            if exporting_unit.is_some_and(|unit| !export_route_is_public(unit, name, association)) {
                 continue;
             }
             for target in association.targets(name) {
@@ -342,9 +340,7 @@ impl ProjectContext {
     ) -> Visibility<Vec<u8>> {
         let mut resolved = Visibility::Absent;
         for association in imports {
-            if exporting_unit
-                .is_some_and(|unit| !export_route_is_public(unit, name, association))
-            {
+            if exporting_unit.is_some_and(|unit| !export_route_is_public(unit, name, association)) {
                 continue;
             }
             for target in association.targets(name) {
