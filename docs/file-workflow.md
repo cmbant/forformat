@@ -32,10 +32,12 @@ stdin file identity and stale on-disk shadowing.
 A Fortran `INCLUDE` line in a source that project analysis reads is resolved from disk, relative to
 the directory of the including file, and its declarations are merged into the scope containing the
 `INCLUDE`. This resolution is deliberately **not** filtered by `context_paths`, `exclude`, or
-`extend-exclude`: the fragment is part of the text of a file already selected for analysis, exactly
-as a compiler would see it, so dropping it would mis-analyse that selected file rather than narrow
+`extend-exclude`: the fragment is part of the text of a file already selected for analysis, as part of the selected source, so dropping it would mis-analyse that selected file rather than narrow
 the project. A fragment therefore contributes even when it lives outside every `--context-path` or
-matches an `--exclude` pattern, and an absolute include path is read as written. Only files a
+matches an `--exclude` pattern, and an absolute include path is read as written. This models
+absolute paths and paths relative to the including source only; it does not emulate arbitrary
+compiler `-I`/include-directory search paths. Missing, unreadable, or unanalyzable fragments are
+ignored conservatively rather than guessed from another directory. Only files a
 fragment is actually included by can see it; it never becomes a project-wide source in its own
 right. The one exception is a fragment that defines a whole program unit rather than a list of
 declarations: a module or submodule written inside a fragment is registered project-wide, because

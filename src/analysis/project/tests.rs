@@ -530,3 +530,136 @@ end program p
         None
     );
 }
+
+#[test]
+fn intrinsic_use_does_not_traverse_a_same_named_project_module() {
+    let fake = br#"module iso_fortran_env
+integer :: ProjectInt64
+end module iso_fortran_env
+"#;
+    let intrinsic = br#"program p
+use, intrinsic :: iso_fortran_env, only: ProjectInt64
+print *, projectint64
+end program p
+"#;
+    let non_intrinsic = br#"program p
+use, non_intrinsic :: iso_fortran_env, only: ProjectInt64
+print *, projectint64
+end program p
+"#;
+    let project = analyze_project([
+        (Path::new("fake.f90"), fake.as_slice()),
+        (Path::new("intrinsic.f90"), intrinsic.as_slice()),
+        (Path::new("non_intrinsic.f90"), non_intrinsic.as_slice()),
+    ])
+    .unwrap();
+    let intrinsic_local = analyze_file(intrinsic).unwrap();
+    let non_intrinsic_local = analyze_file(non_intrinsic).unwrap();
+    assert_eq!(
+        project.visible_symbol_spelling(&intrinsic_local, 2, b"projectint64"),
+        None
+    );
+    assert_eq!(
+        project.visible_symbol_spelling(&non_intrinsic_local, 2, b"projectint64"),
+        Some(b"ProjectInt64".to_vec())
+    );
+}
+
+#[test]
+fn private_derived_type_members_require_owner_context() {
+    let module = br#"module owner
+public :: T
+type :: T
+private
+integer :: PrivateField
+integer, public :: PublicField
+contains
+procedure, private :: PrivateBinding
+procedure, public :: PublicBinding
+end type T
+contains
+subroutine inside(x)
+type(T) :: x
+print *, x%privatefield, x%publicfield
+call x%privatebinding()
+call x%publicbinding()
+end subroutine inside
+end module owner
+"#;
+    let target = br#"program p
+use owner
+implicit none
+type(T) :: x
+print *, x%privatefield, x%publicfield
+call x%privatebinding()
+call x%publicbinding()
+end program p
+"#;
+    let project = analyze_project([
+        (Path::new("owner.f90"), module.as_slice()),
+        (Path::new("target.f90"), target.as_slice()),
+    ])
+    .unwrap();
+    let outside = analyze_file(target).unwrap();
+    let outside_ty = project.visible_variable_type(&outside, 4, b"x").unwrap();
+    assert_eq!(
+        project.visible_member_spelling(&outside, 4, &outside_ty, b"privatefield"),
+        None
+    );
+    assert_eq!(
+        project.visible_member_spelling(&outside, 4, &outside_ty, b"publicfield"),
+        Some(b"PublicField".to_vec())
+    );
+    let inside = analyze_file(module).unwrap();
+    let inside_ty = project.visible_variable_type(&inside, 13, b"x").unwrap();
+    assert_eq!(
+        project.visible_member_spelling(&inside, 13, &inside_ty, b"privatefield"),
+        Some(b"PrivateField".to_vec())
+    );
+    assert_eq!(
+        project.visible_member_spelling(&inside, 14, &inside_ty, b"privatebinding"),
+        Some(b"PrivateBinding".to_vec())
+    );
+}
+
+#[test]
+fn associate_member_keeps_exact_same_named_type_identity() {
+    let a = br#"module A
+type :: T
+integer :: FieldName
+end type
+end module
+"#;
+    let b = br#"module B
+type :: T
+integer :: FIELDNAME
+end type
+end module
+"#;
+    let target = br#"program p
+use A
+type(T) :: x
+associate(y => x)
+print *, y%fieldname
+end associate
+end program
+"#;
+    let project = analyze_project([
+        (Path::new("a.f90"), a.as_slice()),
+        (Path::new("b.f90"), b.as_slice()),
+        (Path::new("p.f90"), target.as_slice()),
+    ])
+    .unwrap();
+    let formatted = format_source_with_context(
+        target,
+        &project,
+        &FormatConfig {
+            mode: FormatMode::NormalizeOnly,
+            ..FormatConfig::default()
+        },
+    )
+    .unwrap();
+    assert!(String::from_utf8(formatted.bytes)
+        .unwrap()
+        .contains("y%FieldName"));
+}

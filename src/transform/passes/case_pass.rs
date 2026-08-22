@@ -7,6 +7,7 @@
 use crate::{
     analysis::{
         names::{resolve, NameSpace},
+        project::ResolvedType,
         scoped_declared_names, CaseMap, DeclaredNameIndex, DeclaredSpelling, TypeMaps,
     },
     error::FormatError,
@@ -31,6 +32,7 @@ struct AssociateFrame {
     names: HashSet<Vec<u8>>,
     types: HashMap<Vec<u8>, Vec<u8>>,
     spellings: HashMap<Vec<u8>, Vec<u8>>,
+    resolved_types: HashMap<Vec<u8>, ResolvedType>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,10 +65,17 @@ struct ClassificationContext<'a> {
 pub(super) enum CaseEvidence {
     KeepBase,
     Alias(Vec<u8>),
-    Symbol { allow_external: bool },
+    Symbol {
+        allow_external: bool,
+    },
     Type,
-    UseRemote { module: Vec<u8> },
-    Member { owner: Vec<Vec<u8>> },
+    UseRemote {
+        module: Vec<u8>,
+    },
+    Member {
+        owner: Vec<Vec<u8>>,
+        resolved_owner: Option<ResolvedType>,
+    },
 }
 
 pub(super) type CaseEvidenceMap = HashMap<(usize, usize), CaseEvidence>;
@@ -79,11 +88,15 @@ impl AssociateFrame {
             // same name instead of exposing the outer entity by accident.
             self.types.remove(name);
             self.spellings.remove(name);
+            self.resolved_types.remove(name);
             if let Some(type_name) = frame.types.get(name) {
                 self.types.insert(name.clone(), type_name.clone());
             }
             if let Some(spelling) = frame.spellings.get(name) {
                 self.spellings.insert(name.clone(), spelling.clone());
+            }
+            if let Some(owner) = frame.resolved_types.get(name) {
+                self.resolved_types.insert(name.clone(), owner.clone());
             }
         }
     }
@@ -260,9 +273,9 @@ fn declared_with_names_impl(
             let opening_frame = associate_opening(&tokens, first).map(|_| {
                 associate_frame(
                     &tokens,
+                    group.lines.start,
                     active_procedure(cx.scopes, group.lines.start),
-                    cx.local,
-                    Some(&cx.project.types),
+                    cx,
                     &associate_context,
                 )
             });
@@ -402,7 +415,7 @@ fn classify_spelling(
             .get(index - 2)
             .is_some_and(|token| token.kind == TokenKind::RParen)
     {
-        record_member_evidence(tokens, index, &mut evidence);
+        record_member_evidence(tokens, index, line, cx, associates, &mut evidence);
         return None;
     }
     if cx.project.macros.contains(token.text) {
@@ -484,7 +497,7 @@ fn classify_spelling(
     }
 
     if preceded_by_percent(tokens, index) {
-        record_member_evidence(tokens, index, &mut evidence);
+        record_member_evidence(tokens, index, line, cx, associates, &mut evidence);
         let procedure = active_procedure(cx.scopes, line);
         let owner_type = member_owner_type(
             tokens,
@@ -548,17 +561,41 @@ fn record_case_evidence(evidence: &mut Option<&mut CaseEvidence>, value: CaseEvi
 fn record_member_evidence(
     tokens: &[Token<'_>],
     index: usize,
+    line: usize,
+    cx: &PassContext,
+    associates: Option<&AssociateFrame>,
     evidence: &mut Option<&mut CaseEvidence>,
 ) {
     let Some(owner) = component_owner_names(tokens, index, true) else {
         return;
     };
+    let names = owner.into_iter().map(ToOwned::to_owned).collect::<Vec<_>>();
+    let resolved_owner = exact_member_owner(&names, line, cx, associates);
     record_case_evidence(
         evidence,
         CaseEvidence::Member {
-            owner: owner.into_iter().map(ToOwned::to_owned).collect(),
+            owner: names,
+            resolved_owner,
         },
     );
+}
+
+fn exact_member_owner(
+    names: &[Vec<u8>],
+    line: usize,
+    cx: &PassContext,
+    associates: Option<&AssociateFrame>,
+) -> Option<ResolvedType> {
+    let root = names.first()?;
+    let mut current = associates
+        .and_then(|frame| frame.resolved_types.get(root.as_slice()).cloned())
+        .or_else(|| cx.project.visible_variable_type(cx.local, line, root))?;
+    for link in &names[1..] {
+        current = cx
+            .project
+            .visible_component_type(cx.local, line, &current, link)?;
+    }
+    Some(current)
 }
 
 /// Reclassify occurrence-level namespaces whose provenance depends on the
@@ -574,7 +611,7 @@ fn reconcile_occurrence_evidence(
     let token = &tokens[index];
 
     if let Some(module_index) = use_module_index(tokens) {
-        if index <= module_index || is_use_only_keyword(tokens, index) {
+        if is_use_intrinsic(tokens) || index <= module_index || is_use_only_keyword(tokens, index) {
             *evidence = CaseEvidence::KeepBase;
         } else if is_use_rename_local(tokens, index) {
             *evidence = CaseEvidence::Alias(token.text.to_vec());
@@ -591,11 +628,16 @@ fn reconcile_occurrence_evidence(
         return;
     }
 
-    if let CaseEvidence::Member { owner } = evidence {
-        if owner
-            .first()
-            .and_then(|root| associate_spelling(enclosing_associates, root))
-            .is_some()
+    if let CaseEvidence::Member {
+        owner,
+        resolved_owner,
+    } = evidence
+    {
+        if resolved_owner.is_none()
+            && owner
+                .first()
+                .and_then(|root| associate_spelling(enclosing_associates, root))
+                .is_some()
         {
             // The base pass can know this member's owner from the selector
             // type inferred for the ASSOCIATE alias. The project-scoped
@@ -938,9 +980,9 @@ fn associate_opening(tokens: &[Token<'_>], first: Option<usize>) -> Option<usize
 
 fn associate_frame(
     tokens: &[Token<'_>],
+    line: usize,
     procedure: Option<&[u8]>,
-    local: &crate::analysis::FileFacts,
-    project: Option<&TypeMaps>,
+    cx: &PassContext,
     outer: &AssociateFrame,
 ) -> AssociateFrame {
     let mut frame = AssociateFrame::default();
@@ -948,8 +990,31 @@ fn associate_frame(
         let name = alias.to_ascii_lowercase();
         frame.names.insert(name.clone());
         frame.spellings.insert(name.clone(), alias.to_vec());
-        if let Some(type_name) = designator_type(selector, procedure, local, project, outer) {
-            frame.types.insert(name, type_name);
+        if let Some(type_name) = designator_type(
+            selector,
+            procedure,
+            cx.local,
+            Some(&cx.project.types),
+            outer,
+        ) {
+            frame.types.insert(name.clone(), type_name);
+        }
+        if let Some(names) = designator_names(selector) {
+            let root = names[0].to_ascii_lowercase();
+            let mut resolved = outer
+                .resolved_types
+                .get(root.as_slice())
+                .cloned()
+                .or_else(|| cx.project.visible_variable_type(cx.local, line, &root));
+            for link in &names[1..] {
+                resolved = resolved.and_then(|owner| {
+                    cx.project
+                        .visible_component_type(cx.local, line, &owner, link)
+                });
+            }
+            if let Some(resolved) = resolved {
+                frame.resolved_types.insert(name, resolved);
+            }
         }
     }
     frame
@@ -1129,6 +1194,24 @@ fn use_module_index(tokens: &[Token<'_>]) -> Option<usize> {
         .get(cursor)
         .filter(|token| token.kind == TokenKind::Name)
         .map(|_| cursor)
+}
+
+fn is_use_intrinsic(tokens: &[Token<'_>]) -> bool {
+    let Some(use_index) = tokens
+        .iter()
+        .position(|token| token.kind != TokenKind::Number)
+    else {
+        return false;
+    };
+    let Some(separator) = tokens
+        .iter()
+        .position(|token| token.depth == 0 && token.text == b"::")
+    else {
+        return false;
+    };
+    tokens[use_index + 1..separator]
+        .iter()
+        .any(|token| token.depth == 0 && token.is_name(b"intrinsic"))
 }
 
 fn is_use_module(tokens: &[Token<'_>], index: usize) -> bool {
@@ -1755,7 +1838,7 @@ end module ExampleMain\n";
             ),
             (
                 b"subroutine host\nimplicit none\ncontains\nsubroutine s(A)\ndo I = 1, 3\nA(I) = I\nend subroutine s\nend subroutine host\n".as_slice(),
-                b"subroutine host\nimplicit none\ncontains\nsubroutine s(A)\ndo i = 1, 3\nA(i) = I\nend subroutine s\nend subroutine host\n".as_slice(),
+                b"subroutine host\nimplicit none\ncontains\nsubroutine s(A)\ndo i = 1, 3\nA(i) = i\nend subroutine s\nend subroutine host\n".as_slice(),
             ),
             (
                 b"module target\nimplicit none\ninterface\nsubroutine s(A)\ndo I = 1, 3\nA(I) = I\nend subroutine s\nend interface\nend module target\n".as_slice(),

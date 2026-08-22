@@ -1,6 +1,6 @@
 use super::ProjectContext;
 use crate::analysis::declarations::{
-    Accessibility, FileFacts, HostUnit, UnitFacts, UseAssociation,
+    Accessibility, FileFacts, HostUnit, ModuleNature, UnitFacts, UseAssociation,
 };
 use std::collections::HashSet;
 
@@ -299,6 +299,9 @@ impl ProjectContext {
         let mut resolved = Visibility::Absent;
         let lower = name.to_ascii_lowercase();
         for association in imports {
+            if association.nature == ModuleNature::Intrinsic {
+                continue;
+            }
             if exporting_unit.is_some_and(|unit| !export_route_is_public(unit, name, association)) {
                 continue;
             }
@@ -337,6 +340,9 @@ impl ProjectContext {
     ) -> Visibility<Vec<u8>> {
         let mut resolved = Visibility::Absent;
         for association in imports {
+            if association.nature == ModuleNature::Intrinsic {
+                continue;
+            }
             if exporting_unit.is_some_and(|unit| !export_route_is_public(unit, name, association)) {
                 continue;
             }
