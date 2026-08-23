@@ -441,7 +441,9 @@ fn complete_list_directed_io_statement(code: &[u8]) -> bool {
         .take_while(|byte| byte.is_ascii_digit())
         .count();
     if (1..=5).contains(&label_len)
-        && statement.get(label_len).is_some_and(u8::is_ascii_whitespace)
+        && statement
+            .get(label_len)
+            .is_some_and(u8::is_ascii_whitespace)
     {
         statement = trim_left(&statement[label_len..]);
     }
@@ -911,7 +913,8 @@ mod tests {
     #[test]
     fn continued_preprocessor_directives_are_skipped() {
         let source =
-            b"#define CONT \\\n     &\nprogram p\ninteger :: x\nx = 1 CONT\n+ 2\nend program p\n";
+            b"#define CONT \\
+     &\nprogram p\ninteger :: x\nx = 1 CONT\n+ 2\nend program p\n";
         assert_eq!(detect(source), SourceForm::Free);
     }
 
