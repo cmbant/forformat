@@ -9,7 +9,7 @@ pub(in crate::cli) struct ConfigSelection {
 }
 
 impl ConfigSelection {
-    pub(super) fn resolve(&self) -> Result<(bool, Option<PathBuf>), FormatError> {
+    pub(in crate::cli) fn resolve(&self) -> Result<(bool, Option<PathBuf>), FormatError> {
         let mut explicit = None;
         for path in &self.explicit {
             if path.is_empty() || path.starts_with('-') {
