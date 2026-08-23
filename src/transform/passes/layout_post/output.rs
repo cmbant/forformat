@@ -27,8 +27,9 @@ pub fn output_whitespace(
 
 /// A full-line comment whose body is one repeated non-whitespace byte is a
 /// visual separator, not prose to reflow. Once layout has chosen its final
-/// column, shorten the line to the wrap budget. Ordinary and inline comments
-/// are deliberately untouched.
+/// column, shorten the line to the wrap budget only when the comment prefix and
+/// at least one separator byte fit. Ordinary and inline comments are
+/// deliberately untouched.
 fn truncate_comment_separator(line: &mut Vec<u8>, line_length: usize) {
     if line.len() <= line_length {
         return;
@@ -46,6 +47,11 @@ fn truncate_comment_separator(line: &mut Vec<u8>, line_length: usize) {
         return;
     };
     let separator_start = comment_start + 1 + relative_start;
+    // Preserve indentation, the `!` marker, any spacing after it, and at least
+    // one separator byte when the configured budget is extremely small.
+    if separator_start >= line_length {
+        return;
+    }
     let separator = line[separator_start];
     let body = &line[separator_start..];
     if body.len() >= 3 && body.iter().all(|byte| *byte == separator) {
@@ -96,6 +102,26 @@ mod tests {
             document.to_bytes(),
             b"! ----------\n!CCCCCCCCCCC\n!   ########\n    ! ------\n! ordinary words are not separators\n"
         );
+    }
+
+    #[test]
+    fn separator_comments_keep_prefix_when_budget_is_too_small() {
+        let source = b"    ! --------------------\n";
+        for line_length in [0, 1, 4, 5, 6] {
+            let mut config = FormatConfig::default();
+            config.wrap.line_length = line_length;
+            let mut document = Document::from_bytes(source);
+
+            output_whitespace(&mut document, &config).unwrap();
+
+            assert_eq!(document.to_bytes(), source, "line_length={line_length}");
+        }
+
+        let mut config = FormatConfig::default();
+        config.wrap.line_length = 7;
+        let mut document = Document::from_bytes(source);
+        output_whitespace(&mut document, &config).unwrap();
+        assert_eq!(document.to_bytes(), b"    ! -\n");
     }
 
     #[test]
