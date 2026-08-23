@@ -63,6 +63,10 @@ struct LineContext<'a> {
     /// The previous line ended on `%`, so this line opens with a component
     /// name that no token on the line itself identifies as one.
     continued_component: bool,
+    /// The logical statement carries a top-level `::` somewhere, which this
+    /// physical line need not hold: a declaration continued before its
+    /// separator is not the old-style declaration its first line resembles.
+    statement_separator: bool,
 }
 
 /// Continuation and lexical state for one physical source stream.
@@ -101,6 +105,8 @@ impl StatementState {
                 .is_some_and(|tokens| common::is_declaration_statement(&tokens));
         let continued_format = self.continued_statement
             && first_statement_tokens().is_some_and(|tokens| common::is_format_statement(&tokens));
+        let statement_separator =
+            first_statement_tokens().is_some_and(|tokens| common::has_top_level_separator(&tokens));
 
         LineContext {
             preserve_comment_after,
@@ -115,6 +121,7 @@ impl StatementState {
             continued_initializer: self.entity_list.initializer,
             continued_separator: self.continued_statement && self.entity_list.separator,
             continued_component: self.continued_component,
+            statement_separator,
         }
     }
 
@@ -399,19 +406,29 @@ fn apply_rules(
             cx,
             incoming,
             context.continued_statement,
+            context.statement_separator,
             context.open_groups.len(),
             context.multiple_subscript_depths,
         );
     }
     // 5. Comment spacing (physical lines only).
     if normalize_whitespace && physical {
+        // A trailing comment on a continued physical line owns its authored
+        // gap.  Recomputing growth from the already-normalized continuation
+        // can make the first pass shrink that gap while the second pass sees
+        // no corresponding source change, violating I1.
+        let code_growth = if context.continued_statement {
+            0
+        } else {
+            common::comment_spacing::code_span_len(&text) as isize
+                - common::comment_spacing::code_span_len(line) as isize
+        };
         text = common::comment_spacing::normalize_comment_spacing_with_state(
             &text,
             cx,
             incoming,
             context.preserve_comment_after,
-            common::comment_spacing::code_span_len(&text) as isize
-                - common::comment_spacing::code_span_len(line) as isize,
+            code_growth,
         );
     }
 

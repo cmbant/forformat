@@ -38,6 +38,7 @@ PROFILES: dict[str, list[str]] = {
     "indent4": [*FULL, "--indent=4"],
     "indent8": [*FULL, "--indent=8"],
     "normalize-only": ["--normalize-only", "--no-config"],
+    "canonicalize-only": ["--canonicalize-only", "--no-config"],
     "indent-only": INDENT_ONLY,
     # New full-mode style controls.  The explicit-on profile checks the
     # command-line wiring, while the off profiles exercise each independent
@@ -307,6 +308,14 @@ SEQUENCES: dict[str, list[list[str]]] = {
     "full-indentonly": [PROFILES["full-plain"], PROFILES["indent-only"]],
     "indentonly-full": [PROFILES["indent-only"], PROFILES["full-plain"]],
     "normalize-full": [PROFILES["normalize-only"], PROFILES["full-plain"]],
+    "canonicalize-full": [
+        PROFILES["canonicalize-only"],
+        PROFILES["full-plain"],
+    ],
+    "full-canonicalize": [
+        PROFILES["full-plain"],
+        PROFILES["canonicalize-only"],
+    ],
     "style-off-style-on": [PROFILES["style-all-off"], PROFILES["style-explicit-on"]],
     "style-mixed-layout": [
         PROFILES["style-lex-spacing-layout"],

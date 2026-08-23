@@ -11,6 +11,7 @@ pub mod conditional_continuations;
 pub mod continuations;
 pub mod layout_post;
 pub mod line_rules;
+pub mod named_end;
 mod provenance;
 pub mod rewrap;
 pub mod scoped_case;

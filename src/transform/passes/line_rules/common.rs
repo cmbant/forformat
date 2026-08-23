@@ -142,6 +142,12 @@ fn common_block_edit(
     Some((tokens[index].span.start, end, replacement))
 }
 
+/// True when the statement carries a `::` outside every bracket: the token
+/// that separates a modern declaration's attributes from its entity list.
+pub(super) fn has_top_level_separator(tokens: &[crate::source::Token<'_>]) -> bool {
+    top_level_separator(tokens).is_some()
+}
+
 fn top_level_separator(tokens: &[crate::source::Token<'_>]) -> Option<usize> {
     tokens.iter().position(|token| {
         token.kind == TokenKind::Operator && token.text == b"::" && token.depth == 0
