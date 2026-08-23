@@ -141,6 +141,13 @@ continuation markers. It never splits a token, Hollerith payload, or continued l
 literal may split only at a whitespace boundary inside its content. If no safe break exists, the
 whole statement is retained and a decline diagnostic explains why.
 
+Full-line comment separators whose body is a run of one repeated non-whitespace character are not
+prose to reflow. With wrapping enabled, if their final laid-out line exceeds `--line-length`, the
+repeated run is truncated to the budget when the comment prefix itself fits. This covers shapes such
+as `! ----------------`, `!CCCCCCCC`, and `!   ########`. Ordinary prose comments and inline
+comments are left unchanged, and disabling wrapping leaves separator comments at their authored
+length.
+
 The available width is measured from the text the engine will emit. Normalization can widen a
 statement, the engine can move it, and declaration-separator alignment can add owed space around
 `::`; the wrapper accounts for those effects. Parenthesis alignment and continuation indentation

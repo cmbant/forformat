@@ -3,21 +3,54 @@ use crate::{
     transform::document::Document,
 };
 
-/// Step 20: remove trailing horizontal whitespace and normalize EOF newline.
+/// Step 20: remove trailing horizontal whitespace, truncate overlong visual
+/// separator comments when wrapping is enabled, and normalize EOF newline.
 pub fn output_whitespace(
     document: &mut Document,
     config: &FormatConfig,
 ) -> Result<(), FormatError> {
-    let _ = config;
     let had_input = document.trailing_newline
         || document.lines.len() > 1
         || document.lines.first().is_some_and(|line| !line.is_empty());
     trim_trailing_horizontal(document);
+    if config.wrap.enabled {
+        for line in &mut document.lines {
+            truncate_comment_separator(line, config.wrap.line_length);
+        }
+    }
     while document.lines.len() > 1 && document.lines.last().is_some_and(Vec::is_empty) {
         document.lines.pop();
     }
     document.trailing_newline = had_input;
     Ok(())
+}
+
+/// A full-line comment whose body is one repeated non-whitespace byte is a
+/// visual separator, not prose to reflow. Once layout has chosen its final
+/// column, shorten the line to the wrap budget. Ordinary and inline comments
+/// are deliberately untouched.
+fn truncate_comment_separator(line: &mut Vec<u8>, line_length: usize) {
+    if line.len() <= line_length {
+        return;
+    }
+    let Some(comment_start) = line.iter().position(|byte| !byte.is_ascii_whitespace()) else {
+        return;
+    };
+    if line[comment_start] != b'!' {
+        return;
+    }
+    let Some(relative_start) = line[comment_start + 1..]
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+    else {
+        return;
+    };
+    let separator_start = comment_start + 1 + relative_start;
+    let separator = line[separator_start];
+    let body = &line[separator_start..];
+    if body.len() >= 3 && body.iter().all(|byte| *byte == separator) {
+        line.truncate(line_length);
+    }
 }
 
 /// Step 20's trailing-whitespace half, which every mode owes.
@@ -41,5 +74,40 @@ pub fn trim_trailing_horizontal(document: &mut Document) {
             end -= 1;
         }
         line.truncate(end);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::output_whitespace;
+    use crate::{config::FormatConfig, transform::document::Document};
+
+    #[test]
+    fn wrapped_separator_comments_are_truncated_to_the_line_length() {
+        let mut config = FormatConfig::default();
+        config.wrap.line_length = 12;
+        let mut document = Document::from_bytes(
+            b"! --------------------\n!CCCCCCCCCCCCCCCC\n!   ################\n    ! --------------------\n! ordinary words are not separators\n",
+        );
+
+        output_whitespace(&mut document, &config).unwrap();
+
+        assert_eq!(
+            document.to_bytes(),
+            b"! ----------\n!CCCCCCCCCCC\n!   ########\n    ! ------\n! ordinary words are not separators\n"
+        );
+    }
+
+    #[test]
+    fn separator_comments_are_unchanged_when_wrapping_is_disabled() {
+        let mut config = FormatConfig::default();
+        config.wrap.enabled = false;
+        config.wrap.line_length = 12;
+        let source = b"! --------------------\n";
+        let mut document = Document::from_bytes(source);
+
+        output_whitespace(&mut document, &config).unwrap();
+
+        assert_eq!(document.to_bytes(), source);
     }
 }
