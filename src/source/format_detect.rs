@@ -427,11 +427,33 @@ fn free_statement_label_extends_past_column_six(line: &[u8]) -> bool {
 
 fn line_requires_continuation(line: &[u8]) -> bool {
     let code = rtrim(free_code_prefix(line));
-    if code.last() == Some(&b'&') {
+    if code.last() == Some(&b'&') || complete_list_directed_io_statement(code) {
         return false;
     }
     code.last()
         .is_some_and(|byte| matches!(byte, b',' | b'+' | b'-' | b'*' | b'=' | b'(' | b'%'))
+}
+
+fn complete_list_directed_io_statement(code: &[u8]) -> bool {
+    let mut statement = trim_left(code);
+    let label_len = statement
+        .iter()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
+    if (1..=5).contains(&label_len)
+        && statement.get(label_len).is_some_and(u8::is_ascii_whitespace)
+    {
+        statement = trim_left(&statement[label_len..]);
+    }
+
+    [b"print".as_slice(), b"read"].iter().any(|keyword| {
+        statement.len() >= keyword.len()
+            && statement[..keyword.len()]
+                .iter()
+                .zip(keyword.iter())
+                .all(|(actual, expected)| actual.eq_ignore_ascii_case(expected))
+            && trim_left(&statement[keyword.len()..]) == b"*"
+    })
 }
 
 fn free_line_continues(line: &[u8]) -> bool {
@@ -747,6 +769,7 @@ mod tests {
             b"      X = A +\n     1  B\n      END\n".as_slice(),
             b"      x = 1 +\n     12 * y\n      END\n".as_slice(),
             b"      x = 1\n     + + y\n      END\n".as_slice(),
+            b"      x = a *\n     a b\n      END\n".as_slice(),
         ] {
             assert_eq!(
                 detect_path(Path::new("legacy.f90"), source),
@@ -835,6 +858,20 @@ mod tests {
             SourceForm::Free
         );
         assert_eq!(detect(b"     print *, 1\nend\n"), SourceForm::Free);
+    }
+
+    #[test]
+    fn complete_list_directed_io_does_not_trigger_fixed_continuation() {
+        let source = b"program p\n  if (.true.) then\n     print *\n     write(*,*) \"x\"\n  end if\nend program p\n";
+        assert_eq!(detect(source), SourceForm::Free);
+        assert_eq!(detect_path(Path::new("p.f"), source), SourceForm::Free);
+
+        for source in [
+            b"program p\n     PRINT*\n     write(*,*) \"x\"\nend program p\n".as_slice(),
+            b"program p\n  10 read *\n     print *, \"done\"\nend program p\n".as_slice(),
+        ] {
+            assert_eq!(detect(source), SourceForm::Free);
+        }
     }
 
     #[test]
