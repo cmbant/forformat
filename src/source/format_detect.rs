@@ -913,8 +913,7 @@ mod tests {
     #[test]
     fn continued_preprocessor_directives_are_skipped() {
         let source =
-            b"#define CONT \\
-     &\nprogram p\ninteger :: x\nx = 1 CONT\n+ 2\nend program p\n";
+            b"#define CONT \\\n     &\nprogram p\ninteger :: x\nx = 1 CONT\n+ 2\nend program p\n";
         assert_eq!(detect(source), SourceForm::Free);
     }
 
