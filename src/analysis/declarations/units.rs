@@ -215,7 +215,8 @@ impl<'a> Iterator for UseTargets<'a> {
                 self.found_explicit = true;
                 return Some(UseTarget {
                     remote: &item.remote,
-                    alias_spelling: (item.local != item.remote).then(|| item.local_spelling.clone()),
+                    alias_spelling: (item.local != item.remote)
+                        .then(|| item.local_spelling.clone()),
                 });
             }
         }
