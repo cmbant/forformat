@@ -8,6 +8,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
+        curl \
         flex \
         bison \
         gfortran \
@@ -24,7 +25,14 @@ RUN groupadd --gid ${USER_GID} ${USERNAME} \
     && chmod 0440 /etc/sudoers.d/${USERNAME} \
     && git config --system --add safe.directory '*'
 
-RUN svn checkout https://svn.code.sf.net/p/findent/code/trunk/findent /opt/findent \
+# The compatibility oracle. Trunk lags the released line, so take the tarball:
+# see docs/compatibility.md for what the pinned version is contracted to do.
+ARG FINDENT_VERSION=4.3.8~pre01
+RUN curl -fsSL -o /tmp/findent.tar.gz \
+        "https://ratrabbit.nl/downloads/findent/findent-${FINDENT_VERSION}.tar.gz" \
+    && mkdir -p /opt/findent \
+    && tar xf /tmp/findent.tar.gz -C /opt/findent --strip-components=1 \
+    && rm /tmp/findent.tar.gz \
     && cd /opt/findent \
     && ./configure --prefix=/usr/local \
     && make -j"$(nproc)" \

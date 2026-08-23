@@ -35,9 +35,16 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
 ) -> Vec<u8> {
     let tokens = tokenize(line, state);
     let inside_paren = inside_paren_at(context.open_groups, &tokens);
+    // A declaration's `::` need not be on the physical line that is being
+    // cased. Until it has been passed, the statement is still in its attribute
+    // half, and both of the judgements below have to be made from the whole
+    // statement rather than from this line's tokens.
+    let separator_pending = context.statement_separator && !context.continued_separator;
+    let separator_below = separator_pending && !tokens.iter().any(|token| token.text == b"::");
     let continued_entity_list = (context.continued_declaration || context.continued_separator)
         && context.open_groups.is_empty()
-        && !context.continued_initializer;
+        && !context.continued_initializer
+        && !separator_pending;
     let normalize_whitespace = cx.config.mode.normalizes_whitespace();
     let mut edits = EditBuffer::new(line);
     if !is_format_statement(&tokens) && !context.continued_format {
@@ -189,6 +196,19 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                     }
                 }
                 let cased = apply_case(token.text, cx.config.style.keyword_case);
+                // The `C` in a BIND(C) language-binding-spec is syntax, not an
+                // ordinary identifier. A local/project variable named C must
+                // therefore not suppress its keyword-case normalization. Keep
+                // the preceding BIND declaration check so an ordinary declared
+                // procedure call `bind(C)` remains an identifier use.
+                if is_bind_c_marker(&tokens, index)
+                    && !declared_names.suppresses_keyword(line_index, b"bind", false)
+                {
+                    if token.text != cased {
+                        edits.replace(token.span.clone(), &cased);
+                    }
+                    continue;
+                }
                 let specifier_argument =
                     is_specifier_keyword_argument(&tokens, index, &inside_paren, context);
                 if (is_contextual_declaration_name(line, &tokens, index, continued_entity_list)
@@ -206,7 +226,7 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                             token.text,
                             specifier_argument,
                         ))
-                    && keyword_in_context(&tokens, index)
+                    && keyword_in_context(&tokens, index, separator_below)
                 {
                     if token.text != cased {
                         edits.replace(token.span.clone(), &cased);
@@ -305,21 +325,53 @@ fn tracked_component_spelling_governs(cx: &PassContext<'_>, name: &[u8]) -> bool
     false
 }
 
-fn keyword_in_context(tokens: &[crate::source::Token], index: usize) -> bool {
+fn is_bind_clause_head(tokens: &[crate::source::Token<'_>], index: usize) -> bool {
+    if is_call_procedure_designator(tokens, index) {
+        return false;
+    }
+    tokens
+        .get(index + 1)
+        .is_some_and(|token| token.kind == TokenKind::LParen)
+        && tokens
+            .get(index + 2)
+            .is_some_and(|token| token.is_name(b"c"))
+        && tokens.get(index + 3).is_some_and(|token| {
+            matches!(
+                token.kind,
+                TokenKind::RParen | TokenKind::Comma | TokenKind::Ampersand
+            )
+        })
+}
+
+fn is_bind_c_marker(tokens: &[crate::source::Token<'_>], index: usize) -> bool {
+    index >= 2
+        && tokens[index].is_name(b"c")
+        && tokens[index - 1].kind == TokenKind::LParen
+        && tokens[index - 2].is_name(b"bind")
+        && is_bind_clause_head(tokens, index - 2)
+}
+
+fn keyword_in_context(
+    tokens: &[crate::source::Token],
+    index: usize,
+    separator_below: bool,
+) -> bool {
     let token = &tokens[index];
     let next = tokens.get(index + 1);
     if vocab::contains(vocab::DECLARATION_ATTRIBUTES, token.text) {
-        return tokens[index + 1..].iter().any(|t| t.text == b"::");
+        // `optional` is an attribute only in a declaration's attribute half,
+        // which the `::` closes — so a following `::` is what distinguishes the
+        // attribute from a name that merely spells one. `separator_below` says
+        // the statement's `::` is on a physical line below this one, which is
+        // the same answer for a head or continuation line that does not reach
+        // its own separator.
+        return separator_below || tokens[index + 1..].iter().any(|t| t.text == b"::");
     }
     if token.is(b"only") {
         return next.is_some_and(|t| t.text == b":");
     }
     if token.is(b"bind") {
-        return next.is_some_and(|t| t.kind == TokenKind::LParen)
-            && tokens.get(index + 2).is_some_and(|t| t.is_name(b"c"))
-            && tokens
-                .get(index + 3)
-                .is_some_and(|t| t.kind == TokenKind::RParen);
+        return is_bind_clause_head(tokens, index);
     }
     if token.is(b"kind") {
         return next.is_some_and(|t| t.kind == TokenKind::LParen || t.text == b"=");

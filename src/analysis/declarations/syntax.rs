@@ -157,23 +157,6 @@ pub(super) fn procedure_header_names(text: &[u8]) -> Vec<Vec<u8>> {
     names
 }
 
-pub(super) fn select_type_alias(text: &[u8]) -> Option<Vec<u8>> {
-    let tokens = tokenize(text, &mut LexState::default());
-    let select = tokens.iter().position(|token| token.is_name(b"select"))?;
-    if !tokens
-        .get(select + 1)
-        .is_some_and(|token| token.is_name(b"type"))
-        || !tokens
-            .get(select + 2)
-            .is_some_and(|token| token.kind == TokenKind::LParen)
-    {
-        return None;
-    }
-    let alias = tokens.get(select + 3)?;
-    let arrow = tokens.get(select + 4)?;
-    (alias.kind == TokenKind::Name && arrow.text == b"=>").then(|| alias.text.to_vec())
-}
-
 pub(super) fn type_spec_name<'a>(
     tokens: &[Token<'a>],
     start: usize,

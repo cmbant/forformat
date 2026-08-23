@@ -194,3 +194,16 @@ bits and updates a symlink target rather than replacing the link.
 - Any new post-layout width change must be included in emitted-width measurement.
 - A behavioral claim should be explained in terms of Fortran syntax or formatter invariants, not a
   private input tree.
+
+### SELECT TYPE and SELECT RANK association scopes
+
+Project-aware name normalization models program units, interfaces, derived types, `BLOCK`, and
+association constructs. `SELECT TYPE` and `SELECT RANK` association names are scoped to the select
+construct. A `TYPE IS` or `CLASS IS` guard refines a `SELECT TYPE` association to the exact visible
+derived-type entity for that branch, so same-named types in unrelated modules cannot contribute each
+other's members. `SELECT RANK` retains the selector's exact derived-type identity across rank guards.
+The no-`=>` form resolves its selector in the enclosing scope on the opening statement and keeps that
+outer declaration's spelling; the association becomes active only after selector evaluation.
+Default, intrinsic-type, or ambiguous guards stay conservative rather than borrowing an unrelated
+project type. The casing pass carries this branch state directly; `ScopeTree` does not expose each
+select guard as a general-purpose lexical scope to other analysis consumers.

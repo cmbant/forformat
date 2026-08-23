@@ -226,7 +226,7 @@ fn type_bound_binding_targets_are_not_registered_as_bindings() {
 }
 
 #[test]
-fn select_type_alias_uses_the_selector_type_for_chains() {
+fn select_type_alias_is_not_promoted_to_procedure_type_facts() {
     let facts = facts(
         b"module m\ntype :: T\ninteger :: Value\nend type T\ncontains\nsubroutine s(obj)\nclass(T) :: obj\nselect type (Alias => obj)\nAlias%VALUE = 1\nend select\nend subroutine s\nend module m\n",
     );
@@ -236,7 +236,7 @@ fn select_type_alias_uses_the_selector_type_for_chains() {
             .procedure_local_types
             .get(b"s".as_slice())
             .and_then(|types| types.get(b"alias".as_slice())),
-        Some(&b"t".to_vec())
+        None
     );
     assert_eq!(
         facts.cases.components.get(b"t", b"value"),

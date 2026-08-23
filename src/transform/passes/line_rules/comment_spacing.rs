@@ -222,7 +222,9 @@ fn format_comment_operators(comment: &[u8]) -> Vec<u8> {
             continue;
         }
         if let Some(length) = spaced_operator_len(comment, index, output.last().copied()) {
-            let named = comment[index] == b'=' && is_named_parameter_at(comment, index);
+            let named = comment[index] == b'='
+                && comment.get(index + 1) != Some(&b'=')
+                && is_named_parameter_at(comment, index);
             append_comment_operator(&mut output, &comment[index..index + length], !named);
             index = skip_horizontal(comment, index + length);
             continue;

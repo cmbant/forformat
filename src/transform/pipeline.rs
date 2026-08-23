@@ -115,7 +115,7 @@ pub fn normalize(
     // keeps physical line structure, so it deliberately does not join tokens
     // across authored continuation boundaries.
     with_context(document, project, local, config, |document, cx| {
-        let mut stage = passes::case_pass::declared(document, cx)?;
+        let mut stage = passes::scoped_case::declared(document, cx)?;
         if normalize_whitespace {
             stage = stage.or(passes::structure::join_lexical_token_continuations(
                 document, cx,
@@ -129,15 +129,26 @@ pub fn normalize(
         Ok(stage)
     })?;
 
+    // A named END restates the name its header already decided, so it is
+    // settled from the scope tree rather than from the case tables — and that
+    // tree has to be built after the case pass above moved the header. Sharing
+    // the separator snapshot is safe in the other direction: this pass only
+    // ever rewrites a name in place, byte for byte, so the statement view stays
+    // exact for the pass that follows.
+    //
     // Redundant statement separators are syntax normalization rather than a
     // wrapping policy, so this stays active when presentation whitespace is
     // preserved: `x = 1;;` and `x = 1;` are spelling choices, not layout. Run
     // it after structural lexical cleanup, and rebuild the statement view
     // afterwards because deleting separators changes source offsets even
     // though it does not change the non-empty statements.
-    if config.style.normalize_semicolons {
-        with_context(document, project, local, config, passes::semicolons::run)?;
-    }
+    with_context(document, project, local, config, |document, cx| {
+        let mut stage = passes::named_end::sync_names(document, cx)?;
+        if config.style.normalize_semicolons {
+            stage = stage.or(passes::semicolons::run(document, cx)?);
+        }
+        Ok(stage)
+    })?;
 
     // Step 11 consumes statement/scope data, so rebuild after the lexical,
     // parenthesis, and separator edits above. Steps 12-13 read only

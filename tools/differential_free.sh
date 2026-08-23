@@ -27,7 +27,7 @@ trap 'rm -rf "$tmpdir"' EXIT HUP INT TERM
 normalize_legacy_difference() {
     # The only retained smoke-test boundary is leading whitespace on
     # findentfix comments.  Default trailing-horizontal-whitespace handling
-    # now matches the 4.3.7 free emitter.  Any remaining structural
+    # now matches findent's free emitter.  Any remaining structural
     # difference is still a failure.
     sed -E 's/\r$//; s/^[[:blank:]]+(![[:blank:]]*findentfix:)/\1/I' "$1"
 }

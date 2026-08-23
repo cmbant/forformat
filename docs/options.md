@@ -135,6 +135,13 @@ Patterns use `/` separators. `*` stays within one component, `**` crosses compon
 one non-separator character, a trailing `/` matches a directory prefix, and a leading `/` anchors at
 the repository root.
 
+Neither `--context-path` nor the exclusion options restrict Fortran `INCLUDE` resolution. A fragment
+named by a source that is already being analyzed is read from disk relative to that source, because
+it is part of that source's text; absolute paths are also honored. Compiler include-directory (`-I`)
+search paths are not modeled, and missing/unreadable/unanalysable fragments are left unresolved
+rather than guessed. An include fragment is never selected as a project source in its own right. Use
+`--isolated` to disable project analysis, and with it include resolution, entirely.
+
 See [file-workflow.md](file-workflow.md) for repository discovery, non-Git context discovery,
 submodule behaviour, symlinks, and write semantics.
 

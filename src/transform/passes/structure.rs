@@ -286,6 +286,25 @@ pub fn remove_terminal_procedure_returns(
             })
         {
             remove.insert(group.lines.start);
+            let mut line = group.lines.start;
+            while line > scope.lines.start + 1 {
+                line -= 1;
+                let physical = &document.lines[line];
+                let code =
+                    crate::source::regions::comment_start(physical).unwrap_or(physical.len());
+                if physical[..code].trim_ascii().is_empty() {
+                    continue;
+                }
+                if crate::source::regions::comment_start(physical).is_none()
+                    && physical[..code]
+                        .trim_ascii()
+                        .eq_ignore_ascii_case(b"return")
+                {
+                    remove.insert(line);
+                } else {
+                    break;
+                }
+            }
         }
     }
     if remove.is_empty() {

@@ -16,7 +16,7 @@ pub(crate) fn normalize_delimiter_spacing_with_state(
     incoming: LexState,
     continued_statement: bool,
 ) -> Vec<u8> {
-    normalize_delimiter_spacing_with_context(line, cx, incoming, continued_statement, 0, &[])
+    normalize_delimiter_spacing_with_context(line, cx, incoming, continued_statement, false, 0, &[])
 }
 
 pub(in crate::transform::passes::line_rules) fn normalize_delimiter_spacing_with_context(
@@ -24,6 +24,7 @@ pub(in crate::transform::passes::line_rules) fn normalize_delimiter_spacing_with
     cx: &PassContext,
     incoming: LexState,
     continued_statement: bool,
+    statement_separator: bool,
     open_depth: usize,
     continued_multiple_subscripts: &[usize],
 ) -> Vec<u8> {
@@ -41,7 +42,14 @@ pub(in crate::transform::passes::line_rules) fn normalize_delimiter_spacing_with
     if !continued_statement && is_declaration_statement(&tokens) {
         if let Some(separator) = top_level_separator(&tokens) {
             text = reorder_optional_attribute(&text, tokens[separator].span.start, incoming);
-        } else {
+        } else if !statement_separator {
+            // Old-style normalization squeezes every run of blanks in the
+            // statement, so it may only run once the whole statement is known
+            // to have no `::`. A declaration that carries its separator on a
+            // later physical line looks old-style on this one; squeezing it
+            // here would reformat spacing the wrapper then hands to a line
+            // that no longer holds the head, which is one of the ways I1
+            // broke on `min0(jms, kts) &` / `:max0(...)` in WRF.
             text = normalize_old_style_declaration(&text, incoming);
         }
     }
