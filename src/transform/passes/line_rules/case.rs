@@ -35,9 +35,16 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
 ) -> Vec<u8> {
     let tokens = tokenize(line, state);
     let inside_paren = inside_paren_at(context.open_groups, &tokens);
+    // A declaration's `::` need not be on the physical line that is being
+    // cased. Until it has been passed, the statement is still in its attribute
+    // half, and both of the judgements below have to be made from the whole
+    // statement rather than from this line's tokens.
+    let separator_pending = context.statement_separator && !context.continued_separator;
+    let separator_below = separator_pending && !tokens.iter().any(|token| token.text == b"::");
     let continued_entity_list = (context.continued_declaration || context.continued_separator)
         && context.open_groups.is_empty()
-        && !context.continued_initializer;
+        && !context.continued_initializer
+        && !separator_pending;
     let normalize_whitespace = cx.config.mode.normalizes_whitespace();
     let mut edits = EditBuffer::new(line);
     if !is_format_statement(&tokens) && !context.continued_format {
@@ -219,7 +226,7 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                             token.text,
                             specifier_argument,
                         ))
-                    && keyword_in_context(&tokens, index)
+                    && keyword_in_context(&tokens, index, separator_below)
                 {
                     if token.text != cased {
                         edits.replace(token.span.clone(), &cased);
@@ -344,11 +351,21 @@ fn is_bind_c_marker(tokens: &[crate::source::Token<'_>], index: usize) -> bool {
         && is_bind_clause_head(tokens, index - 2)
 }
 
-fn keyword_in_context(tokens: &[crate::source::Token], index: usize) -> bool {
+fn keyword_in_context(
+    tokens: &[crate::source::Token],
+    index: usize,
+    separator_below: bool,
+) -> bool {
     let token = &tokens[index];
     let next = tokens.get(index + 1);
     if vocab::contains(vocab::DECLARATION_ATTRIBUTES, token.text) {
-        return tokens[index + 1..].iter().any(|t| t.text == b"::");
+        // `optional` is an attribute only in a declaration's attribute half,
+        // which the `::` closes — so a following `::` is what distinguishes the
+        // attribute from a name that merely spells one. `separator_below` says
+        // the statement's `::` is on a physical line below this one, which is
+        // the same answer for a head or continuation line that does not reach
+        // its own separator.
+        return separator_below || tokens[index + 1..].iter().any(|t| t.text == b"::");
     }
     if token.is(b"only") {
         return next.is_some_and(|t| t.text == b":");

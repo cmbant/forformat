@@ -96,3 +96,21 @@ fn a_deeply_indented_continued_declaration_is_a_fixed_point() {
         String::from_utf8_lossy(&twice)
     );
 }
+
+/// WRF `phys/module_surface_driver.F`: an attribute is an attribute because a
+/// `::` closes the attribute half of the declaration, and that `::` need not be
+/// on the physical line the attribute sits on.
+#[test]
+fn attributes_are_keywords_before_a_separator_on_a_later_line() {
+    let source = b"module m\ncontains\nsubroutine p(a, b)\nREAL, OPTIONAL, DIMENSION(ims:ime), &\nINTENT(IN) :: a\nREAL, ALLOCATABLE, TARGET, &\nSAVE :: b(:)\nend subroutine p\nend module m\n";
+    let output = full(source);
+
+    assert!(
+        output.contains("real, optional, dimension(ims:ime), &"),
+        "{output}"
+    );
+    assert!(output.contains("intent(in) :: a"), "{output}");
+    assert!(output.contains("real, allocatable, target, &"), "{output}");
+    assert!(output.contains("save :: b(:)"), "{output}");
+    assert_eq!(full(output.as_bytes()), output);
+}
