@@ -26,9 +26,9 @@ evidence: modern suffixes such as `.f90` and `.F90` are a strong free-form prior
 `.F` remain content-driven. Anonymous stdin is accepted as free when its bytes contain clear
 free-form evidence and remains conservatively fixed when the content is ambiguous. Literal `#if 0`
 and `#if 1` branches are accounted for; macro-dependent CPP branches remain unknown. A test-only
-compatibility baseline retains the exact findent 4.3.7 detector, including its 4,000-line limit and
-fixed-at-EOF fallback. `-ifree` forces free-form handling, and `--query-format` reports the automatic
-detector's verdict without formatting.
+compatibility baseline retains the exact findent `determine_fix_or_free` detector, including its
+4,000-line limit and fixed-at-EOF fallback. `-ifree` forces free-form handling, and `--query-format`
+reports the automatic detector's verdict without formatting.
 
 The accepted format is free-form only. The parser is deliberately a shallow structural classifier,
 not a full Fortran semantic parser. Unknown or incomplete statements are emitted conservatively.
@@ -39,34 +39,73 @@ generic malformed-END handling.
 
 ## Accepted `--indent-only` divergences
 
-`--indent-only` is otherwise a byte-for-byte contract against `findent -ifree`, and a difference is
-treated as a bug in this crate. Three families are the exception: findent 4.3.7 is demonstrably
-wrong and reproducing it would mean writing the defect into this crate. Each is reduced to a
-standalone case below, and each is excluded from the corpus oracle count on that basis. Seven files
-across the five corpus checkouts are affected.
+`--indent-only` is a byte-for-byte contract against `findent -ifree`, and a difference is treated as
+a bug in this crate. The reference build is findent 4.3.8~pre01, from
+<https://ratrabbit.nl/ratrabbit/findent/downloads/index.html>. Across the 160 free-form sources in
+the camb and CosmoMC checkouts the two agree on every file; the three families below are the
+reviewed exceptions, each reduced to a standalone case, and each excluded from the oracle count on
+that basis. None of them occurs in the corpus checkouts. All three turn on whether a statement is a
+procedure heading at all, which is where a lexer-driven recognizer and a structural classifier can
+legitimately disagree.
 
-- **`ELSE <construct-name>`.** A named ELSE is standard (F2018 R1105 `else-stmt` is
-  `ELSE [if-construct-name]`), but findent's lexer joins the two words, matches neither `else` nor
-  `else if`, and leaves the statement at body depth instead of dedenting it to its IF.
+- **A FUNCTION or SUBROUTINE statement inside a program-unit body with no `CONTAINS`.** findent
+  recognizes a function or subroutine definition inside `PROGRAM`, `FUNCTION`, and `SUBROUTINE` only
+  after `INTERFACE` or `CONTAINS`, so elsewhere it opens no frame and leaves the body and its
+  matching `END` at host depth. This crate opens the frame and indents the body.
 
   ```fortran
-  IF_G : IF (gamma_only) THEN
-     x = 1
-     ELSE IF_G          ! findent; forformat dedents this to the IF
-     y = 2
-  END IF IF_G
+  subroutine outer
+     integer :: x
+     subroutine inner    ! forformat indents the body below this;
+     integer :: y        ! findent leaves it at host depth
+     end subroutine inner
+  end subroutine outer
   ```
 
-  Q-E `PW/src/exx_bp.f90`, `PW/src/exx_std.f90`, `PW/src/newd_acc.f90`.
-- **A module whose name begins with a keyword.** findent's keyword-greedy lexer reads
-  `MODULE function_types` as a module-procedure heading rather than a module named
-  `function_types`, and stops indenting the module body entirely. Renaming the module to `m` makes
-  findent indent it correctly, which is what identifies this as a lexer defect rather than a policy.
-  CP2K `tools/Fun2D/function_types.f90`, `tools/Fun2D/functions.f90`.
-- **A macro or CUDA attribute prefix before FUNCTION/SUBROUTINE.** findent opens no frame for
-  `PURE_ARRAY_EQ FUNCTION array_eq_i(arr1, arr2)` (a CPP macro standing in for `PURE`) or for
-  `attributes(global) subroutine k(a)` (CUDA Fortran), so their bodies and matching `END` are left
-  unindented. CP2K `src/dbt/tas/dbt_tas_util.F`, Q-E `upflib/ylmr2_gpu.f90`.
+  The difference is confined to program and procedure hosts: inside a `MODULE` body both open a
+  frame.
+- **A comma between a type specification and the prefix attributes of a heading.** A `prefix` is a
+  blank-separated list of `prefix-spec`s, so `integer(4), pure elemental function myfunc2(x)` is not
+  a conforming function statement. findent accepts it and indents the body; this crate reads it as a
+  malformed declaration and leaves the body at host depth.
+
+  ```fortran
+  integer(4), pure elemental function myfunc2(x)
+  integer, intent(in) :: x    ! findent indents these two lines;
+  myfunc2 = x                 ! forformat leaves them at host depth
+  end function
+  ```
+
+  The blank-separated form `integer(4) pure elemental function myfunc2(x)` is conforming, and both
+  open a frame for it. The manifest cases `procedure_matrix`, `legacy_split_procedure`, and
+  `legacy_orphan_procedure_end` each contain one heading in the non-conforming form, and that one
+  heading accounts for every difference in them: in `legacy_orphan_procedure_end` the extra frame
+  also shifts the rows that follow it.
+- **A kind parameter named `function`.** Fortran reserves no words, so a named constant may be
+  called `function` and used as a kind selector. findent reads the inner occurrence as the heading
+  keyword, rejects the statement as a function definition, and leaves the body and every later
+  sibling procedure unindented. This crate resolves the heading from the statement's structure and
+  indents both.
+
+  ```fortran
+  module m
+     integer, parameter :: function = 4
+  contains
+     integer(kind=function) function f()
+        f = 1                ! findent leaves this and `end function f` at host depth
+     end function f
+  end module m
+  ```
+
+  The divergence is confined to that one spelling. A constant named `subroutine` used the same way
+  (`integer(kind=subroutine) function f()`) is a heading to both, because there the shadowed word
+  and the heading's own keyword are different words.
+
+Checked-in fixtures also pin several headings that a shallow lexer can misread, and on each the
+oracle and this crate agree byte-for-byte: a named `ELSE <construct-name>` dedents to its IF, the
+body of a module whose name begins with a keyword (`MODULE function_types`) indents, and a macro or
+CUDA attribute prefix before a heading (`PURE_ARRAY_EQ FUNCTION array_eq_i(arr1, arr2)`,
+`attributes(global) subroutine k(a)`) opens a frame.
 
 ## Inputs outside the supported contract
 
@@ -134,7 +173,7 @@ particular, CRLF-to-LF changes are failures rather than text-mode equivalents.
 
 The in-tree suite covers byte handling, newline preservation, compact `END` forms, semicolon
 statements, keyword identifiers, `findentfix`, CPP branch restoration, labeled `DO`, idempotence,
-and preservation. When findent 4.3.7 is available, run
+and preservation. When findent 4.3.8~pre01 is available, run
 `tools/differential_free.sh target/release/forformat`; it compares the retained non-fixed legacy
 fixtures `progfree.f`, `progfree1.f`, and `progfree-dos.f` with the oracle and reports the
 intentional preservation-boundary differences. Large real-world inputs are verified against the
@@ -145,7 +184,7 @@ relabeling, editor-wrapper, and other explicitly excluded features.
 ## Legacy free-form audit
 
 The retained free-form portions of legacy tests 11, 14, 15, 16, 19, 20, and 24 pass against
-findent 4.3.7 as the oracle. Their supported rows pass; the
+findent 4.3.8~pre01 as the oracle. Their supported rows pass; the
 reduced behavior is represented by the manifest and focused fixtures. Test 10's
 free-form label rows are represented by `label_matrix`; its six-column rows are fixed-form and are
 excluded. Test 18 exercises the `wfindent` wrapper and generated/reference files, so it remains an
@@ -223,13 +262,13 @@ work, rather than being implied by a broad capability claim.
 ## Whitespace boundary
 
 The Rust library's default contract replaces leading indentation and trims trailing spaces and tabs
-from each emitted physical line, matching findent 4.3.7's free-form emission. Other source spelling
+from each emitted physical line, matching findent's free-form emission. Other source spelling
 and body bytes are preserved when transformations are disabled, including spaces inside strings and
 comments. `--ws_remred` remains the explicit opt-in for broader redundant-whitespace reduction, and
 Hollerith-bearing statements bypass it.
 Malformed or ambiguous continued string expressions are reduced conservatively; this is an
-intentional divergence from findent 4.3.7's legacy handling of the `Test031` malformed-string case.
-There is one additional reviewed divergence: findent 4.3.7's `remred` heuristic treats the quote
+intentional divergence from findent's legacy handling of the `Test031` malformed-string case.
+There is one additional reviewed divergence: findent's `remred` heuristic treats the quote
 after `error stop ` as code and collapses spaces inside the valid character literal. Rust keeps the
 literal unchanged; `ws_remred_valid_literal` records this oracle defect explicitly.
 

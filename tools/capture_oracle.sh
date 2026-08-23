@@ -1,5 +1,5 @@
 #!/bin/sh
-# Explicitly capture a 4.3.7 golden. Normal tests never invoke the oracle.
+# Explicitly capture a findent 4.3.8~pre01 golden. Normal tests never invoke the oracle.
 set -eu
 
 oracle=${FINDENT_ORACLE:-/opt/findent/src/findent}

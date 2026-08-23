@@ -171,9 +171,10 @@ for the full repository verification bar.
 
 ## Relationship to findent
 
-`--indent-only` implements the findent-compatible indentation contract for findent 4.3.7; full mode
-intentionally adds behavior beyond that contract. See [compatibility](docs/compatibility.md) for the
-reviewed differences and [migration](docs/migration.md) for legacy option mapping.
+`--indent-only` implements the findent-compatible indentation contract for findent 4.3.8~pre01;
+full mode intentionally adds behavior beyond that contract. See
+[compatibility](docs/compatibility.md) for the reviewed differences and
+[migration](docs/migration.md) for legacy option mapping.
 
 The project is BSD-3-Clause licensed. Third-party attribution and license terms are in
 [`LICENSE-THIRD-PARTY`](LICENSE-THIRD-PARTY).

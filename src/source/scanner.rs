@@ -1,7 +1,7 @@
 //! The classifier's minimal splitter.
 //!
 //! This is deliberately *not* the full-mode token stream: the recognizer chain
-//! in `classify::recognizers` encodes hundreds of findent 4.3.7 edge cases
+//! in `classify::recognizers` encodes hundreds of findent edge cases
 //! against exactly these token boundaries, so it keeps its own conservative
 //! lexer.  Rewriting transforms use [`crate::source::tokens`] instead.  Both
 //! share one protected-region walker, which is the duplication that mattered.

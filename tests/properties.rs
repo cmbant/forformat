@@ -124,7 +124,7 @@ fn style_switches_have_exact_spelling_and_fixed_points() {
 #[test]
 fn compact_select_spellings_indent_like_the_two_word_form() {
     // findent's own recognizer accepts `selectcase`/`selecttype`/`selectrank`
-    // as SELECT openers (verified against findent 4.3.7), and the compact
+    // as SELECT openers (verified against findent 4.3.8~pre01), and the compact
     // `end...` spellings are already split by `--split-compound-keywords`;
     // the same must hold for these so the indent-only engine's frame
     // nesting does not diverge from the oracle for every statement inside
@@ -241,23 +241,34 @@ fn a_component_named_function_does_not_open_a_procedure() {
         "prefixed function heading stopped opening a frame in\n{text}"
     );
 
-    // And so does one whose prefix contains an ordinary name spelled like the
-    // keyword.  Fortran reserves no words, so `function` is a legal name for
-    // the named constant here; asking only about the *first* occurrence read
-    // the kind parameter, rejected the heading, and left the body — and every
-    // later sibling procedure — unindented.  findent 4.3.7 indents both.
-    let shadowed = b"module m\ninteger, parameter :: function = 4\ncontains\ninteger(kind=function) function f()\nf = 1\nend function f\nsubroutine s()\nx = 0\nend subroutine s\nend module m\n";
-    let text = String::from_utf8(
-        format_source(shadowed, &indent_only_config())
-            .unwrap()
-            .bytes,
-    )
-    .unwrap();
-    for expected in ["      f = 1", "      x = 0"] {
-        assert!(
-            text.lines().any(|line| line == expected),
-            "expected {expected:?} in\n{text}"
+    // And so does one whose prefix contains an ordinary name spelled like a
+    // procedure keyword.  Fortran reserves no words, so either spelling is a
+    // legal name for the named constant here, and the heading's own keyword
+    // may be the *other* one: reading whichever spelling appears first and
+    // rejecting the statement when that occurrence turns out to be the kind
+    // parameter left the body — and every later sibling procedure —
+    // unindented.  findent opens the frame for the `subroutine` constant and
+    // not for the `function` one; the latter is a reviewed divergence,
+    // recorded in docs/compatibility.md.
+    for shadow in ["function", "subroutine"] {
+        let shadowed = format!(
+            "module m\ninteger, parameter :: {shadow} = 4\ncontains\n\
+             integer(kind={shadow}) function f()\nf = 1\nend function f\n\
+             subroutine s()\nx = 0\nend subroutine s\nend module m\n"
         );
+        let text = String::from_utf8(
+            format_source(shadowed.as_bytes(), &indent_only_config())
+                .unwrap()
+                .bytes,
+        )
+        .unwrap();
+        for expected in ["      f = 1", "      x = 0"] {
+            assert!(
+                text.lines().any(|line| line == expected),
+                "kind parameter named {shadow:?} suppressed the heading; \
+                 expected {expected:?} in\n{text}"
+            );
+        }
     }
 
     // Declaring a variable by that name is not a heading either.  A

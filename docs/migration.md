@@ -1,4 +1,4 @@
-# Migrating from findent 4.3.7
+# Migrating from findent
 
 The Rust binary keeps findent's stdin/stdout workflow and free-form structural indentation. The
 default is `--full`, which adds lexical normalization and wrapping. Use `--indent-only` for the

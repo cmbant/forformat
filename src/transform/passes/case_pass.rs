@@ -361,8 +361,14 @@ fn declared_with_names_impl(
                             &mut token_evidence,
                         );
                     }
-                    if let Some(map) = evidence_map.as_deref_mut() {
-                        map.insert((line, first_span.start), token_evidence);
+                    // `KeepBase` is the overwhelming majority of tokens, and
+                    // `scoped_case` treats a missing key exactly as it treats
+                    // a stored `KeepBase`. Storing it costs a map entry per
+                    // name token in the project for no decision.
+                    if !matches!(token_evidence, CaseEvidence::KeepBase) {
+                        if let Some(map) = evidence_map.as_deref_mut() {
+                            map.insert((line, first_span.start), token_evidence);
+                        }
                     }
                 }
                 let Some(replacement) = replacement else {

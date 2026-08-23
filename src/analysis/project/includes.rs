@@ -169,12 +169,14 @@ fn absorb_analyzed_with_resources<'a, 'b, I, J>(
 
     // Include resources are lookup-only. Project roots are inserted second so
     // an explicitly supplied root wins if the caller provides the same path in
-    // both collections.
+    // both collections. The map borrows: most batches contain no INCLUDE at
+    // all, so cloning every supplied file's facts up front is a cost paid per
+    // project rather than per lookup. The clone happens on a hit instead.
     for &(path, facts) in &resources {
-        lookup.insert(normalize_path(path), facts.clone());
+        lookup.insert(normalize_path(path), facts);
     }
     for &(path, facts) in &analyzed {
-        lookup.insert(normalize_path(path), facts.clone());
+        lookup.insert(normalize_path(path), facts);
     }
 
     // One fragment is typically included by many sources, and a nested include
@@ -186,7 +188,12 @@ fn absorb_analyzed_with_resources<'a, 'b, I, J>(
         let expanded = expand_includes_with(path, facts, &mut |candidate| {
             fragments
                 .entry(candidate.to_path_buf())
-                .or_insert_with(|| lookup.get(candidate).cloned().or_else(|| loader(candidate)))
+                .or_insert_with(|| {
+                    lookup
+                        .get(candidate)
+                        .map(|facts| (*facts).clone())
+                        .or_else(|| loader(candidate))
+                })
                 .clone()
         });
         context.absorb_expanded(path, facts, expanded);

@@ -12,7 +12,7 @@ pub(crate) struct ConfigArguments {
 /// What the formatter is allowed to change.
 ///
 /// `Full` is the product default and adds normalization and wrapping.
-/// `IndentOnly` is the findent 4.3.7 contract and stays byte-exact forever
+/// `IndentOnly` is the findent 4.3.8~pre01 contract and stays byte-exact forever
 /// (I6).  `NormalizeOnly` runs the text passes without the structural layout,
 /// which is how a single normalization rule can be tested independently of
 /// structural layout.  `CanonicalizeOnly` is `NormalizeOnly` minus presentation
