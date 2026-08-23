@@ -4,6 +4,7 @@ use crate::analysis::{
     scope::ScopeKind,
 };
 use std::{
+    borrow::Cow,
     collections::{HashMap, HashSet},
     ops::Range,
 };
@@ -188,7 +189,7 @@ pub(crate) struct UseName {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UseTarget<'a> {
-    pub(crate) remote: &'a [u8],
+    pub(crate) remote: Cow<'a, [u8]>,
     pub(crate) alias_spelling: Option<Vec<u8>>,
 }
 
@@ -214,7 +215,7 @@ impl<'a> Iterator for UseTargets<'a> {
             if local_matches {
                 self.found_explicit = true;
                 return Some(UseTarget {
-                    remote: &item.remote,
+                    remote: Cow::Borrowed(&item.remote),
                     alias_spelling: (item.local != item.remote)
                         .then(|| item.local_spelling.clone()),
                 });
@@ -228,7 +229,7 @@ impl<'a> Iterator for UseTargets<'a> {
         {
             self.emitted_implicit = true;
             return Some(UseTarget {
-                remote: self.name,
+                remote: Cow::Borrowed(self.name),
                 alias_spelling: None,
             });
         }
