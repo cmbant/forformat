@@ -1,6 +1,4 @@
-use super::syntax::{
-    declared_binding_names, declared_variable_names, procedure_header_names, select_type_alias,
-};
+use super::syntax::{declared_binding_names, declared_variable_names, procedure_header_names};
 use crate::{
     analysis::{
         implicit::{is_implicit_statement, ImplicitPolicy},
@@ -285,9 +283,6 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
             for statement in &group.statements {
                 for name in declared_variable_names(&statement.text) {
                     locals_by_scope[index].insert(&name);
-                }
-                if let Some(alias) = select_type_alias(&statement.text) {
-                    locals_by_scope[index].insert(&alias);
                 }
             }
         }

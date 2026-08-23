@@ -14,21 +14,22 @@ cargo test format::stack::tests -- --nocapture
 cargo test classify::recognizers::tests -- --nocapture
 cargo test tests::malformed_digit_prefixes_do_not_mutate_label_or_construct_state -- --exact
 
-# Keep the libFuzzer targets exercised in CI.  The corpus is deliberately
-# bounded: this is a smoke/property pass, while longer campaigns remain a
-# developer activity.  Every target gets real input from the checked-in
-# fixture corpus.
-seed_corpus=$(mktemp -d)
-trap 'rm -rf "$seed_corpus"' EXIT
-cp tests/fixtures/*.f90 "$seed_corpus/"
+# Keep the libFuzzer targets exercised in CI. Each target gets its own disposable
+# copy so one fuzzer cannot grow the next target's corpus or write into checked-in
+# fixtures. A fixed seed makes this bounded smoke run reproducible.
+corpus_root=$(mktemp -d)
+trap 'rm -rf "$corpus_root"' EXIT
+mkdir "$corpus_root/seed"
+cp tests/fixtures/*.f90 "$corpus_root/seed/"
 for target in regions declarations project wrapper properties; do
-    target_corpus="$seed_corpus"
-    if test "$target" = properties; then
-        # The property target is intentionally single-buffer: project-wide
-        # case convergence belongs to the project target and is not available
-        # through format_source(&[u8], ...).
-        target_corpus=tests/fixtures
+    target_corpus="$corpus_root/$target"
+    mkdir "$target_corpus"
+    cp "$corpus_root"/seed/* "$target_corpus/"
+    if test "$target" = wrapper; then
+        # Permanent seed for the separator-only case that previously exposed a
+        # Document/SourceBuffer physical-line mismatch after semicolon removal.
+        printf '\n;' > "$target_corpus/separator-only"
     fi
     cargo run --manifest-path fuzz/Cargo.toml --bin "$target" -- \
-        -runs=64 -max_len=4096 "$target_corpus"
+        -seed=1 -runs=64 -max_len=4096 "$target_corpus"
 done

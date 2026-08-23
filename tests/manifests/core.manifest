@@ -3,7 +3,7 @@
 
 [case.core]
 source_test = "local-core"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
 category = "structural"
 support = "supported"
 normalization = "none"
@@ -15,7 +15,7 @@ args = "-ifree"
 
 [case.lexical]
 source_test = "local-lexical"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
 category = "lexical-openmp"
 support = "supported"
 normalization = "none"
@@ -27,7 +27,7 @@ args = "-ifree"
 
 [case.continued_literal]
 source_test = "local-continued-literal"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
 category = "lexical-continuation"
 support = "supported"
 normalization = "none"
@@ -51,7 +51,7 @@ args = "-ifixed"
 
 [case.procedure_declaration]
 source_test = "equations.f90:procedure-declaration"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
 category = "classifier-regression"
 support = "supported"
 normalization = "none"
@@ -63,7 +63,7 @@ args = "-ifree"
 
 [case.align_paren]
 source_test = "legacy test24:Test026"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree --align_paren"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree --align_paren"
 category = "continuation-alignment"
 support = "supported"
 normalization = "none"
@@ -75,7 +75,7 @@ args = "-ifree --align_paren"
 
 [case.last_indent]
 source_test = "legacy test11:lastindent"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -lastindent"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -lastindent"
 category = "query"
 support = "supported"
 normalization = "none"
@@ -87,7 +87,7 @@ args = "-ifree --last-indent"
 
 [case.last_usable]
 source_test = "legacy test11:lastusable"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -lastusable"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -lastusable"
 category = "query"
 support = "supported"
 normalization = "none"
@@ -99,7 +99,7 @@ args = "-ifree --last-usable"
 
 [case.ws_remred]
 source_test = "legacy test24:Test031-reduced"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree --ws_remred=1"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree --ws_remred=1"
 category = "transformation"
 support = "supported"
 normalization = "none"
@@ -111,7 +111,7 @@ args = "-ifree --ws_remred=1"
 
 [case.constructs]
 source_test = "legacy test16:free-construct-matrix"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
 category = "structural-recognizers"
 support = "supported"
 normalization = "none"
@@ -123,7 +123,7 @@ args = "-ifree"
 
 [case.cpp_continuation]
 source_test = "legacy test14:continued-source-around-cpp"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
 category = "cpp-continuation"
 support = "supported"
 normalization = "none"
@@ -135,7 +135,7 @@ args = "-ifree"
 
 [case.cpp_continuation_indent]
 source_test = "legacy test14:issue14-start-indent"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -Ia -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -Ia -ifree"
 category = "cpp-continuation"
 support = "supported"
 normalization = "none"
@@ -147,7 +147,7 @@ args = "-Ia -ifree"
 
 [case.cli_layout]
 source_test = "legacy test14:free-layout-default"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
 category = "cli-layout"
 support = "supported"
 normalization = "none"
@@ -159,7 +159,7 @@ args = "-ifree"
 
 [case.cli_include_left]
 source_test = "legacy test14:include-left"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree --include_left=1"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree --include_left=1"
 category = "cli-layout"
 support = "supported"
 normalization = "none"
@@ -171,7 +171,7 @@ args = "-ifree --include_left=1"
 
 [case.cli_label_left]
 source_test = "legacy test14:label-left"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -l0"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -l0"
 category = "cli-layout"
 support = "supported"
 normalization = "none"
@@ -183,7 +183,7 @@ args = "-ifree -l0"
 
 [case.cli_indent_ampersand]
 source_test = "legacy test16:indent-ampersand"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -K"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -K"
 category = "cli-layout"
 support = "supported"
 normalization = "none"
@@ -195,7 +195,7 @@ args = "-ifree -K"
 
 [case.refactor_end]
 source_test = "legacy test24:refactor-end"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -Rr"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -Rr"
 category = "transformation"
 support = "supported"
 normalization = "none"
@@ -207,7 +207,7 @@ args = "-ifree -Rr"
 
 [case.refactor_end_upper]
 source_test = "legacy test24:refactor-end-uppercase"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -RR"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -RR"
 category = "transformation"
 support = "supported"
 normalization = "none"
@@ -219,7 +219,7 @@ args = "-ifree -RR"
 
 [case.compat_align_first_item]
 source_test = "local compatibility audit:align-paren-first-item"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree --align_paren"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree --align_paren"
 category = "continuation-alignment"
 support = "supported"
 normalization = "none"
@@ -231,7 +231,7 @@ args = "-ifree --align_paren"
 
 [case.compat_contains_restart_frames]
 source_test = "local compatibility audit:contains-restart-frames"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -C-"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -C-"
 category = "engine-state"
 support = "supported"
 normalization = "none"
@@ -243,7 +243,7 @@ args = "-ifree -C-"
 
 [case.compat_refactor_abstract_interface]
 source_test = "local compatibility audit:abstract-interface-end"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -RR"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -RR"
 category = "transformation"
 support = "supported"
 normalization = "none"
@@ -255,7 +255,7 @@ args = "-ifree -RR"
 
 [case.ws_remred_valid_literal]
 source_test = "local compatibility audit:valid-literal-whitespace"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree --ws_remred=1 (oracle defect: collapses spaces in error-stop literal)"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree --ws_remred=1 (oracle defect: collapses spaces in error-stop literal)"
 category = "transformation"
 support = "intentional-divergence"
 normalization = "none; Rust preserves valid literal contents"
@@ -267,10 +267,10 @@ args = "-ifree --ws_remred=1"
 
 [case.procedure_matrix]
 source_test = "legacy test20:procedure-prefix-matrix"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -Ia -r5"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -Ia -r5"
 category = "classifier-regression"
 support = "supported"
-normalization = "none"
+normalization = "none; one non-conforming comma-prefixed heading is an accepted divergence"
 input = "../fixtures/procedure_matrix.f90"
 stdout = "../expected/procedure_matrix.out"
 stderr = ""
@@ -279,7 +279,7 @@ args = "-ifree -Ia -r5"
 
 [case.advanced_constructs]
 source_test = "legacy test16/test20:advanced-constructs"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
 category = "structural-recognizers"
 support = "supported"
 normalization = "none"
@@ -291,7 +291,7 @@ args = "-ifree"
 
 [case.unknown_rejected]
 source_test = "manifest.rs::unknown_option_rejection_contract"
-oracle = "findent 4.3.7 silently ignores unknown flags; Rust contract rejects them"
+oracle = "findent 4.3.8~pre01 silently ignores unknown flags; Rust contract rejects them"
 category = "cli-diagnostics"
 support = "intentional-divergence"
 normalization = "none"
@@ -303,7 +303,7 @@ args = "--not-an-option"
 
 [case.ws_malformed_string]
 source_test = "legacy test24:Test031-malformed-string-boundary"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -I8 --ws-remred"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -I8 --ws-remred"
 category = "transformation-boundary"
 support = "intentional-divergence"
 normalization = "malformed-string-conservative"
@@ -315,7 +315,7 @@ args = "-ifree -I8 --ws-remred"
 
 [case.engine_max_indent_start]
 source_test = "legacy test14:issue14-max-indent-start"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -Ia -M5"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -Ia -M5"
 category = "engine-state"
 support = "supported"
 normalization = "none"
@@ -327,7 +327,7 @@ args = "-ifree -Ia -M5"
 
 [case.engine_contains_restart]
 source_test = "legacy test16:contains-restart"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -C-"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -C-"
 category = "engine-state"
 support = "supported"
 normalization = "none"
@@ -339,7 +339,7 @@ args = "-ifree -C-"
 
 [case.openmp_continuation_default]
 source_test = "legacy test24:Test033"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -Ia"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -Ia"
 category = "openmp-continuation"
 support = "supported"
 normalization = "none"
@@ -351,7 +351,7 @@ args = "-ifree -Ia"
 
 [case.openmp_continuation_k]
 source_test = "legacy test24:Test034"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -Ia -K"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -Ia -K"
 category = "openmp-continuation"
 support = "supported"
 normalization = "none"
@@ -363,7 +363,7 @@ args = "-ifree -Ia -K"
 
 [case.openmp_continuation_k9]
 source_test = "legacy test24:Test035"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -Ia -K -k9"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -Ia -K -k9"
 category = "openmp-continuation"
 support = "supported"
 normalization = "none"
@@ -375,7 +375,7 @@ args = "-ifree -Ia -K -k9"
 
 [case.fortran2023]
 source_test = "legacy test26:Test001"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
 category = "procedure-prefix"
 support = "supported"
 normalization = "none"
@@ -387,7 +387,7 @@ args = "-ifree"
 
 [case.structures]
 source_test = "legacy test27:Test001"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
 category = "legacy-structure"
 support = "supported"
 normalization = "none"
@@ -399,7 +399,7 @@ args = "-ifree"
 
 [case.label_matrix_left0]
 source_test = "legacy test10:label-left-zero"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -l0 -I0 -i6"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -l0 -I0 -i6"
 category = "labels"
 support = "supported"
 normalization = "none"
@@ -411,7 +411,7 @@ args = "-ifree -l0 -I0 -i6"
 
 [case.label_matrix_left1]
 source_test = "legacy test10:label-left-one"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -l1 -I0 -i6"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -l1 -I0 -i6"
 category = "labels"
 support = "supported"
 normalization = "none"
@@ -423,7 +423,7 @@ args = "-ifree -l1 -I0 -i6"
 
 [case.indent_none]
 source_test = "legacy test15:indent-none"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -i-"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -i-"
 category = "cli-layout"
 support = "supported"
 normalization = "none"
@@ -435,7 +435,7 @@ args = "-ifree -i-"
 
 [case.ws_remred_bare]
 source_test = "legacy test24:Test031-bare-optional-value"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree --ws_remred"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree --ws_remred"
 category = "transformation-cli"
 support = "supported"
 normalization = "none"
@@ -447,7 +447,7 @@ args = "-ifree --ws_remred"
 
 [case.constructs_max_indent]
 source_test = "legacy test14/test16:maximum-indent-branches"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -M2"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -M2"
 category = "engine-state"
 support = "supported"
 normalization = "none"
@@ -459,7 +459,7 @@ args = "-ifree -M2"
 
 [case.openmp_disabled]
 source_test = "legacy test16:openmp-disabled"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree --openmp=0"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree --openmp=0"
 category = "openmp-option"
 support = "supported"
 normalization = "none"
@@ -471,7 +471,7 @@ args = "-ifree --openmp=0"
 
 [case.continuation_none]
 source_test = "legacy test16/test24:continuation-none"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -Ia -k-"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -Ia -k-"
 category = "continuation-option"
 support = "supported"
 normalization = "none"
@@ -483,10 +483,10 @@ args = "-ifree -Ia -k-"
 
 [case.legacy_split_procedure]
 source_test = "legacy test20:interoperability-recovery"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
 category = "classifier-recovery"
 support = "supported"
-normalization = "none"
+normalization = "none; one non-conforming comma-prefixed heading is an accepted divergence"
 input = "../fixtures/legacy_recovery.f90"
 stdout = "../expected/legacy_recovery.out"
 stderr = ""
@@ -495,10 +495,10 @@ args = "-ifree"
 
 [case.legacy_orphan_procedure_end]
 source_test = "legacy test20:comma-prefix-external-procedure"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -I5 -r5"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -I5 -r5"
 category = "engine-recovery"
 support = "supported"
-normalization = "none"
+normalization = "none; one non-conforming comma-prefixed heading is an accepted divergence"
 input = "../fixtures/legacy_recovery.f90"
 stdout = "../expected/legacy_recovery_orphan.out"
 stderr = ""
@@ -507,7 +507,7 @@ args = "-ifree -I5 -r5"
 
 [case.align_nested]
 source_test = "legacy test24:Test026-reduced-nested"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -I8 --align_paren"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -I8 --align_paren"
 category = "continuation-alignment"
 support = "supported"
 normalization = "none"
@@ -519,7 +519,7 @@ args = "-ifree -I8 --align_paren"
 
 [case.align_nested_label_right]
 source_test = "legacy test24:Test027-reduced-nested"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -I8 --align_paren --label_left=0"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -I8 --align_paren --label_left=0"
 category = "continuation-alignment"
 support = "supported"
 normalization = "none"
@@ -531,7 +531,7 @@ args = "-ifree -I8 --align_paren --label_left=0"
 
 [case.legacy_controls]
 source_test = "legacy test11:critical-and-change-team"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree --indent-critical=4 --indent-changeteam=4"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree --indent-critical=4 --indent-changeteam=4"
 category = "structural-recognizers"
 support = "supported"
 normalization = "none"
@@ -543,7 +543,7 @@ args = "-ifree --indent-critical=4 --indent-changeteam=4"
 
 [case.malformed_end_recovery]
 source_test = "legacy malformed-END reduced regression"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
 category = "malformed-recovery"
 support = "supported"
 normalization = "none"
@@ -555,7 +555,7 @@ args = "-ifree"
 
 [case.construct_options]
 source_test = "legacy test16:per-construct-long-option-matrix"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -I0 --indent-associate=5 --indent-block=5 --indent-do=5 --indent-if=5 --indent-enum=5 --indent-forall=5 --indent-interface=5 --indent-module=5 --indent-procedure=5 --indent-select=5 --indent-type=5 --indent-where=5 --indent-critical=5 --indent-contains=5 --indent-case=5 --indent-entry=5"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -I0 --indent-associate=5 --indent-block=5 --indent-do=5 --indent-if=5 --indent-enum=5 --indent-forall=5 --indent-interface=5 --indent-module=5 --indent-procedure=5 --indent-select=5 --indent-type=5 --indent-where=5 --indent-critical=5 --indent-contains=5 --indent-case=5 --indent-entry=5"
 category = "cli-construct-matrix"
 support = "supported"
 normalization = "none"
@@ -567,7 +567,7 @@ args = "-ifree -I0 --indent-associate=5 --indent-block=5 --indent-do=5 --indent-
 
 [case.malformed_end_matrix]
 source_test = "legacy malformed-END matrix"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
 category = "malformed-recovery"
 support = "supported"
 normalization = "none"
@@ -579,7 +579,7 @@ args = "-ifree"
 
 [case.cpp_nested]
 source_test = "legacy preprocessor branch snapshot: nested CPP alternates"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
 category = "cpp-branch-state"
 support = "supported"
 normalization = "none"
@@ -591,7 +591,7 @@ args = "-ifree"
 
 [case.cli_layout_combo]
 source_test = "legacy test10/test14/test24:combined-label-include-continuation-layout"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -Ia -l0 -K --include-left=1 --indent-continuation=9"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -Ia -l0 -K --include-left=1 --indent-continuation=9"
 category = "cli-layout-combination"
 support = "supported"
 normalization = "none"
@@ -603,7 +603,7 @@ args = "-ifree -Ia -l0 -K --include-left=1 --indent-continuation=9"
 
 [case.align_legacy_full]
 source_test = "legacy test24:Test026-full"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -I8 --align_paren"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -I8 --align_paren"
 category = "continuation-alignment"
 support = "intentional-divergence"
 normalization = "malformed-continued-string-alignment"
@@ -615,7 +615,7 @@ args = "-ifree -I8 --align_paren"
 
 [case.align_legacy_full_label0]
 source_test = "legacy test24:Test027-full"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -I8 --align_paren --label_left=0"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree -I8 --align_paren --label_left=0"
 category = "continuation-alignment"
 support = "intentional-divergence"
 normalization = "malformed-continued-string-alignment"
@@ -627,7 +627,7 @@ args = "-ifree -I8 --align_paren --label_left=0"
 
 [case.labeled_cpp_do]
 source_test = "legacy test20/test24:shared-label-do-around-CPP"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
 category = "engine-state"
 support = "supported"
 normalization = "none"
@@ -639,7 +639,7 @@ args = "-ifree"
 
 [case.legacy_free_matrix]
 source_test = "legacy test20:consolidated-free-construct-matrix"
-oracle = "findent 4.3.7; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
+oracle = "findent 4.3.8~pre01; env -u FINDENT_FLAGS LC_ALL=C findent -ifree"
 category = "legacy-free-constructs"
 support = "supported"
 normalization = "none"

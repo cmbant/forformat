@@ -295,7 +295,7 @@ fn prefixed_procedure(source: &[u8], words: &[Vec<u8>]) -> Option<(StatementKind
         return None;
     }
     // The legacy free-form fixtures contain `su broutine` in an
-    // editor-like interoperability example. findent 4.3.7 still treats the
+    // editor-like interoperability example. findent still treats the
     // split keyword as a procedure boundary, so preserve that narrow
     // recovery without accepting arbitrary misspellings as structural.
     if words.first().is_some_and(|x| x == b"su") && words.get(1).is_some_and(|x| x == b"broutine") {
@@ -315,58 +315,74 @@ fn prefixed_procedure(source: &[u8], words: &[Vec<u8>]) -> Option<(StatementKind
             StatementClass::Definition,
         ));
     }
-    if let Some(i) = words
-        .iter()
-        .position(|x| x == b"function" || x == b"subroutine")
-    {
-        if i > 0 {
-            // The word has to be the statement's own keyword.  `CALL
-            // compress(colvar%combine_cvs_param%function, full=.TRUE.)` names a
-            // component called `function`, and treating that as a heading opens
-            // a frame that shifts the rest of the procedure.
-            structural_procedure_keyword(source, &words[i])?;
-            // findent's free-form recognizer accepts comma-free prefix words
-            // (`pure elemental function`, `integer recursive function`) but
-            // leaves declaration-style attribute lists opaque
-            // (`integer, pure elemental function`).  Keeping that boundary is
-            // important: otherwise a valid declaration opens a frame and
-            // shifts every later sibling procedure.
-            if comma_prefixed_procedure(source, words).is_some() {
-                return None;
-            }
-            return Some((
-                if words[i] == b"function" {
-                    StatementKind::Function
-                } else {
-                    StatementKind::Subroutine
-                },
-                StatementClass::Definition,
-            ));
-        }
+    if !mentions_procedure_keyword(words) {
+        return None;
     }
-    None
+    // The keyword has to be the statement's own.  `CALL
+    // compress(colvar%combine_cvs_param%function, full=.TRUE.)` names a
+    // component called `function`, and treating that as a heading opens a frame
+    // that shifts the rest of the procedure.
+    let (at, kind) = statement_procedure_keyword(source)?;
+    if !is_prefixed(source, at) {
+        // Nothing precedes the keyword, so this is a plain heading and the
+        // caller's leading-word match already recognizes it.
+        return None;
+    }
+    // findent's free-form recognizer accepts comma-free prefix words
+    // (`pure elemental function`, `integer recursive function`) but leaves
+    // declaration-style attribute lists opaque
+    // (`integer, pure elemental function`).  Keeping that boundary is
+    // important: otherwise a valid declaration opens a frame and shifts every
+    // later sibling procedure.
+    if has_prefix_comma(source, at) {
+        return None;
+    }
+    Some((kind, StatementClass::Definition))
 }
 
-/// Byte offset of the FUNCTION/SUBROUTINE that opens a procedure heading.
+/// The statement's own FUNCTION/SUBROUTINE keyword: where it starts and which
+/// of the two it is.
 ///
 /// Fortran reserves no words, so the same spelling can appear earlier in the
-/// statement as an ordinary name: a component (`x%function`), or an argument or
-/// kind parameter (`integer(kind=function) function f()`, whose real keyword
-/// follows a named constant spelled the same way).  Every occurrence is
-/// therefore examined and the first one standing at the statement's own level
-/// wins; answering from the first occurrence alone would reject a genuine
-/// heading and leave the rest of the module unindented.
-fn structural_procedure_keyword(source: &[u8], keyword: &[u8]) -> Option<usize> {
+/// statement as an ordinary name — a component (`x%function`), or an argument
+/// or kind parameter — and the heading's own keyword may be the *other*
+/// spelling entirely: in `integer(kind=subroutine) function f()` the first
+/// procedure word in the statement is a named constant.  Both spellings are
+/// therefore examined in one pass and the earliest occurrence standing at the
+/// statement's own level wins.  Answering from the first occurrence of one
+/// spelling alone rejects such a heading and leaves the rest of the module
+/// unindented.
+fn statement_procedure_keyword(source: &[u8]) -> Option<(usize, StatementKind)> {
     let tokens = crate::source::scanner::tokens(source);
-    tokens
+    tokens.iter().enumerate().find_map(|(index, token)| {
+        let kind = if token.text.eq_ignore_ascii_case(b"function") {
+            StatementKind::Function
+        } else if token.text.eq_ignore_ascii_case(b"subroutine") {
+            StatementKind::Subroutine
+        } else {
+            return None;
+        };
+        (keyword_stands_alone(source, token.start) && names_a_procedure(&tokens, index))
+            .then_some((token.start, kind))
+    })
+}
+
+/// Does the statement contain either procedure word at all?
+///
+/// `classify` asks for the statement's own keyword on every statement it sees,
+/// and the overwhelming majority contain neither word. Rejecting those against
+/// the word list the caller already built keeps the token scan — which has to
+/// look at both spellings and at bracket depth — off the hot path.
+fn mentions_procedure_keyword(words: &[Vec<u8>]) -> bool {
+    words
         .iter()
-        .enumerate()
-        .find(|(index, token)| {
-            token.text.eq_ignore_ascii_case(keyword)
-                && keyword_stands_alone(source, token.start)
-                && names_a_procedure(&tokens, *index)
-        })
-        .map(|(_, token)| token.start)
+        .any(|word| word == b"function" || word == b"subroutine")
+}
+
+/// Does anything precede the keyword at `at`? A heading with no prefix is
+/// recognized from its leading word instead.
+fn is_prefixed(source: &[u8], at: usize) -> bool {
+    source[..at].iter().any(|c| !c.is_ascii_whitespace())
 }
 
 /// A `function-stmt` or `subroutine-stmt` names its procedure immediately after
@@ -415,25 +431,22 @@ fn bracket_scan(before: &[u8]) -> (usize, bool) {
 }
 
 fn comma_prefixed_procedure(source: &[u8], words: &[Vec<u8>]) -> Option<StatementKind> {
-    let i = words
-        .iter()
-        .position(|x| x == b"function" || x == b"subroutine")?;
-    if i == 0 {
+    if !mentions_procedure_keyword(words) {
         return None;
     }
-    let keyword = &words[i];
-    // The comma has to be the statement's own, and precede the heading's own
-    // keyword.  A comma inside brackets is a type parameter or a subscript —
-    // findent still opens a frame for
-    // `character(len=1, kind=k) function g()` — and measuring from an earlier
-    // same-spelled name would put the whole type spec on the wrong side.
-    let at = structural_procedure_keyword(source, keyword)?;
-    let has_comma = bracket_scan(&source[..at]).1;
-    has_comma.then_some(if keyword == b"function" {
-        StatementKind::Function
-    } else {
-        StatementKind::Subroutine
-    })
+    let (at, kind) = statement_procedure_keyword(source)?;
+    (is_prefixed(source, at) && has_prefix_comma(source, at)).then_some(kind)
+}
+
+/// Is there a comma between the start of the statement and its own keyword?
+///
+/// The comma has to be the statement's own, and precede the heading's own
+/// keyword.  A comma inside brackets is a type parameter or a subscript —
+/// findent still opens a frame for `character(len=1, kind=k) function g()` —
+/// and measuring from an earlier same-spelled name would put the whole type
+/// spec on the wrong side.
+fn has_prefix_comma(source: &[u8], at: usize) -> bool {
+    bracket_scan(&source[..at]).1
 }
 
 fn explicit_end_kind(words: &[Vec<u8>]) -> Option<StatementKind> {
@@ -582,10 +595,18 @@ fn entity_name(s: &[u8], kind: &StatementKind) -> Option<Vec<u8>> {
     }
     let w = original_words(s);
     if matches!(kind, StatementKind::Function | StatementKind::Subroutine) {
-        if let Some(i) = w.iter().position(|x| {
-            x.eq_ignore_ascii_case(b"function") || x.eq_ignore_ascii_case(b"subroutine")
-        }) {
-            return w.get(i + 1).cloned();
+        // A `function-stmt` names its procedure immediately after the keyword,
+        // but the first FUNCTION/SUBROUTINE *word* in the statement need not be
+        // that keyword: in `integer(kind=subroutine) function f()` it is the
+        // kind parameter, and naming the word after it would call the procedure
+        // `function`.  Ask which occurrence is the statement's own.
+        let statement_tokens = tokens(s);
+        if let Some((at, _)) = statement_procedure_keyword(s) {
+            return statement_tokens
+                .iter()
+                .position(|token| token.start == at)
+                .and_then(|index| statement_tokens.get(index + 1))
+                .map(|token| token.text.to_vec());
         }
     }
     if *kind == StatementKind::Submodule {

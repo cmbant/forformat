@@ -57,6 +57,13 @@ exercise distinct wrapping or layout paths. The requirement is zero non-idempote
 crashes for every profile. `tools/differential_free.sh` remains the findent-oracle check for the
 retained legacy free-form fixtures.
 
+`cargo bench` runs `benches/throughput.rs`, which reports peak RSS next to every timing. Its second
+half builds a synthetic multi-file project — a USE chain, a type spelled like a module, component
+chains, a shared INCLUDE — and formats it in normalize-only and full mode, because those are the
+only modes that run project-aware resolution at all. Run it for any change to analysis, name
+resolution, or the case passes. Time and memory have already come apart once here: a change that
+left throughput flat took that half from 56 MB to 77 MB.
+
 When a fixture difference exposes a bug, reduce it to a minimal snippet, add a fixture and a
 manifest row, fix it, and rerun the checks. Keep expected findent outputs unchanged unless the
 compatibility contract itself changes.

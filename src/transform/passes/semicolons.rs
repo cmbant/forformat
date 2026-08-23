@@ -92,6 +92,9 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
         changed = true;
     }
 
+    if changed && document.canonicalize_empty_unterminated_tail() {
+        return Ok(Changed::Structure);
+    }
     Ok(if changed { Changed::Text } else { Changed::No })
 }
 
@@ -146,6 +149,30 @@ mod tests {
         assert_eq!(
             normalize(b"call a() &\n& ; call b();\n"),
             b"call a() &\n& ; call b()\n"
+        );
+    }
+
+    #[test]
+    fn final_unterminated_separator_keeps_document_and_analysis_in_sync() {
+        let mut document = Document::from_bytes(b"\n;");
+        let analysis = document.analyze().unwrap();
+        let scopes = ScopeTree::build(&analysis);
+        let local = FileFacts::default();
+        let project = ProjectContext::empty();
+        let config = FormatConfig::default();
+        let cx = PassContext {
+            config: &config,
+            project: &project,
+            local: &local,
+            analysis: &analysis,
+            scopes: &scopes,
+        };
+
+        assert_eq!(run(&mut document, &cx).unwrap(), Changed::Structure);
+        assert_eq!(document.to_bytes(), b"\n");
+        assert_eq!(
+            document.lines.len(),
+            document.analyze().unwrap().buffer.lines.len()
         );
     }
 

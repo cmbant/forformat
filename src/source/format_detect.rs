@@ -3,7 +3,7 @@
 //! The automatic detector accumulates positive source-form evidence instead of
 //! returning on the first suggestive line. Named sources also keep the filename
 //! prior that avoids false-fixed results on ordinary modern `.f90` sources.
-//! The original findent 4.3.7 `determine_fix_or_free` port remains below as a
+//! The original findent `determine_fix_or_free` port remains below as a
 //! compatibility baseline for focused regression tests.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -494,7 +494,7 @@ fn trim_left(mut line: &[u8]) -> &[u8] {
     line
 }
 
-/// Exact findent 4.3.7 `determine_fix_or_free` compatibility baseline.
+/// Exact findent `determine_fix_or_free` compatibility baseline.
 ///
 /// Automatic policy deliberately does not use its first-decisive-line/EOF
 /// result directly; retaining it makes the historical behavior independently
