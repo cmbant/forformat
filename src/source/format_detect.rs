@@ -351,7 +351,10 @@ fn fixed_continuation_signature(line: &[u8], previous_code: Option<&[u8]>) -> bo
 
     if marker.is_ascii_digit() {
         if line[6].is_ascii_whitespace() {
-            return previous_code.is_some_and(line_requires_continuation);
+            return previous_code.is_some_and(|previous| {
+                line_requires_continuation(previous)
+                    || fixed_list_directed_continuation(previous, &line[6..])
+            });
         }
         if free_statement_label_extends_past_column_six(line) {
             return previous_code.is_some_and(line_requires_continuation);
@@ -361,9 +364,18 @@ fn fixed_continuation_signature(line: &[u8], previous_code: Option<&[u8]>) -> bo
 
     // An alphabetic marker is indistinguishable from an ordinary free-form
     // statement indented exactly five spaces ("     print ...") unless the
-    // preceding line itself proves that continuation is required. The same is
-    // true for `!`, which is an indented free-form comment.
-    if marker.is_ascii_alphabetic() || marker == b'!' {
+    // preceding line proves continuation is required. A comma in the statement
+    // field can also visibly extend a complete list-directed PRINT/READ.
+    if marker.is_ascii_alphabetic() {
+        return previous_code.is_some_and(|previous| {
+            line_requires_continuation(previous)
+                || fixed_list_directed_continuation(previous, &line[6..])
+        });
+    }
+
+    // `!` in column six is also an indented free-form comment, so keep its
+    // stronger requirement that the previous line itself need continuation.
+    if marker == b'!' {
         return previous_code.is_some_and(line_requires_continuation);
     }
 
@@ -371,6 +383,11 @@ fn fixed_continuation_signature(line: &[u8], previous_code: Option<&[u8]>) -> bo
     // free-form Fortran statement in column six, so they are strong fixed
     // continuation evidence when followed by a statement field.
     true
+}
+
+fn fixed_list_directed_continuation(previous_code: &[u8], statement_field: &[u8]) -> bool {
+    terminal_star_is_list_directed_io(rtrim(free_code_prefix(previous_code)))
+        && trim_left(statement_field).first() == Some(&b',')
 }
 
 fn strong_free_form_signature(line: &[u8]) -> bool {
@@ -427,11 +444,81 @@ fn free_statement_label_extends_past_column_six(line: &[u8]) -> bool {
 
 fn line_requires_continuation(line: &[u8]) -> bool {
     let code = rtrim(free_code_prefix(line));
-    if code.last() == Some(&b'&') {
+    let Some(&last) = code.last() else {
+        return false;
+    };
+    match last {
+        b'&' => false,
+        b'*' => terminal_star_requires_operand(code),
+        b',' | b'+' | b'-' | b'=' | b'(' | b'%' => true,
+        _ => false,
+    }
+}
+
+fn terminal_star_requires_operand(code: &[u8]) -> bool {
+    !terminal_star_is_list_directed_io(code)
+}
+
+fn terminal_star_is_list_directed_io(code: &[u8]) -> bool {
+    let mut statement_start = 0;
+    for token in super::scanner::iter_tokens(code) {
+        if token.text == b";" {
+            statement_start = token.end;
+        }
+    }
+
+    let mut tokens = super::scanner::iter_tokens(&code[statement_start..]);
+    let Some(mut token) = tokens.next() else {
+        return false;
+    };
+
+    if token.text.len() <= 5 && token.text.iter().all(u8::is_ascii_digit) {
+        let Some(next) = tokens.next() else {
+            return false;
+        };
+        token = next;
+    }
+
+    if token.text.eq_ignore_ascii_case(b"if") {
+        let Some(open) = tokens.next() else {
+            return false;
+        };
+        if open.text != b"(" {
+            return false;
+        }
+
+        let mut depth = 1usize;
+        for condition_token in tokens.by_ref() {
+            if condition_token.text == b"(" {
+                depth += 1;
+            } else if condition_token.text == b")" {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+        if depth != 0 {
+            return false;
+        }
+
+        let Some(action) = tokens.next() else {
+            return false;
+        };
+        token = action;
+    }
+
+    if ![b"print".as_slice(), b"read"]
+        .iter()
+        .any(|keyword| token.text.eq_ignore_ascii_case(keyword))
+    {
         return false;
     }
-    code.last()
-        .is_some_and(|byte| matches!(byte, b',' | b'+' | b'-' | b'*' | b'=' | b'(' | b'%'))
+
+    let Some(star) = tokens.next() else {
+        return false;
+    };
+    star.text == b"*" && tokens.next().is_none()
 }
 
 fn free_line_continues(line: &[u8]) -> bool {
@@ -747,6 +834,8 @@ mod tests {
             b"      X = A +\n     1  B\n      END\n".as_slice(),
             b"      x = 1 +\n     12 * y\n      END\n".as_slice(),
             b"      x = 1\n     + + y\n      END\n".as_slice(),
+            b"      x = a *\n     a b\n      END\n".as_slice(),
+            b"      PRINT *\n     x, value\n      END\n".as_slice(),
         ] {
             assert_eq!(
                 detect_path(Path::new("legacy.f90"), source),
@@ -835,6 +924,26 @@ mod tests {
             SourceForm::Free
         );
         assert_eq!(detect(b"     print *, 1\nend\n"), SourceForm::Free);
+    }
+
+    #[test]
+    fn terminal_list_directed_star_does_not_trigger_fixed_continuation() {
+        for source in [
+            b"program p\n  if (.true.) then\n     print *\n     write(*,*) \"x\"\n  end if\nend program p\n".as_slice(),
+            b"program p\n  if (.true.) print *\n     write(*,*) \"x\"\nend program p\n".as_slice(),
+            b"program p\n  x = 1; print *\n     write(*,*) \"x\"\nend program p\n".as_slice(),
+            b"program p\n     PRINT*\n     write(*,*) \"x\"\nend program p\n".as_slice(),
+            b"program p\n  10 read *\n     print *, \"done\"\nend program p\n".as_slice(),
+        ] {
+            assert_eq!(detect(source), SourceForm::Free);
+            assert_eq!(detect_path(Path::new("p.f"), source), SourceForm::Free);
+        }
+    }
+
+    #[test]
+    fn terminal_multiplication_star_still_requires_an_operand() {
+        let source = b"program p\n  x = print *\n     y z\nend program p\n";
+        assert_eq!(detect(source), SourceForm::Fixed);
     }
 
     #[test]
