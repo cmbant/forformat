@@ -306,8 +306,7 @@ impl ProjectContext {
                 continue;
             }
             for target in association.targets(name) {
-                let remote =
-                    self.module_export_symbol(&association.module, &target.remote, visited);
+                let remote = self.module_export_symbol(&association.module, target.remote, visited);
                 let candidate = match (remote, target.alias_spelling) {
                     (Visibility::Value(_), Some(alias)) => Visibility::Value(alias),
                     (other, _) => other,
@@ -347,7 +346,7 @@ impl ProjectContext {
                 continue;
             }
             for target in association.targets(name) {
-                let remote = self.module_export_type(&association.module, &target.remote, visited);
+                let remote = self.module_export_type(&association.module, target.remote, visited);
                 let candidate = match (remote, target.alias_spelling) {
                     (Visibility::Value(_), Some(alias)) => Visibility::Value(alias),
                     (other, _) => other,

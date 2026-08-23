@@ -225,7 +225,7 @@ impl ProjectContext {
             for target in association.targets(name) {
                 resolved.merge(self.module_export_type_identity(
                     &association.module,
-                    &target.remote,
+                    target.remote,
                     visited,
                 ));
             }
@@ -251,7 +251,7 @@ impl ProjectContext {
             for target in association.targets(name) {
                 resolved.merge(self.module_export_variable_type_identity(
                     &association.module,
-                    &target.remote,
+                    target.remote,
                     visited,
                 ));
             }

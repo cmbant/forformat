@@ -114,7 +114,7 @@ impl FileFacts {
             for association in &unit.imports {
                 for target in association.targets(name) {
                     let Some(candidate) =
-                        project.module_variable_type(&association.module, &target.remote)
+                        project.module_variable_type(&association.module, target.remote)
                     else {
                         continue;
                     };

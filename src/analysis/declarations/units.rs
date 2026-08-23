@@ -45,10 +45,16 @@ impl AccessFacts {
     }
 
     pub(crate) fn explicit(&self, name: &[u8]) -> Option<Accessibility> {
-        let name = name.to_ascii_lowercase();
-        if self.explicit_private.contains(&name) {
+        if name.iter().any(|byte| byte.is_ascii_uppercase()) {
+            return self.explicit_lowered(&name.to_ascii_lowercase());
+        }
+        self.explicit_lowered(name)
+    }
+
+    fn explicit_lowered(&self, name: &[u8]) -> Option<Accessibility> {
+        if self.explicit_private.contains(name) {
             Some(Accessibility::Private)
-        } else if self.explicit_public.contains(&name) {
+        } else if self.explicit_public.contains(name) {
             Some(Accessibility::Public)
         } else {
             None
@@ -126,7 +132,13 @@ impl HostAccess {
         match &self.mode {
             HostAccessMode::All => true,
             HostAccessMode::None => false,
-            HostAccessMode::Only(names) => names.contains(&name.to_ascii_lowercase()),
+            HostAccessMode::Only(names) => {
+                if name.iter().any(|byte| byte.is_ascii_uppercase()) {
+                    names.contains(&name.to_ascii_lowercase())
+                } else {
+                    names.contains(name)
+                }
+            }
         }
     }
 
@@ -175,9 +187,53 @@ pub(crate) struct UseName {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct UseTarget {
-    pub(crate) remote: Vec<u8>,
+pub(crate) struct UseTarget<'a> {
+    pub(crate) remote: &'a [u8],
     pub(crate) alias_spelling: Option<Vec<u8>>,
+}
+
+pub(crate) struct UseTargets<'a> {
+    association: &'a UseAssociation,
+    name: &'a [u8],
+    next: usize,
+    found_explicit: bool,
+    hidden_by_rename: bool,
+    emitted_implicit: bool,
+}
+
+impl<'a> Iterator for UseTargets<'a> {
+    type Item = UseTarget<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(item) = self.association.names.get(self.next) {
+            self.next += 1;
+            let local_matches = item.local.eq_ignore_ascii_case(self.name);
+            if item.local != item.remote && item.remote.eq_ignore_ascii_case(self.name) {
+                self.hidden_by_rename = true;
+            }
+            if local_matches {
+                self.found_explicit = true;
+                return Some(UseTarget {
+                    remote: &item.remote,
+                    alias_spelling: (item.local != item.remote)
+                        .then(|| item.local_spelling.clone()),
+                });
+            }
+        }
+
+        if !self.found_explicit
+            && !self.association.only
+            && !self.hidden_by_rename
+            && !self.emitted_implicit
+        {
+            self.emitted_implicit = true;
+            return Some(UseTarget {
+                remote: self.name,
+                alias_spelling: None,
+            });
+        }
+        None
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -197,31 +253,14 @@ pub(crate) struct UseAssociation {
 }
 
 impl UseAssociation {
-    pub(crate) fn targets(&self, name: &[u8]) -> Vec<UseTarget> {
-        let name = name.to_ascii_lowercase();
-        let explicit = self
-            .names
-            .iter()
-            .filter(|item| item.local == name)
-            .map(|item| UseTarget {
-                remote: item.remote.clone(),
-                alias_spelling: (item.local != item.remote).then(|| item.local_spelling.clone()),
-            })
-            .collect::<Vec<_>>();
-        if !explicit.is_empty() {
-            return explicit;
-        }
-        let hidden_by_rename = self
-            .names
-            .iter()
-            .any(|item| item.local != item.remote && item.remote == name);
-        if self.only || hidden_by_rename {
-            Vec::new()
-        } else {
-            vec![UseTarget {
-                remote: name,
-                alias_spelling: None,
-            }]
+    pub(crate) fn targets<'a>(&'a self, name: &'a [u8]) -> UseTargets<'a> {
+        UseTargets {
+            association: self,
+            name,
+            next: 0,
+            found_explicit: false,
+            hidden_by_rename: false,
+            emitted_implicit: false,
         }
     }
 }
