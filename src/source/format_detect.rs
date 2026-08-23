@@ -460,12 +460,9 @@ fn terminal_star_requires_operand(code: &[u8]) -> bool {
 }
 
 fn terminal_star_is_list_directed_io(code: &[u8]) -> bool {
-    let mut statement_start = 0;
-    for token in super::scanner::iter_tokens(code) {
-        if token.text == b";" {
-            statement_start = token.end;
-        }
-    }
+    let statement_start = super::scanner::split_statement_ranges(code)
+        .last()
+        .map_or(0, |range| range.start);
 
     let mut tokens = super::scanner::iter_tokens(&code[statement_start..]);
     let Some(mut token) = tokens.next() else {
@@ -835,6 +832,7 @@ mod tests {
             b"      x = 1 +\n     12 * y\n      END\n".as_slice(),
             b"      x = 1\n     + + y\n      END\n".as_slice(),
             b"      x = a *\n     a b\n      END\n".as_slice(),
+            b"      x = 7H;print  *\n     a y\n      END\n".as_slice(),
             b"      PRINT *\n     x, value\n      END\n".as_slice(),
         ] {
             assert_eq!(
