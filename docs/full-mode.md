@@ -143,10 +143,10 @@ whole statement is retained and a decline diagnostic explains why.
 
 Full-line comment separators whose body is a run of one repeated non-whitespace character are not
 prose to reflow. With wrapping enabled, if their final laid-out line exceeds `--line-length`, the
-repeated run is truncated to the budget when the comment prefix itself fits. This covers shapes such
-as `! ----------------`, `!CCCCCCCC`, and `!   ########`. Ordinary prose comments and inline
-comments are left unchanged, and disabling wrapping leaves separator comments at their authored
-length.
+repeated run is truncated to the budget only when the comment prefix and at least one separator
+character fit. This covers shapes such as `! ----------------`, `!CCCCCCCC`, and `!   ########`.
+Ordinary prose comments and inline comments are left unchanged, and disabling wrapping leaves
+separator comments at their authored length.
 
 The available width is measured from the text the engine will emit. Normalization can widen a
 statement, the engine can move it, and declaration-separator alignment can add owed space around
