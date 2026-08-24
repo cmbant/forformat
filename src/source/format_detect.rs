@@ -44,7 +44,10 @@ impl CppFrame {
     fn activity(self) -> CppActivity {
         match self.parent {
             CppActivity::Inactive => CppActivity::Inactive,
-            CppActivity::Unknown => CppActivity::Unknown,
+            CppActivity::Unknown => match self.condition {
+                Some(value) if value == self.in_else => CppActivity::Inactive,
+                _ => CppActivity::Unknown,
+            },
             CppActivity::Active => match self.condition {
                 Some(value) if value != self.in_else => CppActivity::Active,
                 Some(_) => CppActivity::Inactive,
@@ -95,8 +98,11 @@ fn has_modern_free_suffix(path: &std::path::Path) -> bool {
 
 fn collect_evidence(source: &[u8]) -> FormEvidence {
     let mut evidence = FormEvidence::default();
+    let mut tentative_evidence = FormEvidence::default();
     let mut previous_code = None;
     let mut previous_free_continuation = false;
+    let mut tentative_previous_code = None;
+    let mut tentative_previous_free_continuation = false;
     let mut continued_directive = None;
     let mut cpp_stack = Vec::new();
 
@@ -140,22 +146,34 @@ fn collect_evidence(source: &[u8]) -> FormEvidence {
             continue;
         }
 
-        if cpp_activity(&cpp_stack) != CppActivity::Active {
-            continue;
-        }
+        let (line_evidence, line_previous_code, line_previous_free_continuation) =
+            match cpp_activity(&cpp_stack) {
+                CppActivity::Active => (
+                    &mut evidence,
+                    &mut previous_code,
+                    &mut previous_free_continuation,
+                ),
+                CppActivity::Unknown => (
+                    &mut tentative_evidence,
+                    &mut tentative_previous_code,
+                    &mut tentative_previous_free_continuation,
+                ),
+                CppActivity::Inactive => continue,
+            };
 
         if line.is_empty() {
             continue;
         }
 
         let free_comment = trim_left(line).first() == Some(&b'!');
-        if !previous_free_continuation
-            && (fixed_comment_signature(line) || fixed_continuation_signature(line, previous_code))
+        if !*line_previous_free_continuation
+            && (fixed_comment_signature(line)
+                || fixed_continuation_signature(line, *line_previous_code))
         {
-            evidence.strong_fixed = true;
+            line_evidence.strong_fixed = true;
         }
         if !free_comment && strong_free_form_signature(line) {
-            evidence.strong_free = true;
+            line_evidence.strong_free = true;
         }
 
         // Comments may appear between physical lines of a free continuation;
@@ -164,10 +182,13 @@ fn collect_evidence(source: &[u8]) -> FormEvidence {
             continue;
         }
 
-        previous_free_continuation = free_line_continues(line);
-        previous_code = Some(line);
+        *line_previous_free_continuation = free_line_continues(line);
+        *line_previous_code = Some(line);
     }
 
+    if tentative_evidence.strong_free && !tentative_evidence.strong_fixed {
+        evidence.strong_free = true;
+    }
     evidence
 }
 
@@ -210,7 +231,7 @@ fn update_cpp_activity(line: &[u8], stack: &mut Vec<CppFrame>) {
                 frame.in_else = !frame.in_else;
             }
         }
-        b"elif" => {
+        b"elif" | b"elifdef" | b"elifndef" => {
             if let Some(frame) = stack.last_mut() {
                 frame.condition = None;
                 frame.in_else = false;
@@ -970,12 +991,43 @@ mod tests {
     }
 
     #[test]
-    fn cpp_unknown_conditions_are_conservative_and_nest() {
-        let unknown = b"#ifdef MAYBE\nmodule m\n#else\nC legacy text\n#endif\n";
-        assert_eq!(detect(unknown), SourceForm::Fixed);
+    fn cpp_unknown_free_only_evidence_is_tentatively_promoted() {
+        let source = b"#ifdef FEATURE\nmodule m\nend module m\n#endif\n";
+        assert_eq!(detect(source), SourceForm::Free);
+    }
 
+    #[test]
+    fn cpp_unknown_fixed_only_evidence_stays_fixed() {
+        let source = b"#ifdef FEATURE\nC legacy fixed-form text\n      END\n#endif\n";
+        assert_eq!(detect(source), SourceForm::Fixed);
+    }
+
+    #[test]
+    fn cpp_unknown_mixed_alternatives_stay_fixed() {
+        let source = b"#ifdef FEATURE\nmodule m\n#else\nC legacy text\n#endif\n";
+        assert_eq!(detect(source), SourceForm::Fixed);
+    }
+
+    #[test]
+    fn cpp_unknown_conditions_are_conservative_and_nest() {
         let nested = b"#if 1\n#ifdef MAYBE\nC ignored unknown branch\n#endif\nmodule m\n#endif\n";
         assert_eq!(detect(nested), SourceForm::Free);
+
+        let nested_inactive = b"#ifdef MAYBE\n#if 0\nC disabled fixed text\n#endif\nmodule m\n#endif\n";
+        assert_eq!(detect(nested_inactive), SourceForm::Free);
+
+        let nested_else =
+            b"#ifdef MAYBE\n#if 0\nC disabled fixed text\n#else\nmodule m\n#endif\n#endif\n";
+        assert_eq!(detect(nested_else), SourceForm::Free);
+
+        let nested_mixed = b"#ifdef MAYBE\n#ifdef INNER\nmodule m\n#else\nC legacy text\n#endif\n#endif\n";
+        assert_eq!(detect(nested_mixed), SourceForm::Fixed);
+    }
+
+    #[test]
+    fn cpp_elifdef_from_literal_inactive_branch_is_unknown() {
+        let source = b"#if 0\nC disabled fixed text\n#elifdef FEATURE\nmodule m\n#endif\n";
+        assert_eq!(detect(source), SourceForm::Free);
     }
 
     #[test]
