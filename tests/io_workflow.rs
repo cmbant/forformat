@@ -137,6 +137,7 @@ fn all_files_excludes_submodules_from_targets_but_keeps_them_as_context() {
         .status()
         .unwrap();
     git_commit(&repo);
+    let submodule_worktree_bytes = fs::read(repo.join("vendor/submodule.f90")).unwrap();
 
     let output = run(&repo, &["--full", "--all-files", "--context-path", "."]);
     assert_eq!(output.status.code(), Some(0));
@@ -146,7 +147,7 @@ fn all_files_excludes_submodules_from_targets_but_keeps_them_as_context() {
     );
     assert_eq!(
         fs::read(repo.join("vendor/submodule.f90")).unwrap(),
-        submodule_bytes
+        submodule_worktree_bytes
     );
 
     fs::write(&root_source, root_bytes).unwrap();
@@ -528,7 +529,7 @@ fn all_directory_scope_uses_only_the_nested_repo_and_its_config() {
     assert_eq!(context_root, fs::canonicalize(&repo).unwrap());
     assert_eq!(
         tracked_sources(&context_root).unwrap(),
-        vec![repo.join("source.f90")]
+        vec![context_root.join("source.f90")]
     );
 
     let output = run(&parent, &["--indent-only", "--all", "./nested"]);
