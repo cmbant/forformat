@@ -36,21 +36,31 @@ enum CppActivity {
 #[derive(Debug, Clone, Copy)]
 struct CppFrame {
     parent: CppActivity,
+    previous_taken: Option<bool>,
     condition: Option<bool>,
-    in_else: bool,
 }
 
 impl CppFrame {
     fn activity(self) -> CppActivity {
-        match self.parent {
-            CppActivity::Inactive => CppActivity::Inactive,
-            CppActivity::Unknown => CppActivity::Unknown,
-            CppActivity::Active => match self.condition {
-                Some(value) if value != self.in_else => CppActivity::Active,
-                Some(_) => CppActivity::Inactive,
-                None => CppActivity::Unknown,
-            },
+        let branch = match (self.previous_taken, self.condition) {
+            (Some(true), _) | (_, Some(false)) => CppActivity::Inactive,
+            (Some(false), Some(true)) => CppActivity::Active,
+            _ => CppActivity::Unknown,
+        };
+        match (self.parent, branch) {
+            (CppActivity::Inactive, _) | (_, CppActivity::Inactive) => CppActivity::Inactive,
+            (CppActivity::Active, activity) => activity,
+            (CppActivity::Unknown, _) => CppActivity::Unknown,
         }
+    }
+
+    fn advance(&mut self, condition: Option<bool>) {
+        self.previous_taken = match (self.previous_taken, self.condition) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        };
+        self.condition = condition;
     }
 }
 
@@ -95,8 +105,11 @@ fn has_modern_free_suffix(path: &std::path::Path) -> bool {
 
 fn collect_evidence(source: &[u8]) -> FormEvidence {
     let mut evidence = FormEvidence::default();
+    let mut tentative_evidence = FormEvidence::default();
     let mut previous_code = None;
     let mut previous_free_continuation = false;
+    let mut tentative_previous_code = None;
+    let mut tentative_previous_free_continuation = false;
     let mut continued_directive = None;
     let mut cpp_stack = Vec::new();
 
@@ -140,22 +153,34 @@ fn collect_evidence(source: &[u8]) -> FormEvidence {
             continue;
         }
 
-        if cpp_activity(&cpp_stack) != CppActivity::Active {
-            continue;
-        }
+        let (line_evidence, line_previous_code, line_previous_free_continuation) =
+            match cpp_activity(&cpp_stack) {
+                CppActivity::Active => (
+                    &mut evidence,
+                    &mut previous_code,
+                    &mut previous_free_continuation,
+                ),
+                CppActivity::Unknown => (
+                    &mut tentative_evidence,
+                    &mut tentative_previous_code,
+                    &mut tentative_previous_free_continuation,
+                ),
+                CppActivity::Inactive => continue,
+            };
 
         if line.is_empty() {
             continue;
         }
 
         let free_comment = trim_left(line).first() == Some(&b'!');
-        if !previous_free_continuation
-            && (fixed_comment_signature(line) || fixed_continuation_signature(line, previous_code))
+        if !*line_previous_free_continuation
+            && (fixed_comment_signature(line)
+                || fixed_continuation_signature(line, *line_previous_code))
         {
-            evidence.strong_fixed = true;
+            line_evidence.strong_fixed = true;
         }
         if !free_comment && strong_free_form_signature(line) {
-            evidence.strong_free = true;
+            line_evidence.strong_free = true;
         }
 
         // Comments may appear between physical lines of a free continuation;
@@ -164,10 +189,13 @@ fn collect_evidence(source: &[u8]) -> FormEvidence {
             continue;
         }
 
-        previous_free_continuation = free_line_continues(line);
-        previous_code = Some(line);
+        *line_previous_free_continuation = free_line_continues(line);
+        *line_previous_code = Some(line);
     }
 
+    if tentative_evidence.strong_free && !tentative_evidence.strong_fixed {
+        evidence.strong_free = true;
+    }
     evidence
 }
 
@@ -193,27 +221,36 @@ fn update_cpp_activity(line: &[u8], stack: &mut Vec<CppFrame>) {
             };
             stack.push(CppFrame {
                 parent,
+                previous_taken: Some(false),
                 condition,
-                in_else: false,
             });
         }
         b"ifdef" | b"ifndef" => {
             let parent = cpp_activity(stack);
             stack.push(CppFrame {
                 parent,
+                previous_taken: Some(false),
                 condition: None,
-                in_else: false,
             });
         }
         b"else" => {
             if let Some(frame) = stack.last_mut() {
-                frame.in_else = !frame.in_else;
+                frame.advance(Some(true));
             }
         }
         b"elif" => {
+            let condition = if preprocessor_line_continues(PreprocessorKind::Cpp, line) {
+                None
+            } else {
+                literal_cpp_condition(rest)
+            };
             if let Some(frame) = stack.last_mut() {
-                frame.condition = None;
-                frame.in_else = false;
+                frame.advance(condition);
+            }
+        }
+        b"elifdef" | b"elifndef" => {
+            if let Some(frame) = stack.last_mut() {
+                frame.advance(None);
             }
         }
         b"endif" => {
@@ -970,12 +1007,62 @@ mod tests {
     }
 
     #[test]
-    fn cpp_unknown_conditions_are_conservative_and_nest() {
-        let unknown = b"#ifdef MAYBE\nmodule m\n#else\nC legacy text\n#endif\n";
-        assert_eq!(detect(unknown), SourceForm::Fixed);
+    fn cpp_unknown_free_only_evidence_is_tentatively_promoted() {
+        let source = b"#ifdef FEATURE\nmodule m\nend module m\n#endif\n";
+        assert_eq!(detect(source), SourceForm::Free);
+    }
 
+    #[test]
+    fn cpp_unknown_fixed_only_evidence_stays_fixed() {
+        let source = b"#ifdef FEATURE\nC legacy fixed-form text\n      END\n#endif\n";
+        assert_eq!(detect(source), SourceForm::Fixed);
+    }
+
+    #[test]
+    fn cpp_unknown_mixed_alternatives_stay_fixed() {
+        let source = b"#ifdef FEATURE\nmodule m\n#else\nC legacy text\n#endif\n";
+        assert_eq!(detect(source), SourceForm::Fixed);
+    }
+
+    #[test]
+    fn cpp_unknown_conditions_are_conservative_and_nest() {
         let nested = b"#if 1\n#ifdef MAYBE\nC ignored unknown branch\n#endif\nmodule m\n#endif\n";
         assert_eq!(detect(nested), SourceForm::Free);
+
+        let nested_inactive =
+            b"#ifdef MAYBE\n#if 0\nC disabled fixed text\n#endif\nmodule m\n#endif\n";
+        assert_eq!(detect(nested_inactive), SourceForm::Free);
+
+        let nested_else =
+            b"#ifdef MAYBE\n#if 0\nC disabled fixed text\n#else\nmodule m\n#endif\n#endif\n";
+        assert_eq!(detect(nested_else), SourceForm::Free);
+
+        let nested_mixed =
+            b"#ifdef MAYBE\n#ifdef INNER\nmodule m\n#else\nC legacy text\n#endif\n#endif\n";
+        assert_eq!(detect(nested_mixed), SourceForm::Fixed);
+    }
+
+    #[test]
+    fn cpp_elif_after_taken_literal_branch_stays_inactive() {
+        for directive in ["#elif FEATURE", "#elifdef FEATURE", "#elifndef FEATURE"] {
+            let source = format!("#if 1\n      END\n{directive}\nmodule m\n#endif\n");
+            assert_eq!(detect(source.as_bytes()), SourceForm::Fixed, "{directive}");
+        }
+    }
+
+    #[test]
+    fn cpp_elif_after_untaken_literal_branch_can_be_unknown() {
+        for directive in ["#elif FEATURE", "#elifdef FEATURE", "#elifndef FEATURE"] {
+            let source = format!("#if 0\nC disabled fixed text\n{directive}\nmodule m\n#endif\n");
+            assert_eq!(detect(source.as_bytes()), SourceForm::Free, "{directive}");
+        }
+    }
+
+    #[test]
+    fn cpp_true_elif_makes_following_else_inactive() {
+        let source =
+            b"#ifdef FEATURE\n! ambiguous\n#elif 1\nmodule m\n#else\nC unreachable fixed\n#endif\n";
+        assert_eq!(detect(source), SourceForm::Free);
     }
 
     #[test]
