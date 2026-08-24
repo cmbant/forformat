@@ -1,6 +1,6 @@
 use forformat::{
     cli::{parse, Command},
-    format_source, FormatConfig, FormatMode,
+    format_source, format_to, FormatConfig, FormatMode,
 };
 use std::fs;
 
@@ -35,6 +35,22 @@ fn canonicalize_and_indent_matches_the_two_step_pipeline() {
         !text.contains(" &\n"),
         "combined mode unexpectedly wrapped:\n{text}"
     );
+}
+
+#[test]
+fn canonicalize_and_indent_writer_matches_allocating_api() {
+    let source =
+        b"PROGRAM P\r\nIF (x  .EQ.  y) THEN\ncall work(alpha, beta)\r\nENDIF\nENDPROGRAM P";
+    let config = FormatConfig {
+        mode: FormatMode::CanonicalizeAndIndent,
+        ..FormatConfig::default()
+    };
+    let expected = format_source(source, &config).unwrap();
+    let mut output = Vec::new();
+    let meta = format_to(source, &config, &mut output).unwrap();
+
+    assert_eq!(output, expected.bytes);
+    assert_eq!(meta, expected.meta);
 }
 
 #[test]

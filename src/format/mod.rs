@@ -54,9 +54,10 @@ pub mod full {
             return super::full_impl::format_to_with_context(source, project, config, out);
         }
         let local = analyze_file(source)?;
-        let result = canonicalize_and_indent_with_local(source, project, &local, config)?;
-        std::io::Write::write_all(out, &result.bytes).map_err(FormatError::Write)?;
-        Ok(result.meta)
+        let canonicalized = canonicalize_with_local(source, project, &local, config)?;
+        let mut indent = config.clone();
+        indent.mode = FormatMode::IndentOnly;
+        super::engine::format_to(&canonicalized.bytes, &indent, out)
     }
 
     fn canonicalize_and_indent_with_local(
@@ -65,14 +66,21 @@ pub mod full {
         local: &FileFacts,
         config: &FormatConfig,
     ) -> Result<FormatResult, FormatError> {
-        let mut canonical = config.clone();
-        canonical.mode = FormatMode::CanonicalizeOnly;
-        let canonicalized =
-            super::full_impl::format_with_context_and_local(source, project, local, &canonical)?;
-
+        let canonicalized = canonicalize_with_local(source, project, local, config)?;
         let mut indent = config.clone();
         indent.mode = FormatMode::IndentOnly;
         super::engine::format(&canonicalized.bytes, &indent)
+    }
+
+    fn canonicalize_with_local(
+        source: &[u8],
+        project: &ProjectContext,
+        local: &FileFacts,
+        config: &FormatConfig,
+    ) -> Result<FormatResult, FormatError> {
+        let mut canonical = config.clone();
+        canonical.mode = FormatMode::CanonicalizeOnly;
+        super::full_impl::format_with_context_and_local(source, project, local, &canonical)
     }
 }
 
