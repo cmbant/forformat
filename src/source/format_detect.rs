@@ -1013,14 +1013,16 @@ mod tests {
         let nested = b"#if 1\n#ifdef MAYBE\nC ignored unknown branch\n#endif\nmodule m\n#endif\n";
         assert_eq!(detect(nested), SourceForm::Free);
 
-        let nested_inactive = b"#ifdef MAYBE\n#if 0\nC disabled fixed text\n#endif\nmodule m\n#endif\n";
+        let nested_inactive =
+            b"#ifdef MAYBE\n#if 0\nC disabled fixed text\n#endif\nmodule m\n#endif\n";
         assert_eq!(detect(nested_inactive), SourceForm::Free);
 
         let nested_else =
             b"#ifdef MAYBE\n#if 0\nC disabled fixed text\n#else\nmodule m\n#endif\n#endif\n";
         assert_eq!(detect(nested_else), SourceForm::Free);
 
-        let nested_mixed = b"#ifdef MAYBE\n#ifdef INNER\nmodule m\n#else\nC legacy text\n#endif\n#endif\n";
+        let nested_mixed =
+            b"#ifdef MAYBE\n#ifdef INNER\nmodule m\n#else\nC legacy text\n#endif\n#endif\n";
         assert_eq!(detect(nested_mixed), SourceForm::Fixed);
     }
 
