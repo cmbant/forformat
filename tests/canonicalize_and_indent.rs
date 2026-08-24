@@ -98,7 +98,7 @@ fn cli_selects_the_combined_mode_and_last_mode_wins() {
         .map(str::to_owned),
     )
     .is_err());
-    let error = parse(
+    let Err(error) = parse(
         [
             "forformat",
             "--no-config",
@@ -107,8 +107,9 @@ fn cli_selects_the_combined_mode_and_last_mode_wins() {
         ]
         .into_iter()
         .map(str::to_owned),
-    )
-    .unwrap_err();
+    ) else {
+        panic!("rewrap should be rejected for the combined mode");
+    };
     assert!(error.to_string().contains("--rewrap requires full mode"));
 }
 
