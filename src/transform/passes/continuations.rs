@@ -48,10 +48,15 @@ pub fn case_openmp_directives(
 ) -> Result<Changed, FormatError> {
     let mut changed = Changed::No;
     let mut updated = document.lines.clone();
+    let mut case_state = OpenmpCaseState::default();
     for line in &mut updated {
         let Some(prefix) = openmp_directive_prefix(line) else {
+            case_state = OpenmpCaseState::default();
             continue;
         };
+        if !case_state.continued {
+            case_state = OpenmpCaseState::default();
+        }
         let indent_end = line
             .iter()
             .position(|byte| !byte.is_ascii_whitespace())
@@ -63,7 +68,15 @@ pub fn case_openmp_directives(
         ));
         // From the sentinel's end rather than the body's start, so the blank
         // between them is carried through untouched instead of canonicalized.
-        rebuilt.extend_from_slice(&case_openmp_body(&line[prefix.sentinel_end..], cx));
+        rebuilt.extend_from_slice(&case_openmp_body(
+            &line[prefix.sentinel_end..],
+            cx,
+            &mut case_state,
+        ));
+        case_state.continued = openmp_body(&rebuilt).is_some_and(ends_with_continuation);
+        if !case_state.continued {
+            case_state = OpenmpCaseState::default();
+        }
         if rebuilt != *line {
             *line = rebuilt;
             changed = changed.or(Changed::Text);
@@ -425,21 +438,22 @@ fn has_modifier_colon(rest: &[u8]) -> bool {
 /// would take the clause-by-clause grammar of the whole OpenMP specification.
 ///
 /// [`StyleConfig::openmp_keyword_case`]: crate::config::StyleConfig::openmp_keyword_case
-fn case_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
+#[derive(Default)]
+struct OpenmpCaseState {
+    continued: bool,
+    depth: usize,
+    clause_kinds: Option<&'static [&'static [u8]]>,
+    clause_name: Vec<u8>,
+    before_modifier_colon: bool,
+}
+
+fn case_openmp_body(body: &[u8], cx: &PassContext, case_state: &mut OpenmpCaseState) -> Vec<u8> {
     let mut result = Vec::with_capacity(body.len());
-    let mut state = LexState::default();
+    let mut lexical_state = LexState::default();
     let mut regions = Vec::new();
-    state.scan(body, |region| regions.push(region));
+    lexical_state.scan(body, |region| regions.push(region));
     // Depth counts only delimiters the code regions report, so a parenthesis
     // inside a string literal or a comment cannot open a clause.
-    let mut depth = 0usize;
-    // The word immediately before the `(` that took the depth from zero to one,
-    // resolved to the reserved argument spellings that clause admits.
-    let mut clause_kinds: Option<&[&[u8]]> = None;
-    let mut clause_name: Vec<u8> = Vec::new();
-    // Is the clause's modifier colon still ahead? While it is, a top-level
-    // comma separates two modifiers rather than the kind from its chunk size.
-    let mut before_modifier_colon = false;
     for region in regions {
         let bytes = &body[region.range.clone()];
         if region.kind != RegionKind::Code {
@@ -459,9 +473,9 @@ fn case_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
                 let word = &bytes[start..index];
                 // Depth two and beyond is inside an expression — `if(f(x))`,
                 // `schedule(static, n(1))` — where every word is the user's.
-                let reserved = match depth {
+                let reserved = match case_state.depth {
                     0 => Some(DIRECTIVE_WORDS),
-                    1 => clause_kinds,
+                    1 => case_state.clause_kinds,
                     _ => None,
                 };
                 // A macro name outranks every case rule (I4).
@@ -479,36 +493,38 @@ fn case_openmp_body(body: &[u8], cx: &PassContext) -> Vec<u8> {
                 } else {
                     result.extend_from_slice(word);
                 }
-                if depth == 0 {
-                    clause_name = word.to_vec();
+                if case_state.depth == 0 {
+                    case_state.clause_name = word.to_vec();
                 }
                 continue;
             }
             match bytes[index] {
                 b'(' => {
-                    if depth == 0 {
-                        clause_kinds = CLAUSE_KINDS
+                    if case_state.depth == 0 {
+                        case_state.clause_kinds = CLAUSE_KINDS
                             .iter()
-                            .find(|(clause, _)| clause_name.eq_ignore_ascii_case(clause))
+                            .find(|(clause, _)| case_state.clause_name.eq_ignore_ascii_case(clause))
                             .map(|(_, kinds)| *kinds);
-                        before_modifier_colon =
-                            clause_kinds.is_some() && has_modifier_colon(&bytes[index + 1..]);
+                        case_state.before_modifier_colon = case_state.clause_kinds.is_some()
+                            && has_modifier_colon(&bytes[index + 1..]);
                     }
-                    depth += 1;
+                    case_state.depth += 1;
                 }
-                b':' if depth == 1 => before_modifier_colon = false,
+                b':' if case_state.depth == 1 => case_state.before_modifier_colon = false,
                 // The kind and its modifiers are a fixed vocabulary; what
                 // follows them is an expression the user wrote, and
                 // `schedule(dynamic, static)` names a chunk-size variable that
                 // re-casing would rename. Which side of that line a comma falls
                 // on is what `before_modifier_colon` answers.
-                b',' if depth == 1 && !before_modifier_colon => clause_kinds = None,
+                b',' if case_state.depth == 1 && !case_state.before_modifier_colon => {
+                    case_state.clause_kinds = None
+                }
                 b')' => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        clause_kinds = None;
-                        clause_name.clear();
-                        before_modifier_colon = false;
+                    case_state.depth = case_state.depth.saturating_sub(1);
+                    if case_state.depth == 0 {
+                        case_state.clause_kinds = None;
+                        case_state.clause_name.clear();
+                        case_state.before_modifier_colon = false;
                     }
                 }
                 _ => {}

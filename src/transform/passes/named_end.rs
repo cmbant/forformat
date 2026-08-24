@@ -45,16 +45,10 @@ pub fn sync_names(document: &mut Document, cx: &PassContext) -> Result<Changed, 
             let Some((line, _)) = spans.first() else {
                 continue;
             };
-            let Some(scope) = cx.scopes.scope_of_line(*line) else {
+            let Some(name) = enclosing_name(cx, *line, kind, token.text) else {
                 continue;
             };
-            if scope.kind != kind {
-                continue;
-            }
-            let Some(name) = scope.name.as_deref() else {
-                continue;
-            };
-            if name == token.text || !name.eq_ignore_ascii_case(token.text) {
+            if name == token.text {
                 continue;
             }
             let Some(pieces) = spread_replacement(&spans, token, name) else {
@@ -88,6 +82,38 @@ pub fn sync_names(document: &mut Document, cx: &PassContext) -> Result<Changed, 
     }
 
     Ok(changed)
+}
+
+/// The header spelling of the scope a named END closes, when the tree holds one
+/// that this END can be closing: the innermost enclosing scope of the right kind
+/// whose name is the END's name up to case.
+///
+/// Every physical line carries a single owning scope — the one in force before
+/// the line's statements were read — so an END is not always owned by the scope
+/// it closes. Two nested ENDs separated by a `;` share one line, and the second
+/// of them sees the scope the first had already closed. Walking out to the
+/// matching scope answers that case without tracking how many scopes each
+/// statement on the line closed. It cannot reach past the right scope: an
+/// ancestor is only accepted when it already spells this name, so a name that
+/// does not belong to any enclosing scope leaves the END alone.
+fn enclosing_name<'a>(
+    cx: &'a PassContext,
+    line: usize,
+    kind: ScopeKind,
+    name: &[u8],
+) -> Option<&'a [u8]> {
+    let mut index = Some(cx.scopes.index_of_line(line));
+    while let Some(scope) = index.and_then(|at| cx.scopes.scopes.get(at)) {
+        if scope.kind == kind {
+            if let Some(spelling) = scope.name.as_deref() {
+                if spelling.eq_ignore_ascii_case(name) {
+                    return Some(spelling);
+                }
+            }
+        }
+        index = scope.parent;
+    }
+    None
 }
 
 /// The trailing name of an `END <kind> <name>` statement and the kind of scope

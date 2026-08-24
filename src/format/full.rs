@@ -531,7 +531,8 @@ impl<'a> ReflowScope<'a> {
             },
         );
         let mut decline = None;
-        let long = directive.len() > self.config().wrap.line_length
+        let budget = self.config().wrap.line_length;
+        let long = directive.len() > budget
             || group
                 .lines
                 .clone()
@@ -541,7 +542,7 @@ impl<'a> ReflowScope<'a> {
                 .clone()
                 .any(|index| self.unwrapped_width(index) > self.config().wrap.line_length);
         if long {
-            match wrap_sentinel_line(&directive, self.config().wrap.line_length) {
+            match wrap_sentinel_line(&directive, budget) {
                 Ok(wrapped) => out.extend(wrapped),
                 Err(reason) => {
                     decline = Some((group.lines.start, reason));
@@ -711,7 +712,11 @@ impl<'a> ReflowScope<'a> {
             .is_some_and(|line| line.is_conditional_compilation() && self.config().openmp);
         // A conditional sentinel is written by the emitter, not by the
         // wrapper, so it is charged to the line but not to the body.
-        let sentinel_width = if conditional { 3 } else { 0 };
+        let sentinel_width = if conditional {
+            super::engine::CONDITIONAL_SENTINEL_COLUMNS
+        } else {
+            0
+        };
         let emitted_target = first_indent.saturating_sub(sentinel_width);
         Some(StatementGeometry {
             index,
@@ -971,11 +976,11 @@ fn sentinel_spelling(line: &[u8], sentinel_end: usize) -> Vec<u8> {
     spelling
 }
 
-fn reflow_sentinel(line: &[u8], conditional: bool) -> Option<(usize, Vec<u8>)> {
-    if conditional {
-        let prefix = conditional_compilation_prefix(line)?;
-        return Some((prefix.body_start, b"!$ ".to_vec()));
-    }
+/// The sentinel a whole-line directive repeats on each of its continuations.
+///
+/// Only OpenMP directives reach this: a conditional-compilation line is
+/// Fortran and takes the statement path instead.
+fn reflow_sentinel(line: &[u8]) -> Option<(usize, Vec<u8>)> {
     openmp_directive_prefix(line).map(|prefix| {
         (
             prefix.body_start,
@@ -1025,7 +1030,17 @@ fn prepare_sentinel_reflow<B: AsRef<[u8]>>(
         .lines
         .get(index)
         .is_some_and(|line| line.is_conditional_compilation());
-    let (body_start, sentinel) = reflow_sentinel(line, conditional)?;
+    // A conditional-compilation line is Fortran, continued with `&`, so it
+    // belongs on the statement path: `statement_geometry` already models the
+    // sentinel it carries, the column its continuations land on, and the
+    // parenthesis alignment they follow. The directive path below models none
+    // of those — it repeats a sentinel at a fixed prefix — and at CP2K's
+    // indentation it both broke `!$ CALL omp_set_lock(...)` lines that fit and
+    // emitted continuations past the budget, which the next run rewrapped.
+    if conditional {
+        return None;
+    }
+    let (body_start, sentinel) = reflow_sentinel(line)?;
     let body = line.get(body_start..)?.trim_ascii_start();
     if crate::source::regions::comment_start(body).is_some() {
         return None;

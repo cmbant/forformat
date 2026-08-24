@@ -54,8 +54,7 @@ python -m build --wheel --outdir dist && bash tools/check_wheel.sh dist
 
 Run the non-default profiles too. `--align-paren`, `--indent=8`, and `--line-length=80` each
 exercise distinct wrapping or layout paths. The requirement is zero non-idempotent files and zero
-crashes for every profile. `tools/differential_free.sh` remains the findent-oracle check for the
-retained legacy free-form fixtures.
+crashes for every profile.
 
 `cargo bench` runs `benches/throughput.rs`, which reports peak RSS next to every timing. Its second
 half builds a synthetic multi-file project — a USE chain, a type spelled like a module, component
@@ -74,7 +73,7 @@ The devcontainer has original findent installed at /opt/findent.
 
 Keep `docs/options.md` as the primary reference for normal user-facing options. Legacy findent
 spellings that are only compatibility aliases can stay in the migration/compatibility docs. When a
-long option advertised by `--help` or a configuration key changes, update the reference.
+long option advertised by `--help` or a configuration key changes, update the reference and check main READMEs.
 `tools/check_docs.sh` checks advertised help/reference coverage, local Markdown links, stale
 fixed/free wording, and the quick-start formatter examples; it is not an exhaustive parser inventory.
 
