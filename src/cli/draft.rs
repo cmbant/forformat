@@ -139,7 +139,7 @@ impl DraftInvocation {
         // rather than a request the mode cannot answer.
         if self.config.rewrap && !self.config.mode.wraps() {
             return Err(FormatError::InvalidOption(
-                "--rewrap requires full mode: --indent-only, --normalize-only, and --canonicalize-only do not run the wrapper".into(),
+                "--rewrap requires full mode: --indent-only, --normalize-only, --canonicalize-only, and --canonicalize-and-indent do not run the wrapper".into(),
             ));
         }
         if (self.config.last_indent || self.config.last_usable)
