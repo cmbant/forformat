@@ -1,6 +1,8 @@
 #![no_main]
 
-use forformat::source::{regions::line_regions, LexState, RegionKind};
+use forformat::source::{
+    regions::line_regions, LexState, PhysicalLineKind, RegionKind, SourceBuffer,
+};
 use forformat::{format_source, FormatConfig, FormatMode};
 use libfuzzer_sys::fuzz_target;
 
@@ -50,21 +52,43 @@ fn literal_piece(raw: &[u8], delimiter: u8, continued: bool, continues: bool) ->
     (raw, closed)
 }
 
-/// The literal bytes full mode must carry through untouched.
+/// One document's preprocessor directive lines, trimmed the same way the
+/// emitter trims them (`emitter.rs`: "Preprocessor spelling is preserved, but
+/// its source indentation is always structural noise and trailing horizontal
+/// whitespace is normalized"), in document order.
 ///
-/// Deliberately *not* a check on preprocessor lines. This walk classifies
-/// physical lines on its own, and that is the one job the pipeline is
-/// authoritative for: it resolves the continuation marker before deciding what a
-/// line is, so ` &#endif c` is a directive to it and a code line here. Every
-/// disagreement this property has ever reported was a line-classification
-/// difference of that kind, never a corrupted quote. Directive text is pinned by
-/// `preprocessor_lines_are_preserved_byte_for_byte`, by
-/// `tests/conditional_compilation.rs`, by the `external_macro_define` fixture,
-/// and by the `regions` fuzz target -- all of which check it without guessing.
+/// Classification comes from `SourceBuffer` itself, not a hand-rolled `#`
+/// check: an earlier version of this walk classified lines on its own and
+/// disagreed with the pipeline about ` &#endif c` (a continuation marker
+/// immediately followed by a directive), which is a directive to `SourceBuffer`
+/// and looked like code here -- a false I3 failure with nothing wrong in the
+/// formatter. Reusing the real classifier removes that whole class of
+/// disagreement; `None` means `SourceBuffer::new` itself failed, which the
+/// caller treats as not well-formed.
+fn preprocessor_lines(source: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let buffer = SourceBuffer::new(source).ok()?;
+    Some(
+        buffer
+            .lines
+            .iter()
+            .filter(|line| line.kind == PhysicalLineKind::Preprocessor)
+            .map(|line| {
+                source[line.span.start as usize..line.span.end as usize]
+                    .trim_ascii()
+                    .to_vec()
+            })
+            .collect(),
+    )
+}
+
+/// The literal and directive bytes full mode must carry through untouched.
 ///
-/// What is left is the part worth reimplementing independently: if a pass
+/// What is left out is the part worth reimplementing independently: if a pass
 /// corrupts a character literal, an oracle that shares `regions.rs` would
-/// corrupt its own answer identically and see nothing.
+/// corrupt its own answer identically and see nothing. Directive lines don't
+/// have that hazard -- `SourceBuffer`'s classification is reused rather than
+/// reimplemented (see `preprocessor_lines`), and only the resulting bytes are
+/// compared, so a pass that corrupts directive spelling still shows up here.
 #[derive(Debug, PartialEq, Eq)]
 struct Protected {
     /// Logical character literals in document order. A physical continuation
@@ -76,6 +100,8 @@ struct Protected {
     /// Hollerith stays a region list: `docs/full-mode.md` says a Hollerith
     /// payload is never split, so its regions must match one for one.
     hollerith: Vec<Vec<u8>>,
+    /// See `preprocessor_lines`.
+    preprocessor: Vec<Vec<u8>>,
     /// False when a line ends inside a character literal that has neither a
     /// closing delimiter nor a trailing continuation marker.
     ///
@@ -186,9 +212,14 @@ fn protected(source: &[u8]) -> Protected {
             }
         }
     }
+    let preprocessor = preprocessor_lines(source).unwrap_or_else(|| {
+        well_formed = false;
+        Vec::new()
+    });
     Protected {
         literals,
         hollerith,
+        preprocessor,
         well_formed,
     }
 }

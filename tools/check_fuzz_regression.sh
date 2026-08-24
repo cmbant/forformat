@@ -48,6 +48,19 @@ fuzz_target_dir=${FUZZ_TARGET_DIR:-${TMPDIR:-/tmp}/forformat-fuzz-target}
 runs=${FUZZ_RUNS:-0}
 max_total_time=${FUZZ_TIME:-0}
 
+# `-runs=N` and `-max_total_time=N` do not combine the way the flag names
+# suggest: `Options.MaxNumberOfRuns` comes straight from `-runs`
+# (FuzzerDriver.cpp), and `Loop()`'s exit condition checks
+# `TotalNumberOfRuns >= MaxNumberOfRuns` before it ever checks `TimedOut()`
+# (FuzzerLoop.cpp). With the corpus-sweep default of `-runs=0`, that is already
+# true the instant the seed corpus finishes, so a time-only request
+# (FUZZ_TIME set, FUZZ_RUNS not) would otherwise run the seed corpus once and
+# stop -- exactly like the sweep, silently skipping the whole mutation loop.
+# Give it an unbounded run count instead and let -max_total_time stop it.
+if test "$runs" -eq 0 && test "$max_total_time" -gt 0; then
+    runs=-1
+fi
+
 # Crash artifacts land here rather than in the working tree: libFuzzer writes
 # `crash-<sha>` next to its prefix, and the repository root is not the place for
 # it. The directory is gitignored and the path is stable so CI can upload it.
