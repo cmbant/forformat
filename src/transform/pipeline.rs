@@ -63,7 +63,8 @@ pub struct PassContext<'a> {
     /// This file's own declarations, which outrank the project's (I4).
     pub local: &'a FileFacts,
     /// The statement view of the document as it was when this context was
-    /// built. A pass that returns [`Changed::Structure`] invalidates it.
+    /// built. Any text or structural change invalidates it before the next
+    /// context-consuming pass runs.
     pub analysis: &'a Analysis,
     pub scopes: &'a ScopeTree,
 }
@@ -304,21 +305,31 @@ mod tests {
     }
 
     #[test]
-    fn context_snapshot_survives_only_no_op_stages() {
+    fn context_snapshot_is_rebuilt_after_text_change() {
         let mut document = Document::from_bytes(b"x = 1\n");
         let project = ProjectContext::empty();
         let local = FileFacts::default();
         let config = FormatConfig::default();
         let mut contexts = PassContextCache::new(&project, &local, &config);
 
-        assert!(contexts.snapshot.is_none());
-        contexts.run(&mut document, |_, _| Ok(Changed::No)).unwrap();
-        assert!(contexts.snapshot.is_some());
-        contexts.run(&mut document, |_, _| Ok(Changed::No)).unwrap();
-        assert!(contexts.snapshot.is_some());
         contexts
-            .run(&mut document, |_, _| Ok(Changed::Text))
+            .run(&mut document, |_, cx| {
+                assert_eq!(cx.analysis.groups[0].statements[0].text, b"x = 1");
+                Ok(Changed::No)
+            })
             .unwrap();
-        assert!(contexts.snapshot.is_none());
+        contexts
+            .run(&mut document, |document, cx| {
+                assert_eq!(cx.analysis.groups[0].statements[0].text, b"x = 1");
+                document.lines[0] = b"x = 2".to_vec();
+                Ok(Changed::Text)
+            })
+            .unwrap();
+        contexts
+            .run(&mut document, |_, cx| {
+                assert_eq!(cx.analysis.groups[0].statements[0].text, b"x = 2");
+                Ok(Changed::No)
+            })
+            .unwrap();
     }
 }
