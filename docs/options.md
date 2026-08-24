@@ -10,8 +10,9 @@ Options configure formatter **policy** rather than exposing every internal pass.
 normalize-only mode perform the safe normalization required by their format contracts, including
 project/local declaration-driven casing and lexical continuation handling. Canonicalize-only keeps
 canonicalization transformations that do not require presentation layout while deliberately
-preserving authored presentation whitespace and physical layout. The switches below control the
-behaviours intended to be user choices.
+preserving authored presentation whitespace and physical layout. Canonicalize-and-indent applies
+that same canonicalization policy and then the existing indent-only layout. The switches below
+control the behaviours intended to be user choices.
 
 ## Quick examples
 
@@ -45,6 +46,12 @@ Canonicalize language spelling without reformatting authored whitespace:
 forformat --canonicalize-only src/module.f90
 ```
 
+Canonicalize spelling and then apply findent-compatible indentation, without wrapping:
+
+```sh
+forformat --canonicalize-and-indent src/module.f90
+```
+
 Repack existing continuations against the current line-length policy:
 
 ```sh
@@ -71,6 +78,7 @@ forformat --stdout src/module.f90 --context-path=src --context-path=modules
 | `--indent-only` | `mode = "indent-only"` | findent-compatible layout; style controls are ignored | no |
 | `--normalize-only` | `mode = "normalize-only"` | normalization only; no layout or wrapping | no |
 | `--canonicalize-only` | `mode = "canonicalize-only"` | canonical transformations without whitespace or layout normalization | no |
+| `--canonicalize-and-indent` | `mode = "canonicalize-and-indent"` | canonical transformations followed by findent-compatible indentation; no wrapping or full-mode post-layout alignment | no |
 
 Mode switches are valueless on the command line. In TOML use the single `mode` key. Mode is one
 setting rather than a combination, so when more than one mode switch is given the last one wins
@@ -85,6 +93,12 @@ spelling: for example `enddo` becomes `end do`, `endmodule` becomes `end module`
 become `goto`. Other enabled canonicalization transforms, such as safely redundant-parenthesis
 removal, may also change syntax without being whitespace formatting. This is therefore a promise not
 to make **whitespace-only formatting edits**, not a promise that only character case can change.
+
+Canonicalize-and-indent is defined as the exact composition of canonicalize-only followed by
+indent-only with the same settings. Canonicalization therefore still preserves authored interior
+spacing and physical line structure; the second stage then owns the same leading indentation and
+trailing-whitespace changes as `--indent-only`. It does not run the wrapper, declaration/comment
+alignment, program-unit spacing, or blank-line limiting that belong to full mode.
 
 ## Selecting input and output
 
@@ -199,9 +213,9 @@ key is `indent_contains` and accepts either a non-negative integer or `"restart"
 
 ## Full/normalization style
 
-The style controls in this table affect `--full` and `--normalize-only`. Canonicalize-only applies
-canonicalization controls that do not amount to presentation-only whitespace/layout changes;
-`--indent-only` deliberately ignores this table.
+The style controls in this table affect `--full` and `--normalize-only`. Canonicalize-only and the
+canonicalization stage of canonicalize-and-indent apply controls that do not amount to
+presentation-only whitespace/layout changes; `--indent-only` deliberately ignores this table.
 
 | CLI / TOML key | Values | Default | Effect |
 | --- | --- | --- | --- |
@@ -224,7 +238,8 @@ canonicalization controls that do not amount to presentation-only whitespace/lay
 | `--uppercase-single-l[=BOOL]` / `uppercase_single_l` | boolean | false | uppercase a lone identifier `l` |
 
 `--max-blank-lines=0` can remove separators inserted by `--program-unit-spacing=true`, because the
-blank-line cap runs afterward. Canonicalize-only does not perform either blank-line transformation.
+blank-line cap runs afterward. Canonicalize-only and canonicalize-and-indent do not perform either
+blank-line transformation.
 
 `--openmp-case` governs the reserved OpenMP directive sentinel and the directive words after it.
 Uppercase directives over otherwise lowercase Fortran is the near-universal convention, so it
@@ -255,17 +270,18 @@ Both settings also apply to a directive the wrapper has split, which repeats the
 physical line in the spelling normalization chose.
 
 Directive spelling is canonicalization rather than presentation, so `--openmp-case` applies in every
-normalizing mode, canonicalize-only included, and is independent of `--continuation-markers`.
-Repeating the sentinel across a split directive, dropping a body-leading `&`, and the canonical blank
-after the sentinel are the presentation half, and those follow the whitespace and continuation-marker
-policy as usual.
+normalizing mode, canonicalize-only and canonicalize-and-indent included, and is independent of
+`--continuation-markers`. Repeating the sentinel across a split directive, dropping a body-leading
+`&`, and the canonical blank after the sentinel are the presentation half, and those follow the
+whitespace and continuation-marker policy as usual.
 
 `--normalize-semicolons` keeps exactly one `;` between each adjacent pair of non-empty statements
 and drops the rest, so `;;call a();;; call b();;` becomes `call a(); call b()`. Semicolons inside
 character literals, Hollerith payloads, preprocessor lines, and `findentfix` comments are part of
 their statement rather than separators and are never removed, and a separator that genuinely divides
 two statements across a continuation is kept. The surrounding spacing is left alone; this is a
-token-level rather than a whitespace transformation, so it stays active in canonicalize-only mode.
+token-level rather than a whitespace transformation, so it stays active in canonicalize-only and
+canonicalize-and-indent modes.
 
 ### Whitespace and alignment
 
@@ -275,18 +291,19 @@ token-level rather than a whitespace transformation, so it stays active in canon
 | `--align-declarations=BOOL` | `align_declarations = BOOL` | true | align/shrink declaration `::` runs |
 | `--align-comments=BOOL` | `align_comments = BOOL` | false | align/shrink trailing-comment runs |
 
-Whitespace at end of line is removed in **every** mode, including `--indent-only` and
-`--canonicalize-only`, and is not governed by any switch: it is invisible, so it is never the
-formatting choice that those modes exist to preserve. Interior whitespace is a different matter and
-is preserved wherever the mode preserves presentation. The one exception is whitespace that is not
-really trailing: blanks inside a character literal or a Hollerith payload are payload bytes — `3Hab `
-promises three characters — and are kept in every mode.
+Whitespace at end of line is removed in **every** mode, including `--indent-only`,
+`--canonicalize-only`, and `--canonicalize-and-indent`, and is not governed by any switch: it is
+invisible, so it is never the formatting choice that those modes exist to preserve. Interior
+whitespace is a different matter and is preserved wherever the mode preserves presentation. The one
+exception is whitespace that is not really trailing: blanks inside a character literal or a Hollerith
+payload are payload bytes — `3Hab ` promises three characters — and are kept in every mode.
 
 `--reduce-whitespace` is an emission/layout control rather than a normalize-only text pass: it
-applies when the layout emitter runs (full and indent-only modes), and is inactive in normalize-only
-and canonicalize-only modes. Declaration/comment alignment runs only in full mode. When one of those
-alignment passes owns its corresponding gap, `--reduce-whitespace` leaves the gap for the alignment
-pass instead of collapsing it first.
+applies when the layout emitter runs (full, indent-only, and the indentation stage of
+canonicalize-and-indent), and is inactive in normalize-only and canonicalize-only modes.
+Declaration/comment alignment runs only in full mode. When one of those alignment passes owns its
+corresponding gap, `--reduce-whitespace` leaves the gap for the alignment pass instead of collapsing
+it first.
 
 For findent command-line compatibility, `--ws_remred` (equivalently `--ws-remred`) remains an alias
 for `--reduce-whitespace`; the legacy `ws_remred` TOML key is accepted for the same reason. Prefer
@@ -299,9 +316,10 @@ for `--reduce-whitespace`; the legacy `ws_remred` TOML key is accepted for the s
 or disable the transformation. `--refactor-procedures` is an accepted compatibility alias; prefer
 `--refactor-end`. The configuration key is `refactor_end`.
 
-END completion is also available in canonicalize-only mode. In that mode the scope-aware END text is
-replaced in place while retaining the authored leading indentation, comment gap, and line terminator.
-Whitespace left at end of line is removed, as it is in every mode.
+END completion is also available in canonicalize-only and canonicalize-and-indent modes. In those
+modes the scope-aware END text is replaced in place before any combined-mode indentation, while
+retaining the authored comment gap and line terminator. Whitespace left at end of line is removed,
+as it is in every mode.
 
 ## Wrapping
 
@@ -326,10 +344,11 @@ Rewrap never enables wrapping: if wrapping is disabled by `--no-wrap` or `--wrap
 order or through TOML, the rewrap policy is simply inactive. Turning wrapping off is a coherent
 policy within full mode, so that combination is accepted rather than rejected.
 
-Asking a mode that never wraps to rewrap is a different matter and is an error:
-`--rewrap` together with `--indent-only`, `--normalize-only`, or `--canonicalize-only` is rejected in
-any order, and so is the equivalent pair of TOML keys, rather than accepted as a flag that quietly
-does nothing. `--rewrap=false` asks for nothing and is accepted in every mode.
+Asking a mode that never wraps to rewrap is a different matter and is an error: `--rewrap` together
+with `--indent-only`, `--normalize-only`, `--canonicalize-only`, or
+`--canonicalize-and-indent` is rejected in any order, and so is the equivalent pair of TOML keys,
+rather than accepted as a flag that quietly does nothing. `--rewrap=false` asks for nothing and is
+accepted in every mode.
 
 ## Preprocessor definitions
 

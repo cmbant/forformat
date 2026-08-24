@@ -17,9 +17,11 @@ pub(crate) struct ConfigArguments {
 /// which is how a single normalization rule can be tested independently of
 /// structural layout.  `CanonicalizeOnly` is `NormalizeOnly` minus presentation
 /// whitespace: token and spelling canonicalization without reflowing the
-/// author's spacing.
+/// author's spacing. `CanonicalizeAndIndent` composes that canonicalization
+/// policy with the existing indent-only layout engine, without wrapping or
+/// post-layout presentation passes.
 ///
-/// The four modes are one field on purpose.  Canonicalization used to be
+/// The five modes are one field on purpose.  Canonicalization used to be
 /// `NormalizeOnly` plus a separate `style.normalize_whitespace = false`, which
 /// made `--canonicalize-only --normalize-only` depend on argument order — the
 /// second option reset the whitespace half of the first.  Whether whitespace is
@@ -30,13 +32,14 @@ pub enum FormatMode {
     IndentOnly,
     NormalizeOnly,
     CanonicalizeOnly,
+    CanonicalizeAndIndent,
     Full,
 }
 
 /// Each predicate below names one question the pipeline asks of the mode, and
 /// is the only place that question is answered.  Several of them currently
 /// select the same single variant, and that is deliberate rather than
-/// redundant: they mean different things, so a fifth mode would answer them
+/// redundant: they mean different things, so a sixth mode would answer them
 /// differently, and a caller written as `mode == FormatMode::Full` would have
 /// silently picked whichever meaning it happened to be next to.  Ask the
 /// question, not the variant.
@@ -49,13 +52,19 @@ impl FormatMode {
     pub fn normalizes(self) -> bool {
         matches!(
             self,
-            FormatMode::NormalizeOnly | FormatMode::CanonicalizeOnly | FormatMode::Full
+            FormatMode::NormalizeOnly
+                | FormatMode::CanonicalizeOnly
+                | FormatMode::CanonicalizeAndIndent
+                | FormatMode::Full
         )
     }
 
     /// Whether the layout engine chooses this mode's columns.
     pub fn lays_out(self) -> bool {
-        matches!(self, FormatMode::IndentOnly | FormatMode::Full)
+        matches!(
+            self,
+            FormatMode::IndentOnly | FormatMode::CanonicalizeAndIndent | FormatMode::Full
+        )
     }
 
     /// Whether the post-layout alignment passes run after the emitter.
@@ -70,12 +79,16 @@ impl FormatMode {
 
     /// Whether presentation whitespace belongs to the formatter in this mode.
     ///
-    /// Only canonicalization says no: it keeps the authored spacing and line
-    /// structure while still canonicalizing tokens and spellings.  This governs
-    /// interior whitespace only — whitespace at end of line is invisible rather
-    /// than a formatting choice, and every mode removes it.
+    /// The canonicalization modes say no: they keep authored interior spacing
+    /// and line structure while still canonicalizing tokens and spellings.
+    /// `CanonicalizeAndIndent` then changes only the leading/trailing whitespace
+    /// owned by the indent-only engine. Whitespace at end of line is invisible
+    /// rather than a formatting choice, and every mode removes it.
     pub fn normalizes_whitespace(self) -> bool {
-        !matches!(self, FormatMode::CanonicalizeOnly)
+        !matches!(
+            self,
+            FormatMode::CanonicalizeOnly | FormatMode::CanonicalizeAndIndent
+        )
     }
 
     /// Whether the reflow wrapper runs, and therefore whether `rewrap` can mean
@@ -307,6 +320,7 @@ fn read_config(
                 "indent-only" | "indent_only" => "--indent-only",
                 "normalize-only" | "normalize_only" => "--normalize-only",
                 "canonicalize-only" | "canonicalize_only" => "--canonicalize-only",
+                "canonicalize-and-indent" | "canonicalize_and_indent" => "--canonicalize-and-indent",
                 other => {
                     return Err(crate::error::FormatError::InvalidOption(format!(
                         "configuration key `mode` in {} has unknown value `{other}`",

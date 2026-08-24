@@ -67,15 +67,27 @@ form is skipped unchanged. Use `-ifree` or `--input-format=free` to force free-f
 - `--indent-only` — findent-compatible indentation and trailing-whitespace handling.
 - `--normalize-only` — normalization without structural layout or wrapping.
 - `--canonicalize-only` — canonical transformations without whitespace or layout normalization.
+- `--canonicalize-and-indent` — canonical transformations followed by findent-compatible indentation, without wrapping or full-mode post-layout alignment.
 
 For example:
 
 ```sh
 forformat --indent=4 --indent-module=0 --indent-procedure=0 src/module.f90
 forformat --keyword-case=upper --line-length=100 src/module.f90
+forformat --canonicalize-and-indent src/module.f90
 ```
 
-If authored internal spacing must be preserved, use the indentation-only mode:
+If authored internal spacing must be preserved while both canonical spelling and structural
+indentation are wanted, use the combined mode:
+
+```sh
+forformat --canonicalize-and-indent src/module.f90
+```
+
+It is defined as canonicalize-only followed by indent-only with the same settings, so it preserves
+authored interior spacing, does not wrap statements, and does not run full-mode alignment passes.
+
+If all spelling must also be preserved, use the indentation-only mode:
 
 ```sh
 forformat --indent-only src/module.f90
