@@ -5,8 +5,8 @@ use crate::{
     source::{
         regions::LexState,
         syntax::{
-            conditional_compilation_body_start, conditional_compilation_prefix,
-            openmp_directive_prefix, ConditionalPrefixKind, SourceStream,
+            conditional_compilation_body_start, conditional_compilation_prefix, line_start_syntax,
+            openmp_directive_prefix, ConditionalPrefixKind, LineStartSyntax, SourceStream,
         },
         PhysicalLineKind, RegionKind,
     },
@@ -196,9 +196,17 @@ pub fn normalize_openmp_continuation_sentinels(
         let should_repeat = is_continuation || continuation;
         let mut start = prefix.body_start;
         if should_repeat && current.get(start) == Some(&b'&') {
-            start += 1;
-            while start < current.len() && current[start].is_ascii_whitespace() {
-                start += 1;
+            let mut next = start + 1;
+            while next < current.len() && current[next].is_ascii_whitespace() {
+                next += 1;
+            }
+            // The sentinel keeps the line start, so a promoted body cannot
+            // become a directive here — but it can expose a second marker for
+            // the next run to consume, which is how `!$omp &&do` took two runs
+            // to settle. Leave a doubled marker alone; `remove_leading_continuation`
+            // declines the same way for the same reason.
+            if line_start_syntax(&current[next..]) != LineStartSyntax::ContinuationMarker {
+                start = next;
             }
         }
         let normalized_body = normalize_openmp_body(&current[start..], cx);
@@ -343,14 +351,35 @@ fn remove_leading_continuation(line: &[u8]) -> Vec<u8> {
     while next < code.len() && code[next].is_ascii_whitespace() {
         next += 1;
     }
+    let body = &code[next..];
+    // Dropping the marker moves `body` leftwards, and openings that were inert
+    // behind a `&` become active there. On an ordinary line the body lands at
+    // the start of the line, so every anchored opening applies: `&# 2` would
+    // become the directive `# 2` and lose its place in the statement, `& & 4`
+    // would expose a second marker for the next pass to strip again, `&!$ y`
+    // would become conditional-compilation code, and a bare `&` would leave a
+    // blank line where a code line was. On a conditional line the sentinel
+    // still owns the line start, so only a further `&` is live behind this
+    // one. Either way a body that would change what it is keeps its marker,
+    // which is a fixed point: the next pass declines for the same reason.
+    let body_would_reclassify = if prefix.is_some() {
+        line_start_syntax(body) == LineStartSyntax::ContinuationMarker
+    } else {
+        line_start_syntax(body) != LineStartSyntax::Ordinary
+    };
+    if body_would_reclassify {
+        return line.to_vec();
+    }
     let mut result = line[..code_start + start].to_vec();
     if prefix.is_some_and(|prefix| prefix.kind == ConditionalPrefixKind::CompactContinuation) {
         // Removing the `&` from `!$& foo` must leave a valid conditional
         // sentinel. Without this separator the result would be the joined
-        // near-miss `!$foo`, which is an ordinary comment rather than code.
+        // near-miss `!$foo`, which is an ordinary comment rather than code —
+        // the same hazard as above, in the one shape the sentinel itself can
+        // be damaged by.
         result.extend_from_slice(b" ");
     }
-    result.extend_from_slice(&code[next..]);
+    result.extend_from_slice(body);
     result
 }
 

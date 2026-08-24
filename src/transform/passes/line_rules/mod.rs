@@ -610,7 +610,8 @@ fn fold_open_groups(line: &[u8], open: &mut Vec<bool>, incoming: LexState) {
     }
 }
 
-include!("tests.rs");
+#[cfg(test)]
+mod tests;
 
 #[cfg(test)]
 mod rejoined_tests {

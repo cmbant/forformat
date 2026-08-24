@@ -928,8 +928,27 @@ fn detach_final_inline_comment<B: AsRef<[u8]>>(
     }
     let (index, start) = comments[0];
     let line = &document.lines[index];
+    let text = line[start..].trim_ascii_start();
+    // A comment is only a comment where it sits. Sentinel syntax is anchored to
+    // the start of a physical line (see `LineStartSyntax`), so lifting
+    // `x = 1 !$omp parallel` above its statement does not move a comment — it
+    // writes an OpenMP directive, and `!$ y = 2` lifted the same way becomes
+    // conditional-compilation code an OpenMP build will execute. Both are
+    // silent, and the directive is additionally not a fixed point: the next run
+    // reads it at column zero and applies the directive case rule normalization
+    // never had cause to apply inline.
+    //
+    // The test is the whole reserved `!$` prefix rather than the sentinels this
+    // crate happens to parse, because being wrong in the two directions costs
+    // very different amounts. Refusing one comment leaves it inline, which is
+    // where the author put it. Manufacturing a sentinel this crate does not
+    // model — `!$acc` is the live example — hands a directive to a compiler
+    // that does model it, attached to whichever statement the comment trailed.
+    if text.starts_with(b"!$") {
+        return None;
+    }
     let mut comment = vec![b' '; comment_indent];
-    comment.extend_from_slice(line[start..].trim_ascii_start());
+    comment.extend_from_slice(text);
     Some(Some(vec![comment]))
 }
 

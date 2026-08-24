@@ -91,10 +91,10 @@ jobs:
   #
   # It is non-blocking *for now*. A failure here is never a false alarm -- the
   # crashing input is uploaded and reproduces exactly -- but `TODO.md` records
-  # two known unfixed I1 defects that a mutating run rediscovers within about
-  # half a minute, so gating merges on it today would just mean random red
-  # builds for bugs the PR did not introduce. Once those are fixed, drop
-  # `continue-on-error` and make this required.
+  # three known unfixed I1 defects that a mutating run rediscovers on its own,
+  # so gating merges on it today would just mean random red builds for bugs the
+  # PR did not introduce. Once those are fixed, drop `continue-on-error` and
+  # make this required.
   fuzz:
     name: fuzz (mutating, non-blocking)
     needs: fast-checks

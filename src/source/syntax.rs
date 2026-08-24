@@ -158,6 +158,65 @@ pub(crate) fn openmp_directive_prefix(line: &[u8]) -> Option<OpenMpDirectivePref
     })
 }
 
+/// What a physical line's opening bytes commit it to before any Fortran is
+/// read.
+///
+/// Every construct below is anchored to the *start* of a physical line and
+/// inert anywhere else: `#` is a directive only in column zero, `!$omp` is a
+/// directive only when nothing but blanks precedes it, and `&` is a
+/// continuation marker only as a continuation line's first nonblank byte. That
+/// asymmetry is the hazard this type exists for. A pass that moves bytes
+/// leftwards — dropping a continuation marker, lifting an inline comment onto
+/// its own line — can hand a line an opening it did not have, and the bytes
+/// then mean something the author did not write. Such a pass asks this what
+/// its candidate line would become and declines when the answer is not what it
+/// started from.
+///
+/// Trimming here is spaces and tabs only, exactly as `SourceBuffer` and the two
+/// prefix parsers above trim, so indentation cannot be used to hide any of
+/// these: re-indenting a promoted `#` leaves it a directive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LineStartSyntax {
+    /// Nothing anchored. Ordinary code, or a comment that is only a comment.
+    Ordinary,
+    /// Empty, or nothing but horizontal whitespace.
+    Blank,
+    /// A leading `&`: a continuation line's marker.
+    ContinuationMarker,
+    /// `#` or `??`: a preprocessor directive line, which is stepped over rather
+    /// than joined to the statement around it.
+    Directive,
+    /// `!$ ` or `!$&`: conditional-compilation code, not a comment.
+    Conditional,
+    /// `!$omp` or `!$ompx`: an OpenMP directive line.
+    OpenMpDirective,
+}
+
+/// Classify what `line` commits to at its start. See [`LineStartSyntax`].
+///
+/// The order of the tests is the order the readers apply them:
+/// conditional-compilation and OpenMP sentinels are examined before the plain
+/// `!` comment rule, because both begin with `!`, and the directive test comes
+/// before the code fallthrough because `SourceBuffer` decides `Preprocessor`
+/// before it decides `Code`.
+pub(crate) fn line_start_syntax(line: &[u8]) -> LineStartSyntax {
+    let Some(start) = line.iter().position(|byte| !matches!(byte, b' ' | b'\t')) else {
+        return LineStartSyntax::Blank;
+    };
+    let trimmed = &line[start..];
+    if trimmed.starts_with(b"&") {
+        LineStartSyntax::ContinuationMarker
+    } else if trimmed.starts_with(b"#") || trimmed.starts_with(b"??") {
+        LineStartSyntax::Directive
+    } else if conditional_compilation_prefix(trimmed).is_some() {
+        LineStartSyntax::Conditional
+    } else if openmp_directive_prefix(trimmed).is_some() {
+        LineStartSyntax::OpenMpDirective
+    } else {
+        LineStartSyntax::Ordinary
+    }
+}
+
 /// Number of leading tokens occupied by a declaration type head.
 ///
 /// This is shared by declaration indexing and continuation-line formatting so
