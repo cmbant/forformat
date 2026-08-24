@@ -20,7 +20,7 @@ struct ClassificationContext<'a> {
 
 /// Why the base declared-case pass made (or declined) a spelling decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum CaseEvidence {
+pub(crate) enum CaseEvidence {
     KeepBase,
     Alias(Vec<u8>),
     Symbol {
@@ -36,7 +36,7 @@ pub(super) enum CaseEvidence {
     },
 }
 
-pub(super) type CaseEvidenceMap = HashMap<(usize, usize), CaseEvidence>;
+pub(crate) type CaseEvidenceMap = HashMap<(usize, usize), CaseEvidence>;
 
 /// Step 5: apply scoped declared spellings to identifier occurrences.
 pub(crate) fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
@@ -52,7 +52,7 @@ fn declared_with_names(
     declared_with_names_impl(document, cx, declared_names, None)
 }
 
-pub(super) fn declared_with_names_and_evidence(
+pub(crate) fn declared_with_names_and_evidence(
     document: &mut Document,
     cx: &PassContext,
     declared_names: &DeclaredNameIndex,
