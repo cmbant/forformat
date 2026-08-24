@@ -200,6 +200,12 @@ pub fn normalize(
         }
     }
 
+    // Trailing horizontal whitespace is invisible output policy, but wrapping
+    // and layout must not make decisions from bytes that step 20 will delete.
+    // Normalize it here as well; the stream-aware helper preserves literal and
+    // Hollerith payload blanks that are real source bytes.
+    passes::layout_post::trim_trailing_horizontal(document);
+
     Ok(())
 }
 
@@ -261,6 +267,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::Changed;
+    use crate::{format_source, FormatConfig};
 
     #[test]
     fn change_levels_combine_to_the_strongest() {
@@ -268,5 +275,14 @@ mod tests {
         assert_eq!(Changed::No.or(Changed::Text), Changed::Text);
         assert_eq!(Changed::Text.or(Changed::Structure), Changed::Structure);
         assert_eq!(Changed::Structure.or(Changed::No), Changed::Structure);
+    }
+
+    #[test]
+    fn label_only_trailing_whitespace_is_idempotent() {
+        let source = b"program main\nconti end\n10 \n";
+        let config = FormatConfig::default();
+        let once = format_source(source, &config).unwrap().bytes;
+        let twice = format_source(&once, &config).unwrap().bytes;
+        assert_eq!(once, twice);
     }
 }
