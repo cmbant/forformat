@@ -3,6 +3,7 @@ name: Rust conversion checks
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -58,7 +59,7 @@ jobs:
   static-artifacts:
     name: static Linux artifact (${{ matrix.target }})
     needs: checks
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -74,32 +75,57 @@ jobs:
         with:
           toolchain: stable
           target: ${{ matrix.target }}
+
       - name: Install musl toolchain
         run: sudo apt-get update && sudo apt-get install --yes musl-tools
+
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-auditable@0.7.5
+
       - name: Verify release tag matches the package version
+        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           set -euo pipefail
           version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)
           test "$GITHUB_REF_NAME" = "v$version"
-      - run: CARGO_TARGET_DIR=target/repro-a cargo auditable build --locked --release --target ${{ matrix.target }}
-      - run: CARGO_TARGET_DIR=target/repro-b cargo auditable build --locked --release --target ${{ matrix.target }}
+
+      - name: Build reproducible binary A
+        run: |
+          CARGO_TARGET_DIR=target/repro-a \
+            cargo auditable build \
+            --locked \
+            --release \
+            --target ${{ matrix.target }}
+
+      - name: Build reproducible binary B
+        run: |
+          CARGO_TARGET_DIR=target/repro-b \
+            cargo auditable build \
+            --locked \
+            --release \
+            --target ${{ matrix.target }}
+
       - name: Verify auditable and reproducible binary
         shell: bash
         run: |
           set -euo pipefail
+
           a=target/repro-a/${{ matrix.target }}/release/forformat
           b=target/repro-b/${{ matrix.target }}/release/forformat
+
           readelf -S "$a" | grep -F .dep-v0
           readelf -S "$b" | grep -F .dep-v0
-          test "$(sha256sum "$a" | awk '{print $1}')" = "$(sha256sum "$b" | awk '{print $1}')"
+
+          test "$(sha256sum "$a" | awk '{print $1}')" = \
+               "$(sha256sum "$b" | awk '{print $1}')"
+
       - name: Package deterministic release archive
         shell: bash
         run: |
           set -euo pipefail
+
           target=${{ matrix.target }}
           root=target/release-package
           directory="forformat-$target"
@@ -108,11 +134,21 @@ jobs:
           source_date_epoch=$(git log -1 --format=%ct)
 
           mkdir -p "$root/$directory"
-          install -m 0755 "target/repro-a/$target/release/forformat" "$root/$directory/forformat"
-          cp LICENSE LICENSE-THIRD-PARTY NOTICE README.md "$root/$directory/"
+
+          install -m 0755 \
+            "target/repro-a/$target/release/forformat" \
+            "$root/$directory/forformat"
+
+          cp \
+            LICENSE \
+            LICENSE-THIRD-PARTY \
+            NOTICE \
+            README.md \
+            "$root/$directory/"
 
           make_archive() {
             output=$1
+
             tar \
               --sort=name \
               --mtime="@$source_date_epoch" \
@@ -120,14 +156,22 @@ jobs:
               --group=0 \
               --numeric-owner \
               -C "$root" \
-              -cf - "$directory" | gzip -n > "$output"
+              -cf - "$directory" |
+              gzip -n > "$output"
           }
 
           make_archive "$archive"
           make_archive "$check_archive"
+
           cmp "$archive" "$check_archive"
           rm "$check_archive"
-          (cd "$root" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
+
+          (
+            cd "$root"
+            sha256sum "$(basename "$archive")" \
+              > "$(basename "$archive").sha256"
+          )
+
       - uses: actions/upload-artifact@v7
         with:
           name: linux-release-${{ matrix.target }}
@@ -141,28 +185,57 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: windows-latest
     env:
-      RUSTFLAGS: -C debuginfo=0 -C strip=debuginfo -C link-arg=/Brepro -C link-arg=/DEBUG:NONE
+      RUSTFLAGS: >-
+        -C debuginfo=0
+        -C strip=debuginfo
+        -C link-arg=/Brepro
+        -C link-arg=/DEBUG:NONE
     steps:
       - uses: actions/checkout@v5
+
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
           target: x86_64-pc-windows-msvc
-      - shell: pwsh
+
+      - name: Build reproducible binary A
+        shell: pwsh
         run: |
           $env:CARGO_TARGET_DIR = "target/repro-a"
           cargo build --locked --release --target x86_64-pc-windows-msvc
-      - shell: pwsh
+
+      - name: Build reproducible binary B
+        shell: pwsh
         run: |
           $env:CARGO_TARGET_DIR = "target/repro-b"
           cargo build --locked --release --target x86_64-pc-windows-msvc
-      - shell: pwsh
+
+      - name: Verify reproducible Windows binary
+        shell: pwsh
         run: |
-          $a = (Get-FileHash target/repro-a/x86_64-pc-windows-msvc/release/forformat.exe -Algorithm SHA256).Hash
-          $b = (Get-FileHash target/repro-b/x86_64-pc-windows-msvc/release/forformat.exe -Algorithm SHA256).Hash
-          if ($a -ne $b) { throw "reproducible Windows build hash mismatch" }
-          "$a  forformat.exe" | Out-File target/repro-a/x86_64-pc-windows-msvc/release/forformat.exe.sha256 -Encoding ascii
+          $a = (
+            Get-FileHash `
+              target/repro-a/x86_64-pc-windows-msvc/release/forformat.exe `
+              -Algorithm SHA256
+          ).Hash
+
+          $b = (
+            Get-FileHash `
+              target/repro-b/x86_64-pc-windows-msvc/release/forformat.exe `
+              -Algorithm SHA256
+          ).Hash
+
+          if ($a -ne $b) {
+            throw "reproducible Windows build hash mismatch"
+          }
+
+          "$a  forformat.exe" |
+            Out-File `
+              target/repro-a/x86_64-pc-windows-msvc/release/forformat.exe.sha256 `
+              -Encoding ascii
+
           Write-Output $a
+
       - uses: actions/upload-artifact@v7
         with:
           name: forformat-x86_64-pc-windows-msvc
@@ -172,43 +245,73 @@ jobs:
 
   artifact-verification:
     name: verify Linux release artifacts
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     needs: static-artifacts
     runs-on: ubuntu-latest
     steps:
+      # Checkout is useful for a manual dry-run: we can compare the
+      # extracted binary's version against the Cargo.toml version even
+      # though GITHUB_REF_NAME is then "main" (or another branch).
+      - uses: actions/checkout@v5
+
       - uses: actions/download-artifact@v8
         with:
           pattern: linux-release-*
           path: artifacts
           merge-multiple: true
+
       - name: Verify artifact checksums
         shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
+
           archives=(artifacts/*.tar.gz)
           sidecars=(artifacts/*.tar.gz.sha256)
+
           test "${#archives[@]}" -eq 2
           test "${#sidecars[@]}" -eq 2
+
           for archive in "${archives[@]}"; do
             sidecar="$archive.sha256"
             test -f "$sidecar"
-            (cd artifacts && sha256sum -c "$(basename "$sidecar")")
+
+            (
+              cd artifacts
+              sha256sum -c "$(basename "$sidecar")"
+            )
           done
+
       - name: Smoke-test x86_64 archive
         shell: bash
         run: |
           set -euo pipefail
+
           archive=artifacts/forformat-x86_64-unknown-linux-musl.tar.gz
-          mkdir smoke
+          mkdir -p smoke
           tar -xzf "$archive" -C smoke
+
           binary=smoke/forformat-x86_64-unknown-linux-musl/forformat
           test -x "$binary"
+
+          expected_version=$(
+            sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml |
+              head -n 1
+          )
+
           output=$("$binary" --version)
+
           case "$output" in
-            *"${GITHUB_REF_NAME#v}"*) ;;
-            *) echo "unexpected version output: $output" >&2; exit 1 ;;
+            *"$expected_version"*)
+              ;;
+            *)
+              echo \
+                "unexpected version output: $output; expected $expected_version" \
+                >&2
+              exit 1
+              ;;
           esac
+
           readelf -S "$binary" | grep -F .dep-v0
 
   publish-linux-release:
@@ -216,44 +319,70 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs: artifact-verification
     runs-on: ubuntu-latest
+
+    # GitHub Settings -> Environments -> release controls this gate.
+    environment:
+      name: release
+
+    # Never allow two publication jobs to mutate releases concurrently.
+    concurrency:
+      group: publish-linux-release
+      cancel-in-progress: false
+
     permissions:
       contents: write
       id-token: write
       attestations: write
+
     steps:
       - uses: actions/download-artifact@v8
         with:
           pattern: linux-release-*
           path: artifacts
           merge-multiple: true
+
       - name: Re-verify checksums before publishing
         shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
+
           archives=(artifacts/*.tar.gz)
           sidecars=(artifacts/*.tar.gz.sha256)
+
           test "${#archives[@]}" -eq 2
           test "${#sidecars[@]}" -eq 2
+
           for archive in "${archives[@]}"; do
             sidecar="$archive.sha256"
             test -f "$sidecar"
-            (cd artifacts && sha256sum -c "$(basename "$sidecar")")
+
+            (
+              cd artifacts
+              sha256sum -c "$(basename "$sidecar")"
+            )
           done
+
       - name: Attest release archives
         uses: actions/attest@v4
         with:
           subject-path: artifacts/*.tar.gz
+
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
           set -euo pipefail
+
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber
+            gh release upload \
+              "$GITHUB_REF_NAME" \
+              artifacts/* \
+              --clobber
           else
-            gh release create "$GITHUB_REF_NAME" \
+            gh release create \
+              "$GITHUB_REF_NAME" \
               artifacts/* \
               --verify-tag \
               --generate-notes \
