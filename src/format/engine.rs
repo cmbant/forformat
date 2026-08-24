@@ -14,6 +14,14 @@ use crate::{
 };
 use std::io::Write;
 
+/// Columns a conditional-compilation sentinel takes out of the indent.
+///
+/// `!$ ` is written in the first columns of the line rather than after the
+/// indent, so a conditional line's body reaches its indentation column having
+/// already spent these three. Anything that measures such a line has to spend
+/// them once, not twice.
+pub(super) const CONDITIONAL_SENTINEL_COLUMNS: usize = 3;
+
 pub fn format(source: &[u8], config: &FormatConfig) -> Result<FormatResult, FormatError> {
     let mut output = Vec::with_capacity(source.len() + 64);
     let meta = format_to(source, config, &mut output)?;
@@ -243,7 +251,7 @@ fn advance_alignment<B: AsRef<[u8]>>(
         first_indent
     };
     if line.is_conditional_compilation() && config.openmp {
-        scan_target = scan_target.saturating_sub(3);
+        scan_target = scan_target.saturating_sub(CONDITIONAL_SENTINEL_COLUMNS);
     }
     // `code_bytes` already starts at the Fortran body for conditional source;
     // sentinel recognition belongs to SourceBuffer, not this output-column scan.

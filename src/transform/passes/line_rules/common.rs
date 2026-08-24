@@ -1,5 +1,5 @@
 use crate::{
-    analysis::DeclaredNameIndex,
+    analysis::{DeclaredNameIndex, DeclaredSpelling},
     config::{KeywordCase, StyleConfig},
     source::{
         regions::{LexState, RegionKind},
@@ -264,18 +264,26 @@ fn is_contextual_declaration_name(
         }
     }
     for token in tokens.iter().take(index).skip(item_start) {
-        if token.kind != TokenKind::Operator || token.text != b"=" {
+        if token.kind != TokenKind::Operator {
+            continue;
+        }
+        // A pointer initialization ends the entity name and opens an ordinary
+        // expression, so `vecR(:, :) => null()` references the intrinsic. The
+        // lexer spells `=>` as one token, which is why the byte test below
+        // never saw it.
+        if token.text == b"=>" {
+            return false;
+        }
+        if token.text != b"=" {
             continue;
         }
         let previous = token.span.start.checked_sub(1).and_then(|at| line.get(at));
         let following = line.get(token.span.end);
-        if following == Some(&b'>')
-            || (previous != Some(&b'<')
-                && previous != Some(&b'>')
-                && previous != Some(&b'=')
-                && previous != Some(&b'/')
-                && following != Some(&b'=')
-                && following != Some(&b'>'))
+        if previous != Some(&b'<')
+            && previous != Some(&b'>')
+            && previous != Some(&b'=')
+            && previous != Some(&b'/')
+            && following != Some(&b'=')
         {
             return false;
         }
@@ -334,15 +342,19 @@ pub(super) fn is_named_parameter_token(tokens: &[crate::source::Token<'_>], inde
             || (tokens[index - 2].kind == TokenKind::Comma && tokens[index - 2].depth > 0))
 }
 
-fn is_io_specifier_star(
-    tokens: &[crate::source::Token<'_>],
-    index: usize,
-    token: &crate::source::Token<'_>,
-) -> bool {
-    if token.text != b"*" {
-        return false;
-    }
-    let Some(io) = tokens.iter().enumerate().find_map(|(io, candidate)| {
+/// A `DATA` statement's slashes delimit its value lists — `DATA EIGHT/8.0D0/`
+/// — and a data-stmt-constant is a literal, not an expression, so no top-level
+/// slash in one is a division.
+pub(super) fn is_data_statement(tokens: &[crate::source::Token<'_>]) -> bool {
+    tokens
+        .get(first_statement_index(tokens))
+        .is_some_and(|token| token.is_name(b"data"))
+}
+
+/// The statement's I/O keyword, when it opens the statement or follows an
+/// `IF (...)` condition on the same token list.
+pub(super) fn io_statement_head(tokens: &[crate::source::Token<'_>]) -> Option<usize> {
+    tokens.iter().enumerate().find_map(|(io, candidate)| {
         if !(candidate.is_name(b"print")
             || candidate.is_name(b"read")
             || candidate.is_name(b"write"))
@@ -353,8 +365,34 @@ fn is_io_specifier_star(
         let is_head =
             io == first || if_condition_close(tokens).is_some_and(|close| io == close + 1);
         is_head.then_some(io)
-    }) else {
+    })
+}
+
+fn is_io_keyword(token: &crate::source::Token<'_>) -> bool {
+    token.is_name(b"print") || token.is_name(b"read") || token.is_name(b"write")
+}
+
+fn is_io_specifier_star(
+    tokens: &[crate::source::Token<'_>],
+    index: usize,
+    token: &crate::source::Token<'_>,
+    context: &super::LineContext<'_>,
+) -> bool {
+    if token.text != b"*" {
         return false;
+    }
+    let Some(io) = io_statement_head(tokens) else {
+        // `IF (...) PRINT *, …` is one statement, and the wrapper breaks it
+        // inside the condition: the continuation line then opens mid-condition
+        // with no head in sight, and this line's `*` read as a multiplication.
+        // Pass one wrote `print *` and pass two compacted it to `print*`
+        // (WRF `module_sf_ruclsm.F`), so the head has to be asked of the
+        // statement rather than of the line.
+        return context.io_statement
+            && index
+                .checked_sub(1)
+                .and_then(|previous| tokens.get(previous))
+                .is_some_and(is_io_keyword);
     };
     let open = io + 1;
     if tokens
@@ -465,6 +503,58 @@ pub(crate) fn apply_case(bytes: &[u8], case: KeywordCase) -> Vec<u8> {
         KeywordCase::Upper => bytes.to_ascii_uppercase(),
         KeywordCase::Preserve => bytes.to_vec(),
     }
+}
+
+/// Case a split compound keyword one word at a time.
+///
+/// A word that names something the file declares is not this rule's to case:
+/// Wannier90's `berry.F90` has an `INTEGER :: if`, so the declared-case pass
+/// settles every free-standing `if` in it as `if`. Casing the whole `ELSE IF`
+/// replacement wrote `ELSE IF` on the first run and left the declared-case pass
+/// to rewrite it as `ELSE if` on the second.
+pub(super) fn case_compound_words(
+    replacement: &[u8],
+    case: KeywordCase,
+    declared_names: &DeclaredNameIndex,
+    line: usize,
+) -> Vec<u8> {
+    // An END statement is the exception the declared-case pass itself makes:
+    // it leaves `END IF` alone in the same file where it rewrites `ELSE IF`,
+    // so keyword case owns every word of an `end …` split outright.
+    let end_statement = replacement
+        .split(|byte| *byte == b' ')
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case(b"end"));
+    let mut out = Vec::with_capacity(replacement.len());
+    for (index, word) in replacement.split(|byte| *byte == b' ').enumerate() {
+        if index > 0 {
+            out.push(b' ');
+        }
+        if !end_statement && declared_names.suppresses_keyword(line, word, false) {
+            out.extend_from_slice(declared_word_spelling(declared_names, line, word));
+        } else {
+            out.extend_from_slice(&apply_case(word, case));
+        }
+    }
+    out
+}
+
+/// The spelling the declared-case pass gives `word`, so the split lands on that
+/// pass's answer rather than one run ahead of it.
+fn declared_word_spelling<'a>(
+    declared_names: &'a DeclaredNameIndex,
+    line: usize,
+    word: &'a [u8],
+) -> &'a [u8] {
+    for declared in [
+        declared_names.governing_local_case(line, word),
+        declared_names.file_declared_case(line, word),
+    ] {
+        if let DeclaredSpelling::Spelling(spelling) = declared {
+            return spelling;
+        }
+    }
+    word
 }
 
 fn compound_spelling(source: &[u8], canonical: &str) -> Vec<u8> {

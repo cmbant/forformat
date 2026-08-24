@@ -20,7 +20,7 @@ For pre-commit, use the separate hook repository:
 ```yaml
 repos:
   - repo: https://github.com/cmbant/forformat-pre-commit
-    rev: v0.1.3
+    rev: v0.1.4
     hooks:
       - id: forformat
       # - id: forformat-check  # check only; do not rewrite

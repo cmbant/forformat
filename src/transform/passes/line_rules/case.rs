@@ -136,8 +136,9 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                 } else if !is_labelled_format_statement(&tokens)
                     && !context.continued_format
                     && is_arithmetic_operator(token.text)
+                    && !is_data_value_delimiter(&tokens, token, context)
                 {
-                    if !is_io_specifier_star(&tokens, index, token)
+                    if !is_io_specifier_star(&tokens, index, token, context)
                         && (is_binary_arithmetic_operator(line, token.span.start, token.text)
                             || context.continued_infix
                                 && is_leading_continuation_arithmetic(&tokens, index, token))
@@ -189,7 +190,12 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                     {
                         let mut replacement = compound_spelling(token.text, canonical);
                         if cx.config.style.keyword_case != KeywordCase::Preserve {
-                            replacement = apply_case(&replacement, cx.config.style.keyword_case);
+                            replacement = case_compound_words(
+                                &replacement,
+                                cx.config.style.keyword_case,
+                                declared_names,
+                                line_index,
+                            );
                         }
                         edits.replace(token.span.clone(), &replacement);
                         continue;
@@ -291,6 +297,21 @@ fn is_fortran_2023_multiword_pair(first: &[u8], second: &[u8]) -> bool {
             first.eq_ignore_ascii_case(left.as_bytes())
                 && second.eq_ignore_ascii_case(right.as_bytes())
         })
+}
+
+/// A top-level slash in a `DATA` statement closes or opens a value list.
+///
+/// Whether a given slash looked like a division depended on what the wrapper
+/// had left beside it on the physical line, so the same `DATA` statement was
+/// spaced one way before a reflow and another after it (ABINIT `m_bessel.F90`).
+/// The wrapper measures a rejoined statement with no line context, so the
+/// statement's own head is consulted as well as the threaded flag.
+fn is_data_value_delimiter(
+    tokens: &[crate::source::Token<'_>],
+    token: &crate::source::Token<'_>,
+    context: &super::super::LineContext<'_>,
+) -> bool {
+    token.text == b"/" && token.depth == 0 && (context.data_statement || is_data_statement(tokens))
 }
 
 fn is_call_procedure_designator(tokens: &[crate::source::Token<'_>], index: usize) -> bool {

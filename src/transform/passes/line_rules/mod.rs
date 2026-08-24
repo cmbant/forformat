@@ -67,6 +67,13 @@ struct LineContext<'a> {
     /// physical line need not hold: a declaration continued before its
     /// separator is not the old-style declaration its first line resembles.
     statement_separator: bool,
+    /// The logical statement is an I/O statement — `PRINT`/`READ`/`WRITE` at
+    /// its head or right after an `IF (...)` condition — which a continuation
+    /// line carved out of its condition cannot see for itself.
+    io_statement: bool,
+    /// The logical statement is a `DATA` statement, whose top-level slashes
+    /// delimit value lists rather than divide.
+    data_statement: bool,
 }
 
 /// Continuation and lexical state for one physical source stream.
@@ -107,6 +114,10 @@ impl StatementState {
             && first_statement_tokens().is_some_and(|tokens| common::is_format_statement(&tokens));
         let statement_separator =
             first_statement_tokens().is_some_and(|tokens| common::has_top_level_separator(&tokens));
+        let io_statement = first_statement_tokens()
+            .is_some_and(|tokens| common::io_statement_head(&tokens).is_some());
+        let data_statement =
+            first_statement_tokens().is_some_and(|tokens| common::is_data_statement(&tokens));
 
         LineContext {
             preserve_comment_after,
@@ -122,6 +133,8 @@ impl StatementState {
             continued_separator: self.continued_statement && self.entity_list.separator,
             continued_component: self.continued_component,
             statement_separator,
+            io_statement,
+            data_statement,
         }
     }
 

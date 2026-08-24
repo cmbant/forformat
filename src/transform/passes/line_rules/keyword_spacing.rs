@@ -223,7 +223,12 @@ impl Rules<'_> {
         }
         let mut replacement = compound_spelling(first.text, replacement);
         if self.style.keyword_case != KeywordCase::Preserve {
-            replacement = apply_case(&replacement, self.style.keyword_case);
+            replacement = case_compound_words(
+                &replacement,
+                self.style.keyword_case,
+                self.declared_names,
+                self.line_index,
+            );
         }
         edits.replace(first.span.clone(), &replacement);
         if self.normalize_whitespace {

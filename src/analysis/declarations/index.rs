@@ -263,6 +263,26 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
         }
         let mut header_names = Vec::new();
         if is_procedure_scope(scope.kind) {
+            // A procedure's own name is a name in its own scope: for a
+            // function it is the result variable, and for either kind it is
+            // what a recursive reference spells. A procedure held by a module
+            // or a program already gets this from its parent's declarations,
+            // but an external one has no such parent, so a file-level
+            // `subroutine erf(x)` had only its header read as the intrinsic
+            // `erf` — the header uppercased while the body and the END kept
+            // the declared spelling, and the next pass propagated the header.
+            //
+            // An interface body is excluded for the same reason it is excluded
+            // from the enclosing-scope registration above: it describes a
+            // signature the project defines elsewhere, and its name has to stay
+            // resolvable against that definition.
+            if let Some(name) = scope
+                .name
+                .as_deref()
+                .filter(|_| !scopes.in_interface(scope.lines.start))
+            {
+                header_names.push(name.to_vec());
+            }
             if let Some(group) = analysis
                 .groups
                 .iter()
