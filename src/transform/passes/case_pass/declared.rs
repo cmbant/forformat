@@ -21,7 +21,7 @@ use crate::{
     analysis::{
         names::{resolve, NameSpace},
         project::ResolvedType,
-        scoped_declared_names, CaseMap, DeclaredNameIndex, DeclaredSpelling,
+        CaseMap, DeclaredNameIndex, DeclaredSpelling,
     },
     classify::{classify, StatementKind},
     error::FormatError,
@@ -37,6 +37,9 @@ use crate::{
     },
 };
 use std::{collections::HashMap, ops::Range};
+
+#[cfg(test)]
+use crate::analysis::scoped_declared_names;
 
 include!("declared/model.rs");
 include!("declared/engine.rs");

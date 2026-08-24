@@ -39,11 +39,13 @@ pub(crate) enum CaseEvidence {
 pub(crate) type CaseEvidenceMap = HashMap<(usize, usize), CaseEvidence>;
 
 /// Step 5: apply scoped declared spellings to identifier occurrences.
+#[cfg(test)]
 pub(crate) fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
     let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
     declared_with_names(document, cx, &declared_names)
 }
 
+#[cfg(test)]
 fn declared_with_names(
     document: &mut Document,
     cx: &PassContext,
