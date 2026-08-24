@@ -72,17 +72,42 @@ fn set_mode(_file: &File, _mode: u32) -> Result<(), WorkflowError> {
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::atomic_replace;
     use std::fs;
 
-    #[test]
-    fn atomic_replace_preserves_mode_and_cleans_failed_temporary_write() {
-        use std::os::unix::fs::PermissionsExt;
-        let directory = std::env::temp_dir().join(format!("forformat-io-{}", std::process::id()));
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("forformat-io-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
-        fs::create_dir(&directory).unwrap();
+        fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    /// The in-place write path is the same on every platform, so its contract
+    /// is checked on every platform: the bytes land, and a failed replacement
+    /// leaves no temporary behind next to the target.
+    #[test]
+    fn atomic_replace_writes_bytes_and_cleans_a_failed_temporary_write() {
+        let directory = scratch("replace");
+        let path = directory.join("source.f90");
+        fs::write(&path, b"old\n").unwrap();
+        atomic_replace(&path, b"new\n").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new\n");
+
+        // Replacing a directory cannot succeed; the temporary must not survive.
+        let failure = atomic_replace(&directory, b"nope\n");
+        assert!(failure.is_err());
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_replace_preserves_mode_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = scratch("mode");
         let path = directory.join("source.f90");
         fs::write(&path, b"old\n").unwrap();
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
@@ -92,9 +117,6 @@ mod tests {
             0o640
         );
         assert_eq!(fs::read(&path).unwrap(), b"new\n");
-        let failure = atomic_replace(&directory, b"nope\n");
-        assert!(failure.is_err());
-        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
         let _ = fs::remove_dir_all(directory);
     }
 }

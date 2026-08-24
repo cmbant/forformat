@@ -378,7 +378,7 @@ do concurrent(i=1:n) local_init(x) shared(y) reduce(+:z)\n"
         let source = b"WRITE (*, *) value\nREAD (unit, *) value\nOPEN (newunit=unit, file=name)\nBACKSPACE (unit)\nALLOCATED (value)\nC%Write (*, *) value\nsubroutine s\nprocedure :: Write\ncall WRITE()\nend subroutine s\n";
         assert_eq!(
             full_pipeline(source),
-            "write(*, *) value\nread(unit, *) value\nopen(newunit=unit, file=name)\nbackspace(unit)\nallocated(value)\nC%Write(*, *) value\nsubroutine s\nprocedure :: Write\ncall Write()\n\nend subroutine s\n"
+            "write(*, *) value\nread(unit, *) value\nopen(newunit=unit, file=name)\nbackspace(unit)\nallocated(value)\nC%Write(*, *) value\nsubroutine s\nprocedure :: Write\ncall Write()\nend subroutine s\n"
         );
     }
 

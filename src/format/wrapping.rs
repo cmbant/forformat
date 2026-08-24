@@ -298,6 +298,9 @@ fn operator_break_position(tokens: &[Token], start: usize, limit: usize) -> Opti
         let Some(tier) = break_tier(tokens, index) else {
             continue;
         };
+        if continuation_head_would_gain_relational_space(tokens, index) {
+            continue;
+        }
         let candidate = (position < minimum_fill, token.depth, tier, position);
         let better = match &best {
             None => true,
@@ -313,6 +316,26 @@ fn operator_break_position(tokens: &[Token], start: usize, limit: usize) -> Opti
         }
     }
     best.map(|candidate| candidate.3)
+}
+
+/// A break can turn the next token into the first token of a continuation.
+/// Single `<` and `>` tokens are intentionally not spaced while they touch
+/// another angle operator, but at the start of the new line that left-hand
+/// neighbour is gone. Refuse the one boundary that would expose a lone angle
+/// operator directly against the following token, because the next full-mode
+/// pass would then insert a space and violate I1.
+fn continuation_head_would_gain_relational_space(tokens: &[Token], index: usize) -> bool {
+    let Some(operator) = tokens.get(index + 1) else {
+        return false;
+    };
+    if !matches!(operator.text, b"<" | b">") {
+        return false;
+    }
+    let Some(following) = tokens.get(index + 2) else {
+        return false;
+    };
+    following.span.start == operator.span.end
+        && !matches!(following.text.first(), Some(b'<' | b'>'))
 }
 
 /// The tier of a token used as a break operator, if it is one.

@@ -225,7 +225,7 @@ fn declaration_alignment_never_adds_padding_to_short_lines() {
 fn a_comment_after_a_unit_end_opens_the_next_unit() {
     let source = b"function f\nend function f\n! trailing note\nsubroutine s\nend subroutine s\n";
     let expected =
-        b"function f\n\nend function f\n\n! trailing note\nsubroutine s\n\nend subroutine s\n";
+        b"function f\nend function f\n\n! trailing note\nsubroutine s\nend subroutine s\n";
     let once = apply_all(source);
     assert_eq!(once, expected);
     assert_eq!(apply_all(&once), once);

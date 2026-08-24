@@ -29,9 +29,7 @@ fn classify_spelling(
             .contains(token.text.to_ascii_lowercase().as_slice())
     });
 
-    if let RuleMatch::Decision(spelling) =
-        protected_spelling(tokens, index, line, cx, associates, &mut evidence)
-    {
+    if let RuleMatch::Decision(spelling) = protected_spelling(tokens, index, cx) {
         return spelling;
     }
     if let RuleMatch::Decision(spelling) = numeric_kind_spelling(
@@ -107,31 +105,12 @@ fn classify_spelling(
     )
 }
 
-fn protected_spelling(
-    tokens: &[Token<'_>],
-    index: usize,
-    line: usize,
-    cx: &PassContext,
-    associates: Option<&AssociateFrame>,
-    evidence: &mut Option<&mut CaseEvidence>,
-) -> RuleMatch {
+fn protected_spelling(tokens: &[Token<'_>], index: usize, cx: &PassContext) -> RuleMatch {
     let token = &tokens[index];
     if is_select_type_rank_keyword(tokens, index)
         || crate::source::syntax::is_end_construct_keyword(tokens, index)
         || (index > 0 && crate::source::syntax::is_end_construct_keyword(tokens, index - 1))
     {
-        return RuleMatch::Decision(None);
-    }
-    if preceded_by_percent(tokens, index)
-        && matches!(
-            token.text.to_ascii_lowercase().as_slice(),
-            b"err" | b"index"
-        )
-        && tokens
-            .get(index - 2)
-            .is_some_and(|token| token.kind == TokenKind::RParen)
-    {
-        record_member_evidence(tokens, index, line, cx, associates, evidence);
         return RuleMatch::Decision(None);
     }
     if cx.project.macros.contains(token.text) {

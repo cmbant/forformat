@@ -26,6 +26,18 @@ jobs:
       - name: Run Clippy
         if: matrix.check == 'clippy'
         run: CARGO_TARGET_DIR=/tmp/forformat-lint cargo clippy --locked --all-targets -- -D warnings
+      # The fuzz targets are a separate workspace, so neither command above
+      # reaches them.
+      - name: Check fuzz target formatting
+        if: matrix.check == 'fmt'
+        run: cargo fmt --check --manifest-path fuzz/Cargo.toml
+      - name: Run Clippy on the fuzz targets
+        if: matrix.check == 'clippy'
+        run: |
+          CARGO_TARGET_DIR=/tmp/forformat-fuzz-lint cargo clippy --locked \
+            --manifest-path fuzz/Cargo.toml \
+            --target "$(rustc -vV | sed -n 's/^host: //p')" \
+            --all-targets -- -D warnings
 
   checks:
     name: checks (Rust ${{ matrix.toolchain }})
@@ -42,7 +54,60 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
       - run: cargo test --locked --all-targets
+      # `--all-targets` excludes doctests, so the public-API examples in the
+      # rustdoc need their own run or they are never compiled.
+      - run: cargo test --locked --doc
       - run: ./tools/check_fixture_syntax.sh target/debug/forformat
       - run: ./tools/check_fuzz_regression.sh
       - run: ./tools/check_cli_contract.sh target/debug/forformat
       - run: ./tools/check_docs.sh target/debug/forformat
+
+  # The `checks` job above runs the fuzz targets over a fixed corpus, which is
+  # reproducible but only ever sees inputs someone already thought of. This job
+  # runs the mutation loop, which is where new inputs actually come from.
+  #
+  # It is non-blocking *for now*. A failure here is never a false alarm -- the
+  # crashing input is uploaded and reproduces exactly -- but `TODO.md` records
+  # two known unfixed I1 defects that a mutating run rediscovers within about
+  # half a minute, so gating merges on it today would just mean random red
+  # builds for bugs the PR did not introduce. Once those are fixed, drop
+  # `continue-on-error` and make this required.
+  fuzz:
+    name: fuzz (mutating, non-blocking)
+    needs: fast-checks
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      # 60s per target across ten targets, plus the instrumented build.
+      - run: FUZZ_TIME=60 ./tools/check_fuzz_regression.sh
+      - name: Upload crashing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+  # Wheels are published for Windows and macOS, so the test suite has to run
+  # there and not just compile. The shell-script checks above stay on Linux;
+  # this job covers the Rust behaviour that differs by platform -- path
+  # handling, line endings, and the in-place atomic replace.
+  platform-tests:
+    name: tests (${{ matrix.os }})
+    needs: fast-checks
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - run: cargo test --locked --all-targets
+      - run: cargo test --locked --doc

@@ -99,6 +99,46 @@ end module m\n";
     assert!(!output.contains("num = ResultValue(x)"));
 }
 
+/// A `%` in the first token slot leaves no room for an owner, and the
+/// component names `err` and `index` are resolved by the ordinary member
+/// path rather than by a name-specific exception.
+#[test]
+fn leading_percent_and_err_index_components_use_the_ordinary_member_path() {
+    let source = b"module m\n\
+type :: T\n\
+integer :: Err\n\
+integer :: Index\n\
+end type T\n\
+contains\n\
+subroutine s(list)\n\
+type(T) :: list(2)\n\
+list(1)%err = 1\n\
+list(2)%index = 2\n\
+end subroutine s\n\
+end module m\n";
+    let project = analyze_project([(Path::new("members.f90"), source.as_slice())]).unwrap();
+    let config = FormatConfig {
+        mode: FormatMode::Full,
+        ..FormatConfig::default()
+    };
+    let once = format_source_with_context(source, &project, &config)
+        .unwrap()
+        .bytes;
+    let twice = format_source_with_context(&once, &project, &config)
+        .unwrap()
+        .bytes;
+    assert_eq!(twice, once);
+    let output = String::from_utf8(once).unwrap();
+    assert!(output.contains("list(1)%Err = 1"), "{output}");
+    assert!(output.contains("list(2)%Index = 2"), "{output}");
+
+    // A statement whose first token is `%` used to index out of bounds.
+    for stray in [b"%err\n".as_slice(), b"%index\n".as_slice(), b"% err\n"] {
+        let project = analyze_project([(Path::new("stray.f90"), stray)]).unwrap();
+        format_source_with_context(stray, &project, &config).unwrap();
+    }
+}
+
 #[test]
 fn a_block_declaration_does_not_recase_uses_after_its_end() {
     let source = b"module m\n\

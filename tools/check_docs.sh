@@ -32,8 +32,12 @@ for option in \
     grep -Fq -- "$option" docs/options.md || die "docs/options.md does not mention $option"
 done
 
+# Scan only tracked Markdown: untracked docs/*.md files (scratch notes, generated
+# output) aren't part of the shipped documentation and shouldn't gate this check.
+mapfile -t md_files < <(git ls-files -- README.md README_PYPI.md 'docs/*.md')
+
 # Reject the stale fixed/free wording that previously appeared in user-facing docs.
-if grep -Fqi 'automatic format detection are not supported' README.md README_PYPI.md docs/*.md; then
+if grep -Fqi 'automatic format detection are not supported' "${md_files[@]}"; then
     die "stale automatic-format-detection wording"
 fi
 
@@ -41,12 +45,12 @@ fi
 # CI runners provide `python`; a bare Debian/devcontainer image only has `python3`.
 python_bin=${PYTHON:-python}
 command -v "$python_bin" > /dev/null 2>&1 || python_bin=python3
-"$python_bin" - <<'PY'
+"$python_bin" - "${md_files[@]}" <<'PY'
 from pathlib import Path
 import re
 import sys
 
-files = [Path("README.md"), Path("README_PYPI.md"), *sorted(Path("docs").glob("*.md"))]
+files = [Path(arg) for arg in sys.argv[1:]]
 failed = []
 for source in files:
     text = source.read_text(encoding="utf-8")

@@ -4,10 +4,16 @@ use forformat::{format_source, FormatConfig};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|input: &[u8]| {
-    let mut config = FormatConfig::default();
-    config.align_paren_value = input.first().copied().unwrap_or(0) as usize;
-    config.align_paren = config.align_paren_value != 0;
-    config.ws_remred_value = input.get(1).copied().unwrap_or(0) as usize;
-    config.ws_remred = config.ws_remred_value != 0;
+    // The first two input bytes pick the wrapping/whitespace profile, so one
+    // corpus explores every combination rather than only the defaults.
+    let align_paren_value = input.first().copied().unwrap_or(0) as usize;
+    let ws_remred_value = input.get(1).copied().unwrap_or(0) as usize;
+    let config = FormatConfig {
+        align_paren_value,
+        align_paren: align_paren_value != 0,
+        ws_remred_value,
+        ws_remred: ws_remred_value != 0,
+        ..FormatConfig::default()
+    };
     let _ = format_source(input, &config);
 });

@@ -9,7 +9,6 @@ contains
    subroutine use_state
       type(State) :: s
       call s%BuildValue()
-
    end subroutine use_state
 
 end module use_module

@@ -3,5 +3,4 @@ program p
    integer :: x
    x = SIZE
    print *, SIZE
-
 end program p

@@ -7,6 +7,9 @@
 *.mod
 /coverage/
 /fuzz/target/
+# Crashing inputs written by libFuzzer. Reproducers worth keeping belong in
+# tests/fixtures or TODO.md, not loose in the tree.
+/fuzz/artifacts/
 
 # Local environment files
 .env
