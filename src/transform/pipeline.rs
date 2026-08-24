@@ -63,7 +63,8 @@ pub struct PassContext<'a> {
     /// This file's own declarations, which outrank the project's (I4).
     pub local: &'a FileFacts,
     /// The statement view of the document as it was when this context was
-    /// built. A pass that returns [`Changed::Structure`] invalidates it.
+    /// built. Any text or structural change invalidates it before the next
+    /// context-consuming pass runs.
     pub analysis: &'a Analysis,
     pub scopes: &'a ScopeTree,
 }
@@ -74,6 +75,61 @@ impl<'a> PassContext<'a> {
             local: &self.local.cases,
             project: &self.project.cases,
             macros: &self.project.macros,
+        }
+    }
+}
+
+/// Lazily owns the analysis/scope snapshot shared by consecutive no-op stages.
+///
+/// `Analysis` owns its source buffer, so it does not borrow `Document`: keeping
+/// the snapshot is safe while a stage reports [`Changed::No`]. Any text or
+/// structural edit drops it immediately, preserving the existing conservative
+/// freshness rule for every later stage that reads statement or scope facts.
+struct PassContextCache<'a> {
+    project: &'a ProjectContext,
+    local: &'a FileFacts,
+    config: &'a FormatConfig,
+    snapshot: Option<(Analysis, ScopeTree)>,
+}
+
+impl<'a> PassContextCache<'a> {
+    fn new(project: &'a ProjectContext, local: &'a FileFacts, config: &'a FormatConfig) -> Self {
+        Self {
+            project,
+            local,
+            config,
+            snapshot: None,
+        }
+    }
+
+    fn run<F>(&mut self, document: &mut Document, pass: F) -> Result<Changed, FormatError>
+    where
+        F: FnOnce(&mut Document, &PassContext) -> Result<Changed, FormatError>,
+    {
+        if self.snapshot.is_none() {
+            let analysis = document.analyze()?;
+            let scopes = ScopeTree::build(&analysis);
+            self.snapshot = Some((analysis, scopes));
+        }
+
+        let (analysis, scopes) = self.snapshot.as_ref().expect("snapshot was initialized");
+        let context = PassContext {
+            config: self.config,
+            project: self.project,
+            local: self.local,
+            analysis,
+            scopes,
+        };
+        let changed = pass(document, &context)?;
+        if changed != Changed::No {
+            self.snapshot = None;
+        }
+        Ok(changed)
+    }
+
+    fn note_change(&mut self, changed: Changed) {
+        if changed != Changed::No {
+            self.snapshot = None;
         }
     }
 }
@@ -106,15 +162,17 @@ pub fn normalize(
         passes::conditional_continuations::run(document)?;
     }
 
+    let mut contexts = PassContextCache::new(project, local, config);
+
     // Steps 1-3: macro-name casing, from `-D` and from `#define`.
-    with_context(document, project, local, config, passes::case_pass::macros)?;
+    contexts.run(document, passes::case_pass::macros)?;
 
     // Step 5 needs a fresh statement view after macro casing. Steps 6 and 7 do
     // not inspect their PassContext at all, so they can follow on the same
     // snapshot even though they mutate the document. Canonicalization-only
     // keeps physical line structure, so it deliberately does not join tokens
     // across authored continuation boundaries.
-    with_context(document, project, local, config, |document, cx| {
+    contexts.run(document, |document, cx| {
         let mut stage = passes::scoped_case::declared(document, cx)?;
         if normalize_whitespace {
             stage = stage.or(passes::structure::join_lexical_token_continuations(
@@ -142,7 +200,7 @@ pub fn normalize(
     // it after structural lexical cleanup, and rebuild the statement view
     // afterwards because deleting separators changes source offsets even
     // though it does not change the non-empty statements.
-    with_context(document, project, local, config, |document, cx| {
+    contexts.run(document, |document, cx| {
         let mut stage = passes::named_end::sync_names(document, cx)?;
         if config.style.normalize_semicolons {
             stage = stage.or(passes::semicolons::run(document, cx)?);
@@ -154,7 +212,7 @@ pub fn normalize(
     // parenthesis, and separator edits above. Steps 12-13 read only
     // config/project fields from PassContext; they intentionally share this
     // snapshot after line rules.
-    with_context(document, project, local, config, |document, cx| {
+    contexts.run(document, |document, cx| {
         let mut stage = passes::line_rules::run(document, cx)?;
         // How a reserved OpenMP directive is spelled is canonicalization,
         // not presentation, so it is not gated on either whitespace policy
@@ -172,11 +230,8 @@ pub fn normalize(
     // line is presentation/structure policy and therefore outside the
     // canonicalization-only contract.
     if normalize_whitespace && config.style.remove_terminal_return {
-        with_context(
+        contexts.run(
             document,
-            project,
-            local,
-            config,
             passes::structure::remove_terminal_procedure_returns,
         )?;
     }
@@ -185,7 +240,8 @@ pub fn normalize(
     // normalize-only early return used by canonicalization needs the same
     // scope-aware replacement without taking ownership of the authored column.
     if !normalize_whitespace && config.refactor_end {
-        passes::canonical_end::run(document, config)?;
+        let changed = passes::canonical_end::run(document, config)?;
+        contexts.note_change(changed);
     }
 
     // Rewrap only prepares authored continuations. The existing full wrapper
@@ -194,9 +250,9 @@ pub fn normalize(
     // at the old continuation seam is normalized by the same rule chain as any
     // ordinary one-line statement.
     if config.mode.wraps() && config.wrap.enabled && config.rewrap {
-        let rejoined = with_context(document, project, local, config, passes::rewrap::prepare)?;
+        let rejoined = contexts.run(document, passes::rewrap::prepare)?;
         if rejoined == Changed::Structure {
-            with_context(document, project, local, config, passes::line_rules::run)?;
+            contexts.run(document, passes::line_rules::run)?;
         }
     }
 
@@ -237,37 +293,15 @@ pub fn post_layout(document: &mut Document, config: &FormatConfig) -> Result<boo
     Ok(widths_changed)
 }
 
-/// Rebuild the statement view, run one stage, and report what it changed.
-///
-/// A stage may contain context-free follow-up passes, but every pass that reads
-/// `analysis` or `scopes` must see a snapshot built after the most recent text
-/// mutation that can affect those facts.
-fn with_context<F>(
-    document: &mut Document,
-    project: &ProjectContext,
-    local: &FileFacts,
-    config: &FormatConfig,
-    pass: F,
-) -> Result<Changed, FormatError>
-where
-    F: FnOnce(&mut Document, &PassContext) -> Result<Changed, FormatError>,
-{
-    let analysis = document.analyze()?;
-    let scopes = ScopeTree::build(&analysis);
-    let context = PassContext {
-        config,
-        project,
-        local,
-        analysis: &analysis,
-        scopes: &scopes,
-    };
-    pass(document, &context)
-}
-
 #[cfg(test)]
 mod tests {
-    use super::Changed;
-    use crate::{format_source, FormatConfig};
+    use super::{Changed, PassContextCache};
+    use crate::{
+        analysis::{FileFacts, ProjectContext},
+        config::FormatConfig,
+        format_source,
+        transform::document::Document,
+    };
 
     #[test]
     fn change_levels_combine_to_the_strongest() {
@@ -275,6 +309,35 @@ mod tests {
         assert_eq!(Changed::No.or(Changed::Text), Changed::Text);
         assert_eq!(Changed::Text.or(Changed::Structure), Changed::Structure);
         assert_eq!(Changed::Structure.or(Changed::No), Changed::Structure);
+    }
+
+    #[test]
+    fn context_snapshot_is_rebuilt_after_text_change() {
+        let mut document = Document::from_bytes(b"x = 1\n");
+        let project = ProjectContext::empty();
+        let local = FileFacts::default();
+        let config = FormatConfig::default();
+        let mut contexts = PassContextCache::new(&project, &local, &config);
+
+        contexts
+            .run(&mut document, |_, cx| {
+                assert_eq!(cx.analysis.groups[0].statements[0].text, b"x = 1");
+                Ok(Changed::No)
+            })
+            .unwrap();
+        contexts
+            .run(&mut document, |document, cx| {
+                assert_eq!(cx.analysis.groups[0].statements[0].text, b"x = 1");
+                document.lines[0] = b"x = 2".to_vec();
+                Ok(Changed::Text)
+            })
+            .unwrap();
+        contexts
+            .run(&mut document, |_, cx| {
+                assert_eq!(cx.analysis.groups[0].statements[0].text, b"x = 2");
+                Ok(Changed::No)
+            })
+            .unwrap();
     }
 
     #[test]
