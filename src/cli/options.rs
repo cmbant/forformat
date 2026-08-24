@@ -35,6 +35,7 @@ pub(super) enum OptionId {
     Full,
     NormalizeOnly,
     CanonicalizeOnly,
+    CanonicalizeAndIndent,
     Wrap,
     NoWrap,
     Rewrap,
@@ -310,6 +311,12 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "canonicalize-only",
         "--canonicalize-only",
         "canonical spelling without whitespace or structural layout"
+    ),
+    spec!(
+        CanonicalizeAndIndent,
+        "canonicalize-and-indent",
+        "--canonicalize-and-indent",
+        "canonical spelling followed by findent-compatible indentation"
     ),
     spec!(
         Wrap,

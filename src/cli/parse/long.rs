@@ -194,7 +194,7 @@ where
                 draft.extend_exclude.push(pattern);
             }
         }
-        // The four mode options write one field, so the last one on the command
+        // The five mode options write one field, so the last one on the command
         // line wins outright and no combination of them can leave half of one
         // mode behind.
         OptionId::IndentOnly => {
@@ -214,6 +214,10 @@ where
             // Canonicalization takes the same no-layout return path as
             // normalize-only while line rules suppress whitespace-only edits.
             draft.config.mode = FormatMode::CanonicalizeOnly;
+        }
+        OptionId::CanonicalizeAndIndent => {
+            reject_value(name, &value)?;
+            draft.config.mode = FormatMode::CanonicalizeAndIndent;
         }
         OptionId::Wrap => {
             draft.config.wrap.enabled = value
