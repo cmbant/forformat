@@ -72,7 +72,9 @@ relational operators, `array-brackets` converts `(/ ... /)` constructors, `split
 splits run-together compound keywords, `join-goto` contracts `go to`, `strip-empty-args` removes
 empty `subroutine` definition argument lists, and `remove-redundant-parens` and
 `remove-terminal-return` gate their named cleanup passes. `program-unit-spacing` controls the
-program-unit separator pass; `max-blank-lines` caps ordinary blank runs. `delimiter-spacing`,
+program-unit separator pass -- a blank line between adjacent units and on both sides of `CONTAINS`,
+never one inserted before a unit's `END`; `max-blank-lines` caps ordinary blank runs and bounds that
+separator's width. `delimiter-spacing`,
 `comment-spacing`, and `continuation-markers` independently control delimiter/comment/continuation
 normalization. A value of `0` disables only the named behavior.
 

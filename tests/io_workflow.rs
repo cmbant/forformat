@@ -54,6 +54,15 @@ fn git_commit(path: &Path) {
         .unwrap();
 }
 
+/// A listing's separator is the platform's, but which files were listed is not.
+/// Compare listings through this so the assertion pins the selection rather
+/// than the POSIX spelling of it.
+fn listing(bytes: &[u8]) -> String {
+    String::from_utf8(bytes.to_vec())
+        .unwrap()
+        .replace('\\', "/")
+}
+
 fn run(path: &Path, args: &[&str]) -> Output {
     Command::new(binary())
         .args(args)
@@ -133,7 +142,7 @@ fn all_files_excludes_submodules_from_targets_but_keeps_them_as_context() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         fs::read(&root_source).unwrap(),
-        b"program p\n   use SharedName\n\nend program p\n"
+        b"program p\n   use SharedName\nend program p\n"
     );
     assert_eq!(
         fs::read(repo.join("vendor/submodule.f90")).unwrap(),
@@ -146,7 +155,7 @@ fn all_files_excludes_submodules_from_targets_but_keeps_them_as_context() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         fs::read(&root_source).unwrap(),
-        b"program p\n   use sharedname\n\nend program p\n"
+        b"program p\n   use sharedname\nend program p\n"
     );
 
     fs::write(&root_source, root_bytes).unwrap();
@@ -163,12 +172,12 @@ fn all_files_excludes_submodules_from_targets_but_keeps_them_as_context() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         fs::read(&root_source).unwrap(),
-        b"program p\n   use SharedName\n\nend program p\n"
+        b"program p\n   use SharedName\nend program p\n"
     );
 
     let listed = run(&repo, &["--indent-only", "--all-files", "--show-files"]);
     assert_eq!(listed.status.code(), Some(0));
-    assert_eq!(listed.stdout, b"root.f90\n");
+    assert_eq!(listing(&listed.stdout), "root.f90\n");
 
     let _ = fs::remove_dir_all(repo);
     let _ = fs::remove_dir_all(submodule);
@@ -194,7 +203,7 @@ fn show_files_accepts_an_optional_directory_and_does_not_modify_sources() {
 
     let output = run(&repo, &["--all-files", "src", "--show-files"]);
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stdout, b"src/main.f90\n");
+    assert_eq!(listing(&output.stdout), "src/main.f90\n");
     assert_eq!(fs::read(repo.join("src/main.f90")).unwrap(), source);
     let _ = fs::remove_dir_all(repo);
 }
@@ -210,11 +219,11 @@ fn a_lone_directory_argument_behaves_like_all_files() {
 
     let listed = run(&repo, &["--indent-only", "src", "--show-files"]);
     assert_eq!(listed.status.code(), Some(0));
-    assert_eq!(listed.stdout, b"src/main.f90\n");
+    assert_eq!(listing(&listed.stdout), "src/main.f90\n");
 
     let formatted = run(&repo, &["--indent-only", "src"]);
     assert_eq!(formatted.status.code(), Some(0));
-    assert_eq!(formatted.stdout, b"src/main.f90\n");
+    assert_eq!(listing(&formatted.stdout), "src/main.f90\n");
     assert_eq!(
         fs::read(repo.join("src/main.f90")).unwrap(),
         b"program p\n   x=1\nend program p\n"
@@ -290,7 +299,7 @@ fn excluding_a_project_source_removes_its_name_resolution() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         fs::read(&dependent).unwrap(),
-        b"program p\n   use sharedname\n   print *, 1\n\nend program p\n"
+        b"program p\n   use sharedname\n   print *, 1\nend program p\n"
     );
     assert_eq!(
         fs::read(&declarations).unwrap(),
@@ -675,7 +684,7 @@ fn isolated_and_query_format_ignore_configured_context_paths() {
 
     let isolated = run(&repo, &["--isolated", "--stdout", "main.f90"]);
     assert_eq!(isolated.status.code(), Some(0));
-    assert_eq!(isolated.stdout, b"program p\n\nend program p\n");
+    assert_eq!(isolated.stdout, b"program p\nend program p\n");
     assert!(isolated.stderr.is_empty());
 
     let query = run(&repo, &["--query-format", "main.f90"]);
@@ -685,7 +694,7 @@ fn isolated_and_query_format_ignore_configured_context_paths() {
 
     let listed = run(&repo, &["--all-files", "--show-files"]);
     assert_eq!(listed.status.code(), Some(0));
-    assert_eq!(listed.stdout, b"main.f90\n");
+    assert_eq!(listing(&listed.stdout), "main.f90\n");
     assert!(listed.stderr.is_empty());
 
     let _ = fs::remove_dir_all(repo);
@@ -760,7 +769,7 @@ fn stdin_applies_command_line_defines_in_full_mode() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         output.stdout,
-        b"program p\n   implicit none\n   integer :: x\n   x = SIZE\n   print *, SIZE\n\nend program p\n"
+        b"program p\n   implicit none\n   integer :: x\n   x = SIZE\n   print *, SIZE\nend program p\n"
     );
     let _ = fs::remove_dir_all(repo);
 }
@@ -821,7 +830,7 @@ fn project_context_supplies_declarations_without_discovering_config() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         output.stdout,
-        b"program p\n   use SharedName\n   print *, 1\n\nend program p\n"
+        b"program p\n   use SharedName\n   print *, 1\nend program p\n"
     );
     let _ = fs::remove_dir_all(repo);
 }
@@ -1245,7 +1254,7 @@ fn file_project_context_replacement_respects_context_scope() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         output.stdout,
-        b"module CurrentName\n\nend module CurrentName\n"
+        b"module CurrentName\nend module CurrentName\n"
     );
     let _ = fs::remove_dir_all(repo);
 }
@@ -1335,7 +1344,7 @@ fn file_project_context_excludes_the_stale_on_disk_target() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         output.stdout,
-        b"program p\n   use SharedName\n   print *, stalename\n\nend program p\n"
+        b"program p\n   use SharedName\n   print *, stalename\nend program p\n"
     );
     let _ = fs::remove_dir_all(repo);
 }

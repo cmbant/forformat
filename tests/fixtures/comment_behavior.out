@@ -8,5 +8,4 @@ program comment_behavior
 !DEC$ ATTRIBUTES DLLEXPORT :: Foo
 !$ if (X) then
 ! yv((EV%lmaxv-1+1)+(EV%lmaxpolv-1)*2+3+4)=1/9.*x
-
    end program comment_behavior

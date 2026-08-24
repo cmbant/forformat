@@ -237,6 +237,11 @@ presentation-only whitespace/layout changes; `--indent-only` deliberately ignore
 | `--continuation-markers` / `continuation_markers` | boolean | true | normalize continuation markers and OpenMP sentinels |
 | `--uppercase-single-l[=BOOL]` / `uppercase_single_l` | boolean | false | uppercase a lone identifier `l` |
 
+`--program-unit-spacing` separates adjacent program units by a blank line and puts one on each side
+of `CONTAINS`. It does not insert a blank line before a unit's `END`, so an empty procedure stays
+empty; an authored blank line there is kept. A separator is at least one blank line and at most
+`--max-blank-lines`, so an authored run between two units survives under `preserve`.
+
 `--max-blank-lines=0` can remove separators inserted by `--program-unit-spacing=true`, because the
 blank-line cap runs afterward. Canonicalize-only and canonicalize-and-indent do not perform either
 blank-line transformation.

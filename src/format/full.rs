@@ -1342,7 +1342,7 @@ mod tests {
             mode: FormatMode::Full,
             ..FormatConfig::default()
         };
-        let expected = b"module t\n   integer :: MyVar\n\ncontains\n\n   subroutine s\n!$    MyVar = 1\n      MyVar = 2\n\n   end subroutine s\n\nend module t\n";
+        let expected = b"module t\n   integer :: MyVar\n\ncontains\n\n   subroutine s\n!$    MyVar = 1\n      MyVar = 2\n   end subroutine s\n\nend module t\n";
         let empty = format_with_context(source, &ProjectContext::empty(), &config)
             .unwrap()
             .bytes;
@@ -1495,7 +1495,7 @@ end module m
         assert!(crlf.windows(2).any(|pair| pair == b"\r\n"));
         assert_eq!(
             String::from_utf8_lossy(&crlf),
-            "program p\r\n   X = 1\r\n\r\nend program p\r\n"
+            "program p\r\n   X = 1\r\nend program p\r\n"
         );
     }
 

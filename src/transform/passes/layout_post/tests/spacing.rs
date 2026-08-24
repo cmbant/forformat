@@ -52,7 +52,7 @@ fn unit_separator_after_conditional_procedure_end_belongs_before_host_end() {
         )
         .into_bytes();
         let expected = format!(
-            "module m\n\ncontains\n\n{if_directive} X\nsubroutine s\n\nend subroutine s\n{endif_directive}\n\nend module m\n"
+            "module m\n\ncontains\n\n{if_directive} X\nsubroutine s\nend subroutine s\n{endif_directive}\n\nend module m\n"
         )
         .into_bytes();
         let once = apply_all(&source);
@@ -66,15 +66,15 @@ fn adjacent_program_units_have_one_blank_line_and_are_idempotent() {
     for (source, expected) in [
         (
             b"function f\nend function f\nsubroutine s\nend subroutine s\n".as_slice(),
-            b"function f\n\nend function f\n\nsubroutine s\n\nend subroutine s\n".as_slice(),
+            b"function f\nend function f\n\nsubroutine s\nend subroutine s\n".as_slice(),
         ),
         (
             b"subroutine f\nend subroutine f\nsubroutine s\nend subroutine s\n".as_slice(),
-            b"subroutine f\n\nend subroutine f\n\nsubroutine s\n\nend subroutine s\n".as_slice(),
+            b"subroutine f\nend subroutine f\n\nsubroutine s\nend subroutine s\n".as_slice(),
         ),
         (
             b"module m\nend module m\nprogram p\nend program p\n".as_slice(),
-            b"module m\n\nend module m\n\nprogram p\n\nend program p\n".as_slice(),
+            b"module m\nend module m\n\nprogram p\nend program p\n".as_slice(),
         ),
     ] {
         let once = apply_all(source);
@@ -145,7 +145,7 @@ fn procedure_ends_in_interfaces_and_types_do_not_consume_the_host_unit() {
     for expected in [
         b"end procedure p\nend interface\n\ncontains".as_slice(),
         b"end procedure p\nend type t\n\ncontains".as_slice(),
-        b"common /b/ x\n\nend block data b".as_slice(),
+        b"common /b/ x\nend block data b".as_slice(),
     ] {
         assert!(output
             .windows(expected.len())
@@ -185,8 +185,8 @@ fn bare_program_unit_ends_have_the_same_separator_as_named_ends() {
     let source = b"subroutine first\ninteger :: value\nvalue = 1\nend\nsubroutine second\ninteger :: value\nvalue = 2\nend\n";
     let output = apply_all(source);
     assert!(output
-        .windows(b"value = 1\n\nend\n\nsubroutine second".len())
-        .any(|w| w == b"value = 1\n\nend\n\nsubroutine second"));
+        .windows(b"value = 1\nend\n\nsubroutine second".len())
+        .any(|w| w == b"value = 1\nend\n\nsubroutine second"));
 }
 
 #[test]
@@ -223,4 +223,61 @@ fn classifier_drives_prefixed_headers_and_abstract_interfaces() {
     assert!(once
         .windows(b"end interface\n\ncontains\n\npure elemental function f".len())
         .any(|window| window == b"end interface\n\ncontains\n\npure elemental function f"));
+}
+
+#[test]
+fn a_unit_end_is_not_preceded_by_an_inserted_blank_line() {
+    // An empty procedure has nowhere to put a blank line that does not land
+    // inside the procedure, and forcing one before every END would only be
+    // symmetric if a blank were also forced after every unit header.
+    let source = b"module m\ncontains\nsubroutine noop\nend subroutine noop\nsubroutine tiny\nx = 1\nend subroutine tiny\nend module m\n";
+    let once = apply_all(source);
+    assert_eq!(
+        once,
+        b"module m\n\ncontains\n\nsubroutine noop\nend subroutine noop\n\nsubroutine tiny\nx = 1\nend subroutine tiny\n\nend module m\n".as_slice(),
+        "{}",
+        String::from_utf8_lossy(&once)
+    );
+    assert_eq!(apply_all(&once), once);
+}
+
+#[test]
+fn an_authored_blank_line_before_a_unit_end_is_kept() {
+    let source = b"subroutine s\nx = 1\n\nend subroutine s\n";
+    let once = apply_all(source);
+    assert_eq!(once, source.as_slice());
+    assert_eq!(apply_all(&once), once);
+}
+
+#[test]
+fn the_unit_separator_follows_the_configured_blank_line_cap() {
+    // The cap used to be a constant 2 inside this pass, which silently
+    // overrode both `preserve` and any larger configured cap.
+    for (max_blank_lines, expected) in [
+        // step 19 has the last word on 0: no blank lines means none anywhere.
+        (Some(0), 0),
+        (Some(1), 1),
+        (Some(2), 2),
+        (Some(4), 4),
+        (None, 5),
+    ] {
+        let config = FormatConfig {
+            style: crate::config::StyleConfig {
+                max_blank_lines,
+                ..FormatConfig::default().style
+            },
+            ..FormatConfig::default()
+        };
+        let source = b"module m\nend module m\n\n\n\n\n\nprogram p\nend program p\n";
+        let once = apply_all_with(source, &config);
+        let mut separator = b"end module m\n".to_vec();
+        separator.extend(std::iter::repeat_n(b'\n', expected));
+        separator.extend_from_slice(b"program p");
+        assert!(
+            once.windows(separator.len()).any(|w| w == separator),
+            "max_blank_lines={max_blank_lines:?} should settle at {expected}, got:\n{}",
+            String::from_utf8_lossy(&once)
+        );
+        assert_eq!(apply_all_with(&once, &config), once, "{max_blank_lines:?}");
+    }
 }

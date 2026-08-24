@@ -45,6 +45,13 @@ The devcontainer sets `CARGO_TARGET_DIR=/tmp/forformat-target` for normal builds
 `CARGO_TARGET_DIR=/tmp/forformat-lint`. Outside the devcontainer, tests and formatter binaries use the
 default `target/` directory.
 
+Two cargo commands must never share a target directory at the same time. They take the same
+fingerprint and binary paths, so a concurrent run rebuilds a binary out from under the other and the
+failure looks like a real regression rather than a collision -- `check_local.sh` has been seen fail
+with `target/release/forformat: No such file or directory` this way. Give every parallel invocation
+its own `CARGO_TARGET_DIR`, and before believing a `check_local.sh` failure, check that only one is
+running.
+
 Only when a change touches packaging (`pyproject.toml`, `setup.py`, `forformat/`, `forformat_runner/`,
 or `.github/workflows/pypi.yml`), also build and check the wheel:
 
@@ -96,4 +103,11 @@ fixed/free wording, and the quick-start formatter examples; it is not an exhaust
   private copy so far has gone wrong the same two ways: closing `'a''b'` on the first byte of the
   doubled pair, and forgetting to advance the cursor inside a literal.
 - A continued statement *steps over* blank, comment and directive lines: they are emitted verbatim
-  and never lexed. `line_comment_start`/`line_code_spans` walk a group's physical lines through them and carry one `LexState` across the whole group.
+  and never lexed. `line_comment_start`/`line_code_spans`/`line_regions` walk a group's physical
+  lines through them and carry one `LexState` across the whole group. A bare `LexState::regions` is
+  not the same thing: it keeps an unterminated literal open past a line that had no continuation
+  marker, so on malformed input it reports every later line as protected payload.
+- `cargo test --all-targets` does not run doctests. `cargo test --doc` is a separate step in
+  `check_local.sh` and in CI.
+- `fuzz/` is its own Cargo workspace, so a repo-root `cargo fmt`/`cargo clippy` does not reach the
+  fuzz targets. Both are run against `fuzz/Cargo.toml` separately by `check_local.sh` and CI.

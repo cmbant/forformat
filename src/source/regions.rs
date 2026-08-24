@@ -322,6 +322,21 @@ pub(crate) fn line_scan(state: &mut LexState, line: &[u8]) -> LineScan {
     scan_group_line(state, line, |_| {})
 }
 
+/// [`line_comment_start`]'s sibling for a caller that needs every region of one
+/// physical line of a continuation group, with `state` carried on to the next
+/// line.
+///
+/// This is the group-aware counterpart of [`LexState::regions`]. Prefer it
+/// whenever the caller walks whole physical lines: [`LexState::regions`] alone
+/// keeps an unterminated literal open across the line break, but a free-form
+/// literal only survives a line that ends in a continuation marker, so the raw
+/// state over-reports protected bytes on malformed input.
+pub fn line_regions(state: &mut LexState, line: &[u8]) -> Vec<Region> {
+    let mut out = Vec::new();
+    scan_group_line(state, line, |region| out.push(region));
+    out
+}
+
 /// [`line_comment_start`]'s sibling for a pass that needs the code bytes rather
 /// than the comment offset: the code spans of one physical line of a
 /// continuation group, with `state` carried on to the next line.

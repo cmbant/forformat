@@ -14,11 +14,25 @@ cargo fmt --check
 echo "== cargo clippy --locked --all-targets -- -D warnings (/tmp/forformat-lint) =="
 CARGO_TARGET_DIR=/tmp/forformat-lint cargo clippy --locked --all-targets -- -D warnings
 
+# The fuzz targets are their own workspace, so the checks above do not reach
+# them. They are source too: hold them to the same bar.
+echo "== cargo fmt --check (fuzz) =="
+cargo fmt --check --manifest-path fuzz/Cargo.toml
+
+echo "== cargo clippy --locked -- -D warnings (fuzz, /tmp/forformat-fuzz-lint) =="
+CARGO_TARGET_DIR=/tmp/forformat-fuzz-lint cargo clippy --locked \
+    --manifest-path fuzz/Cargo.toml --target "$(rustc -vV | sed -n 's/^host: //p')" \
+    --all-targets -- -D warnings
+
 echo "== RUSTDOCFLAGS=-D warnings cargo doc --locked --no-deps =="
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --no-deps
 
 echo "== cargo test --locked --all-targets ($target_dir) =="
 cargo test --locked --all-targets
+
+# --all-targets excludes doctests, so the rustdoc examples need their own run.
+echo "== cargo test --locked --doc =="
+cargo test --locked --doc
 
 echo "== check_fixture_syntax.sh =="
 ./tools/check_fixture_syntax.sh "$target_dir/debug/forformat"

@@ -32,14 +32,24 @@ impl Pending {
         }
     }
 
-    fn width(self) -> usize {
-        const MAX_SEPARATOR: usize = 2;
+    /// `max_separator` is the blank-line cap this run is configured for, so a
+    /// preserved authored run between two units is not silently squeezed to a
+    /// width this pass picked on its own.
+    fn width(self, max_separator: usize) -> usize {
         match self {
             Self::None => 0,
             Self::Exactly => 1,
-            Self::AtLeast { authored } => authored.clamp(1, MAX_SEPARATOR),
+            Self::AtLeast { authored } => authored.clamp(1, max_separator.max(1)),
         }
     }
+}
+
+/// The widest separator this pass may emit between two program units.
+///
+/// Step 19 caps blank runs afterwards, so anything wider would be trimmed
+/// again; `preserve` has no cap, and there the authored run stands.
+fn max_separator(config: &FormatConfig) -> usize {
+    config.style.max_blank_lines.unwrap_or(usize::MAX)
 }
 
 /// Step 18: blank-line policy around program units and `CONTAINS`.
@@ -52,7 +62,7 @@ pub fn program_unit_spacing(
     document: &mut Document,
     config: &FormatConfig,
 ) -> Result<(), FormatError> {
-    let _ = config;
+    let max_separator = max_separator(config);
     let mut normalized = Vec::with_capacity(document.lines.len());
     let mut unit_depth = 0usize;
     let mut type_depth = 0usize;
@@ -70,7 +80,7 @@ pub fn program_unit_spacing(
                     .last()
                     .is_some_and(|previous: &Vec<u8>| !previous.iter().all(u8::is_ascii_whitespace))
                 {
-                    for _ in 0..pending.width() {
+                    for _ in 0..pending.width(max_separator) {
                         normalized.push(Vec::new());
                     }
                 }
@@ -90,7 +100,7 @@ pub fn program_unit_spacing(
                 pending.count_authored_blank();
                 continue;
             }
-            for _ in 0..pending.width() {
+            for _ in 0..pending.width(max_separator) {
                 normalized.push(Vec::new());
             }
             pending = Pending::None;
@@ -119,8 +129,17 @@ pub fn program_unit_spacing(
             unit_depth += 1;
         }
 
+        // `CONTAINS` is separated on both sides: a blank before it here, and
+        // `Pending::Exactly` for the line after it below.
+        //
+        // A unit END is not. Inserting a blank before every `end subroutine`
+        // would put one inside an empty procedure and would only be symmetric
+        // if a blank were also forced after every unit header, which is a much
+        // heavier default than separating units. Units still get separated
+        // from each other -- that is the `Pending::AtLeast` owed *after* an
+        // END, which the next line of code collects above.
         let is_contains = unit_depth > 0 && type_depth == 0 && info.kind == StatementKind::Contains;
-        if is_contains || is_end {
+        if is_contains {
             while normalized
                 .last()
                 .is_some_and(|previous: &Vec<u8>| previous.iter().all(u8::is_ascii_whitespace))
