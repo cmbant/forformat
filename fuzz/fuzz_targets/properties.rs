@@ -13,44 +13,73 @@ fn is_closed_literal(raw: &[u8]) -> bool {
     raw.len() >= 2 && matches!(raw[raw.len() - 1], b'\'' | b'"')
 }
 
-/// The bytes full mode must carry through untouched.
+/// One literal region's content, without its delimiters or the continuation
+/// marker that opens a continued tail.
+///
+/// A region is a whole literal (`'abc'`), the head of a continued one (`'abc`),
+/// or its tail (`&def'`), so both ends are stripped independently rather than
+/// assumed to be a matched pair.
+fn literal_content(raw: &[u8]) -> &[u8] {
+    let raw = raw.strip_prefix(b"&").unwrap_or(raw);
+    let raw = match raw.first() {
+        Some(b'\'' | b'"') => &raw[1..],
+        _ => raw,
+    };
+    match raw.last() {
+        Some(b'\'' | b'"') => &raw[..raw.len() - 1],
+        _ => raw,
+    }
+}
+
+/// The literal bytes full mode must carry through untouched.
+///
+/// Deliberately *not* a check on preprocessor lines. This walk classifies
+/// physical lines on its own, and that is the one job the pipeline is
+/// authoritative for: it resolves the continuation marker before deciding what a
+/// line is, so ` &#endif c` is a directive to it and a code line here. Every
+/// disagreement this property has ever reported was a line-classification
+/// difference of that kind, never a corrupted quote. Directive text is pinned by
+/// `preprocessor_lines_are_preserved_byte_for_byte`, by
+/// `tests/conditional_compilation.rs`, by the `external_macro_define` fixture,
+/// and by the `regions` fuzz target -- all of which check it without guessing.
+///
+/// What is left is the part worth reimplementing independently: if a pass
+/// corrupts a character literal, an oracle that shares `regions.rs` would
+/// corrupt its own answer identically and see nothing.
 #[derive(Debug, PartialEq, Eq)]
 struct Protected {
-    literals: Vec<Vec<u8>>,
+    /// Every literal's content, concatenated in document order -- not a list of
+    /// regions. `docs/full-mode.md` documents that a long literal may split at a
+    /// whitespace boundary inside its content, which the wrapper emits as
+    /// `'two ' // &` / `'spac...'`. That turns one region into two while leaving
+    /// every payload byte in place, so a region-for-region comparison reports
+    /// documented behaviour as corruption. Concatenated content survives the
+    /// split and still catches a changed byte, which is what I3 is for.
+    literals: Vec<u8>,
+    /// Hollerith stays a region list: `docs/full-mode.md` says a Hollerith
+    /// payload is never split, so its regions must match one for one.
     hollerith: Vec<Vec<u8>>,
-    cpp: Vec<Vec<u8>>,
     /// False when a line ends inside a character literal that has neither a
     /// closing delimiter nor a trailing continuation marker.
     ///
     /// Such a literal is a syntax error, and "which bytes are its payload" has
-    /// no answer this walk and the pipeline are obliged to agree on. The
+    /// no answer this walk and the pipeline are obliged to agree on: the
     /// formatter decides from `SourceBuffer`, which also knows statement
-    /// membership and unresolved preprocessor branches; a line-at-a-time walk
-    /// knows neither, and the two part company on inputs carrying more than one
-    /// dangling quote. I3 is therefore asserted only where every literal is
-    /// delimited or properly continued -- which is every input that is Fortran
-    /// at all, and 49 of the 51 checked-in fixtures. I1 and I2 still cover the
-    /// rest, and `tests/expected/align_legacy_full.out` pins the formatter's
-    /// actual behaviour on dangling quotes as a golden.
+    /// membership and unresolved preprocessor branches. I3 is therefore
+    /// asserted only where every literal is delimited or properly continued.
+    /// I1 and I2 still cover the rest, and `tests/expected/align_legacy_full.out`
+    /// pins the formatter's actual behaviour on dangling quotes as a golden.
     well_formed: bool,
 }
 
 fn protected(source: &[u8]) -> Protected {
     let mut literals = Vec::new();
     let mut hollerith = Vec::new();
-    let mut cpp = Vec::new();
     let mut well_formed = true;
     let mut state = LexState::default();
     for line in source.split(|byte| *byte == b'\n') {
         if line.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'#') {
-            // A directive's *text* is protected, but the horizontal whitespace
-            // around it is presentation like every other line's. Trailing blanks
-            // go because the final whitespace pass removes them -- and on a
-            // `\`-continued `#define` removing them is what makes the
-            // continuation work at all. Leading blanks go because a directive is
-            // laid out at column 1 rather than at the surrounding indent.
-            cpp.push(line.trim_ascii().to_vec());
-            // The directive is *stepped over*, not lexed: it neither closes nor
+            // A directive is *stepped over*, not lexed: it neither closes nor
             // resets an open literal, and `SourceBuffer` carries the ordinary
             // stream's state straight across it. Clearing the state here would
             // make the property disagree with the pipeline about where the
@@ -58,17 +87,23 @@ fn protected(source: &[u8]) -> Protected {
             continue;
         }
         let continued_literal = state.in_literal();
-        let entered_open = continued_literal || state.in_hollerith();
         // Walk the line as part of a continuation group, not as a standalone
         // slice: a literal left unterminated on a line with no continuation
-        // marker ends there, and `LexState::regions` alone would keep it open
+        // marker ends there, and `LexState::scan` alone would keep it open
         // and claim every later line as protected payload.
         let regions = line_regions(&mut state, line);
+        // A literal still open when the line ends is a syntax error, and this
+        // walk has to stop asserting there (see `well_formed`). It has to be
+        // read off the *regions*, not off the state: `line_regions` has already
+        // applied the group reset by the time it returns, and probing the raw
+        // `LexState::scan` instead would lex the comment and blank lines a
+        // continued statement steps over -- which is how `! don't stop here`
+        // inside a continued literal in `continued_literal.f90` gets mistaken
+        // for a dangling quote.
         if let Some(last) = regions.last() {
-            let raw = &line[last.range.clone()];
             if last.kind == RegionKind::StringLiteral
                 && last.range.end == line.len()
-                && !is_closed_literal(raw)
+                && !is_closed_literal(&line[last.range.clone()])
                 && !line.trim_ascii_end().ends_with(b"&")
             {
                 well_formed = false;
@@ -89,25 +124,15 @@ fn protected(source: &[u8]) -> Protected {
                 payload = payload.trim_ascii_end();
             }
             match region.kind {
-                RegionKind::StringLiteral => literals.push(payload.to_vec()),
+                RegionKind::StringLiteral => literals.extend_from_slice(literal_content(payload)),
                 RegionKind::Hollerith => hollerith.push(payload.to_vec()),
                 _ => {}
             }
-        }
-        // `line_regions` clears the state at a line that did not end in a
-        // continuation marker. Seeing an open state go into that reset is the
-        // signal that a literal was left dangling at a line break.
-        let closed_by_the_line_break = (entered_open || state.in_literal() || state.in_hollerith())
-            && !state.in_literal()
-            && !state.in_hollerith();
-        if closed_by_the_line_break && !line.trim_ascii_end().ends_with(b"&") {
-            well_formed = false;
         }
     }
     Protected {
         literals,
         hollerith,
-        cpp,
         well_formed,
     }
 }
