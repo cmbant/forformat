@@ -1053,8 +1053,7 @@ mod tests {
     #[test]
     fn cpp_elif_after_untaken_literal_branch_can_be_unknown() {
         for directive in ["#elif FEATURE", "#elifdef FEATURE", "#elifndef FEATURE"] {
-            let source =
-                format!("#if 0\nC disabled fixed text\n{directive}\nmodule m\n#endif\n");
+            let source = format!("#if 0\nC disabled fixed text\n{directive}\nmodule m\n#endif\n");
             assert_eq!(detect(source.as_bytes()), SourceForm::Free, "{directive}");
         }
     }
