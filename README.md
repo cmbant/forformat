@@ -23,6 +23,37 @@ forformat --version
 
 The package requires Python 3.9 or newer.
 
+Native static Linux binaries are also published for x86_64 and arm64. The following installs the
+latest release into `~/.local/bin` and verifies its SHA-256 checksum first:
+
+```sh
+case "$(uname -m)" in
+  x86_64|amd64) target=x86_64-unknown-linux-musl ;;
+  aarch64|arm64) target=aarch64-unknown-linux-musl ;;
+  *) echo "unsupported Linux architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+
+archive="forformat-$target.tar.gz"
+base="https://github.com/cmbant/forformat/releases/latest/download/$archive"
+curl -LO "$base"
+curl -LO "$base.sha256"
+sha256sum -c "$archive.sha256"
+tar -xzf "$archive"
+mkdir -p "$HOME/.local/bin"
+install -m 0755 "forformat-$target/forformat" "$HOME/.local/bin/forformat"
+"$HOME/.local/bin/forformat" --version
+```
+
+Release archives also receive GitHub artifact provenance attestations. If the GitHub CLI is
+available, a downloaded archive can additionally be checked, for example:
+
+```sh
+gh attestation verify forformat-x86_64-unknown-linux-musl.tar.gz --repo cmbant/forformat
+```
+
+The Linux release binaries also embed their Rust dependency metadata with `cargo-auditable`. This
+provenance and dependency metadata are separate from platform code signing.
+
 For pre-commit, use the separate hook repository:
 
 ```yaml
@@ -166,6 +197,10 @@ The Rust implementation is under `src/`; tests and golden fixtures are under `te
 ```sh
 ./tools/check_local.sh
 ```
+
+For dependency-policy changes, CI also runs `cargo deny check bans licenses sources`; RustSec
+advisories are reported separately so a newly published advisory does not unexpectedly block an
+otherwise unrelated pull request.
 
 For changes to full-mode normalization, wrapping, or layout, also run
 `./tools/check_fuzz_regression.sh` and the relevant focused properties. That script sweeps the

@@ -39,6 +39,29 @@ jobs:
             --target "$(rustc -vV | sed -n 's/^host: //p')" \
             --all-targets -- -D warnings
 
+  dependency-policy:
+    name: dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check dependency bans, licenses, and sources
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          rust-version: "1.85.0"
+          command: check bans licenses sources
+
+  dependency-advisories:
+    name: dependency advisories
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check RustSec advisories
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          rust-version: "1.85.0"
+          command: check advisories
+
   checks:
     name: checks (Rust ${{ matrix.toolchain }})
     needs: fast-checks
