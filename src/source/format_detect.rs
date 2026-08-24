@@ -403,7 +403,16 @@ fn fixed_continuation_signature(line: &[u8], previous_code: Option<&[u8]>) -> bo
     // statement indented exactly five spaces ("     print ...") unless the
     // preceding line proves continuation is required. A comma in the statement
     // field can also visibly extend a complete list-directed PRINT/READ.
-    if marker.is_ascii_alphabetic() {
+    //
+    // An underscore joins them. No Fortran statement starts with one, but a
+    // preprocessor macro call does, and these are preprocessed sources: ABINIT
+    // writes `_ABORT(...)` and similar throughout, and at the five-space indent
+    // of a subroutine body the macro lands in column six. The rest of the
+    // detector already reads `_` as the start of a name — it is free-form
+    // evidence in columns one to five — so treating it as an unambiguous fixed
+    // continuation marker here contradicted that and turned a whole `.F90` file
+    // fixed on one line.
+    if marker.is_ascii_alphabetic() || marker == b'_' {
         return previous_code.is_some_and(|previous| {
             line_requires_continuation(previous)
                 || fixed_list_directed_continuation(previous, &line[6..])
@@ -959,6 +968,29 @@ mod tests {
             SourceForm::Free
         );
         assert_eq!(detect(b"     print *, 1\nend\n"), SourceForm::Free);
+    }
+
+    /// ABINIT `m_profiling_abi.F90`: a preprocessor macro call is the one thing
+    /// besides a statement that can open a free-form line, and at the five-space
+    /// indent of a subroutine body its leading `_` lands in column six. Reading
+    /// that as an unambiguous fixed continuation marker turned the whole file
+    /// fixed on one line — the only such file in a 12,135-file corpus audit.
+    #[test]
+    fn a_column_six_macro_call_is_not_a_fixed_continuation() {
+        let source =
+            b"module m\ncontains\n subroutine s\n     _ABORT(\"x\")\n end subroutine s\nend module m\n";
+        assert_eq!(detect_path(Path::new("m.F90"), source), SourceForm::Free);
+        assert_eq!(detect(source), SourceForm::Free);
+
+        // An underscore really is a legal fixed continuation marker, so it stays
+        // strong evidence when the previous line cannot stand on its own.
+        assert_eq!(
+            detect_path(
+                Path::new("legacy.f90"),
+                b"      x = 1 +\n     _2\n      end\n"
+            ),
+            SourceForm::Fixed
+        );
     }
 
     #[test]

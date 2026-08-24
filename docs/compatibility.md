@@ -1,285 +1,160 @@
-# Rust formatter compatibility
+# Compatibility with findent
 
-The formatter supports both stdin/stdout and path-based workflows for free-form Fortran. In
-`--indent-only`, the byte-oriented library core preserves source spelling and non-trailing body
-bytes while replacing leading indentation and trimming trailing spaces/tabs. A missing final line
-terminator is added using the terminator on the preceding physical line (LF for a one-line
-unterminated file); existing LF, CRLF, and mixed terminators are preserved.
+`forformat` accepts **free-form Fortran only**, over stdin/stdout or file paths. `--indent-only` is
+a byte-for-byte compatibility contract against `findent -ifree`; `--full` (the default) adds lexical
+normalization and wrapping on top of it. The reference build is findent 4.3.8~pre01.
 
-Supported compatibility options include the global and per-construct indentation controls, start
-indent, continuation policies, labels, includes, OpenMP free-form sentinels, CPP branch snapshots,
-`findentfix:` directives, maximum indentation, `END` refactoring, whitespace reduction, and the
-`last-indent`/`last-usable` queries.
+A difference in `--indent-only` output is treated as a bug in this crate, except for the cases
+listed under [Reviewed indentation differences](#reviewed-indentation-differences).
 
-The Rust release intentionally diverges from legacy findent in three ways:
+## What is supported
 
-- Explicit fixed-form input (`-ifixed`, `--input-format=fixed`) and output (`-ofixed`,
-  `--output-format=fixed`) requests fail with status 2. Automatic input detection may still classify
-  a source as fixed-form and skip it unchanged: see below.
-- Unknown options fail with status 2, making misspelled options visible.
-- `FINDENT_FLAGS` is not read; configuration comes only from the command line or library API.
+Global and per-construct indentation, start indent, continuation policies, labels, includes,
+OpenMP free-form sentinels, CPP branch snapshots, `findentfix:` directives, maximum indentation,
+`END` refactoring, whitespace reduction, and the `last-indent`/`last-usable` queries.
 
-Automatic input detection is enabled by default but deliberately does not use findent's
-first-decisive-line `determine_fix_or_free` verdict as policy. Instead it accumulates positive fixed-
-and free-form evidence, with strong fixed evidence winning. Named sources also use their suffix as
-evidence: modern suffixes such as `.f90` and `.F90` are a strong free-form prior, while `.f` and
-`.F` remain content-driven. Anonymous stdin is accepted as free when its bytes contain clear
-free-form evidence and remains conservatively fixed when the content is ambiguous. Literal `#if 0`
-and `#if 1` branches are accounted for; macro-dependent CPP branches remain unknown. A test-only
-compatibility baseline retains the exact findent `determine_fix_or_free` detector, including its
-4,000-line limit and fixed-at-EOF fallback. `-ifree` forces free-form handling, and `--query-format`
-reports the automatic detector's verdict without formatting.
+In `--indent-only`, only leading indentation is replaced and trailing spaces and tabs are trimmed.
+Everything else — source spelling, body bytes, spaces inside strings and comments — is preserved. A
+missing final line terminator is added, matching the preceding line (LF for a one-line unterminated
+file). LF, CRLF, and mixed terminators are preserved as they are.
 
-The accepted format is free-form only. The parser is deliberately a shallow structural classifier,
-not a full Fortran semantic parser. Unknown or incomplete statements are emitted conservatively.
-One narrow legacy recovery is retained for editor-like input: `su broutine` is treated as a
-subroutine boundary, and a comma-prefixed external procedure may affect a matching explicit END
-fallback without opening a procedure body. Both behaviors are fixture-backed and isolated from
-generic malformed-END handling.
+The parser is a shallow structural classifier, not a full Fortran semantic parser. Unknown or
+incomplete statements are emitted conservatively rather than guessed at.
 
-## Accepted `--indent-only` divergences
+## Deliberate differences from findent
 
-`--indent-only` is a byte-for-byte contract against `findent -ifree`, and a difference is treated as
-a bug in this crate. The reference build is findent 4.3.8~pre01, from
-<https://ratrabbit.nl/ratrabbit/findent/downloads/index.html>. Across the 160 free-form sources in
-the camb and CosmoMC checkouts the two agree on every file; the three families below are the
-reviewed exceptions, each reduced to a standalone case, and each excluded from the oracle count on
-that basis. None of them occurs in the corpus checkouts. All three turn on whether a statement is a
+Three are unconditional:
+
+- **Fixed-form is rejected, not formatted.** `-ifixed`, `--input-format=fixed`, `-ofixed`, and
+  `--output-format=fixed` all fail with status 2. Automatic detection may still classify a source
+  as fixed-form, in which case it is skipped unchanged rather than rewritten.
+- **Unknown options fail** with status 2, so a misspelled option is visible instead of ignored.
+- **`FINDENT_FLAGS` is not read.** Configuration comes only from the command line, a project config
+  file, or the library API.
+
+## Fixed/free detection
+
+Automatic detection is enabled by default. Unlike findent, which stops at the first decisive line,
+`forformat` accumulates positive fixed- and free-form evidence across the whole file. Strong fixed
+evidence wins.
+
+- **Suffix.** A modern suffix (`.f90`, `.F90`, `.f95`, and so on) is a strong free-form prior;
+  `.f` and `.F` are decided purely on content. Anonymous stdin has no suffix, so it is free only
+  when the bytes carry clear free-form evidence, and conservatively fixed when they are ambiguous.
+- **Column six.** A nonblank, nonzero character there is fixed-form continuation evidence. `&`
+  counts on its own. Markers that could equally begin a free-form statement indented five spaces —
+  a letter, an underscore (a macro call such as `_ABORT(...)`), `!`, and label-like digit runs —
+  count only when the preceding line is itself incomplete.
+- **Preprocessor.** Literal `#if 0` and `#if 1` branches are resolved, and `#elif` chains track
+  which branch was already taken. Evidence from a branch whose condition depends on a macro is held
+  aside and used only if those branches agree on free form; conflicting alternatives stay fixed.
+
+`--query-format` reports the verdict without formatting. `-ifree` or `--input-format=free` forces
+free-form handling — the right answer when a source's form is genuinely undecidable from its bytes
+and suffix.
+
+## Reviewed indentation differences
+
+These are the known `--indent-only` divergences. All three turn on whether a statement is a
 procedure heading at all, which is where a lexer-driven recognizer and a structural classifier can
 legitimately disagree.
 
-- **A FUNCTION or SUBROUTINE statement inside a program-unit body with no `CONTAINS`.** findent
-  recognizes a function or subroutine definition inside `PROGRAM`, `FUNCTION`, and `SUBROUTINE` only
-  after `INTERFACE` or `CONTAINS`, so elsewhere it opens no frame and leaves the body and its
-  matching `END` at host depth. This crate opens the frame and indents the body.
+**A FUNCTION or SUBROUTINE statement in a program-unit body with no `CONTAINS`.** findent opens a
+frame for a nested definition only after `INTERFACE` or `CONTAINS`, so elsewhere it leaves the body
+and its matching `END` at host depth. `forformat` opens the frame and indents the body. Inside a
+`MODULE` body both open a frame.
 
-  ```fortran
-  subroutine outer
-     integer :: x
-     subroutine inner    ! forformat indents the body below this;
-     integer :: y        ! findent leaves it at host depth
-     end subroutine inner
-  end subroutine outer
-  ```
+```fortran
+subroutine outer
+   integer :: x
+   subroutine inner    ! forformat indents the body below this;
+   integer :: y        ! findent leaves it at host depth
+   end subroutine inner
+end subroutine outer
+```
 
-  The difference is confined to program and procedure hosts: inside a `MODULE` body both open a
-  frame.
-- **A comma between a type specification and the prefix attributes of a heading.** A `prefix` is a
-  blank-separated list of `prefix-spec`s, so `integer(4), pure elemental function myfunc2(x)` is not
-  a conforming function statement. findent accepts it and indents the body; this crate reads it as a
-  malformed declaration and leaves the body at host depth.
+**A comma between a type specification and a heading's prefix attributes.** A `prefix` is a
+blank-separated list, so `integer(4), pure elemental function f(x)` is not conforming. findent
+accepts it and indents the body; `forformat` reads it as a malformed declaration and leaves the body
+at host depth. The conforming blank-separated form opens a frame in both.
 
-  ```fortran
-  integer(4), pure elemental function myfunc2(x)
-  integer, intent(in) :: x    ! findent indents these two lines;
-  myfunc2 = x                 ! forformat leaves them at host depth
-  end function
-  ```
+```fortran
+integer(4), pure elemental function myfunc2(x)
+integer, intent(in) :: x    ! findent indents these two lines;
+myfunc2 = x                 ! forformat leaves them at host depth
+end function
+```
 
-  The blank-separated form `integer(4) pure elemental function myfunc2(x)` is conforming, and both
-  open a frame for it. The manifest cases `procedure_matrix`, `legacy_split_procedure`, and
-  `legacy_orphan_procedure_end` each contain one heading in the non-conforming form, and that one
-  heading accounts for every difference in them: in `legacy_orphan_procedure_end` the extra frame
-  also shifts the rows that follow it.
-- **A kind parameter named `function`.** Fortran reserves no words, so a named constant may be
-  called `function` and used as a kind selector. findent reads the inner occurrence as the heading
-  keyword, rejects the statement as a function definition, and leaves the body and every later
-  sibling procedure unindented. This crate resolves the heading from the statement's structure and
-  indents both.
+**A kind parameter named `function`.** Fortran reserves no words, so a named constant may be called
+`function` and used as a kind selector. findent reads the inner occurrence as the heading keyword,
+rejects the statement, and leaves the body and every later sibling procedure unindented.
+`forformat` resolves the heading from the statement's structure and indents both. The divergence is
+confined to that one spelling: a constant named `subroutine` is a heading to both tools, because
+there the shadowed word and the heading keyword differ.
 
-  ```fortran
-  module m
-     integer, parameter :: function = 4
-  contains
-     integer(kind=function) function f()
-        f = 1                ! findent leaves this and `end function f` at host depth
-     end function f
-  end module m
-  ```
+```fortran
+module m
+   integer, parameter :: function = 4
+contains
+   integer(kind=function) function f()
+      f = 1                ! findent leaves this and `end function f` at host depth
+   end function f
+end module m
+```
 
-  The divergence is confined to that one spelling. A constant named `subroutine` used the same way
-  (`integer(kind=subroutine) function f()`) is a heading to both, because there the shadowed word
-  and the heading's own keyword are different words.
+Separately, a preprocessor directive that interrupts a *continued statement* is a known oracle
+difference: `forformat` keeps the following line a continuation and gives it the continuation
+indent, while findent returns it to statement indent. A directive between statements does not
+produce this.
 
-Checked-in fixtures also pin several headings that a shallow lexer can misread, and on each the
-oracle and this crate agree byte-for-byte: a named `ELSE <construct-name>` dedents to its IF, the
-body of a module whose name begins with a keyword (`MODULE function_types`) indents, and a macro or
-CUDA attribute prefix before a heading (`PURE_ARRAY_EQ FUNCTION array_eq_i(arr1, arr2)`,
-`attributes(global) subroutine k(a)`) opens a frame.
+```fortran
+call work(arg1, &
+#include "actual_args.inc"
+arg2)
+```
 
-## Inputs outside the supported contract
+## Full-mode differences
 
-The accepted format is free-form Fortran. Some corpus inputs remain outside that compatibility
-contract because they are not valid Fortran in isolation or require preprocessing semantics that
-the formatter does not provide. Current families include:
+`--full` adds normalization and wrapping, which are policy choices rather than indentation
+compatibility claims:
 
-- FYPP template bodies whose template syntax is not valid Fortran in isolation.
-- Preprocessor configurations whose conditional branches open and close Fortran constructs
-  asymmetrically.
-- Inputs using non-Fortran operators or syntax from another language.
-- COCO (`??`) and FYPP (`#:`) directives beyond the safe grouping and continuation behaviour
-  described below.
-
-These cases are not silently promoted to supported behaviour. A family becomes supported only with
-a checked-in fixture, an explicit compatibility decision, and corresponding regression coverage.
-Checked-in fixtures and the corpus audit remain the source of truth for individual cases and
-counts.
-
-## Intentional full-format divergences
-
-`--indent-only` is the findent-compatible indentation contract. Full mode adds lexical normalization
-and wrapping; its reviewed differences from the reference are collected here:
-
-- Multiline `(/ ... /)` array constructors are rewritten as complete, valid `[ ... ]` constructors;
-  the reference can change only the opening delimiter on a later continuation.
-- Comment bodies are changed only for the narrow, provably assignment-shaped comment rule. The
-  reference also respaces seven nested or non-Fortran comment expressions; Rust preserves them.
-- A kind suffix follows its governing declaration, including exponent literals. On continuation
-  lines the reference can miss that declaration application; Rust applies it consistently. Numeric
-  kinds such as `_8` and undeclared names are inert.
-
-  For example, with `real(DL), parameter :: an(2) = [ &` and a declared `DL`, Rust applies the
-  declaration to every continuation line:
-
-  ```fortran
-  2.0_DL, myname, &
-  3.0_DL
-  ```
-
-  The legacy normalizer emits `3.0_dl` on that final continuation line. The eight-line
-  `constants.f90` split is retained as an adjudicated divergence, not normalized away.
-- An exponent kind suffix follows its own governing declaration even when the exponent token was
-  perturbed to uppercase. Thus a declaration `dp` governs `1.E100_DP` as `_dp`; the reference's
-  two-line `constants.f90` continuation defect is retained as an adjudicated divergence.
-- The findent-oracle and Rust agree byte-for-byte on the resolved governing-declaration cases: owner-keyed
-  type-bound bindings and old-style/typed local entities.
-- Conditional `!$` sentinels retain the authored sentinel boundary spacing while their Fortran-like
-  body is normalized, including declaration-driven identifier casing.
-- `--ws_remred` on a valid literal leaves the literal bytes intact. A legacy heuristic can
-  treat the quote after `error stop` as code and reduce spaces inside that literal.
-
-These are full-format policy choices, not indentation compatibility claims. The array-constructor,
-comment, sentinel, kind-suffix, governing-declaration, valid-literal, and type-bound-procedure cases
-are pinned by checked-in fixtures and focused tests described below.
-
-### Fixture fixed point
-
-Project-mode behavior is exercised by checked-in multi-file fixtures. A run must leave fixture bytes
-stable, and a difference that is not settled by the governing declaration remains authored rather
-than borrowing a spelling from another scope. The fixed-point checks compare raw bytes; in
-particular, CRLF-to-LF changes are failures rather than text-mode equivalents.
-
-## Regression checks
-
-The in-tree suite covers byte handling, newline preservation, compact `END` forms, semicolon
-statements, keyword identifiers, `findentfix`, CPP branch restoration, labeled `DO`, idempotence,
-and preservation. When findent 4.3.8~pre01 is available, run
-`tools/differential_free.sh target/release/forformat`; it compares the retained non-fixed legacy
-fixtures `progfree.f`, `progfree1.f`, and `progfree-dos.f` with the oracle and reports the
-intentional preservation-boundary differences. Large real-world inputs are verified against the
-checked-in fixtures rather than an external tree. The
-complete legacy shell suite is not a normal Rust test dependency because it includes fixed-form,
-relabeling, editor-wrapper, and other explicitly excluded features.
-
-## Legacy free-form audit
-
-The retained free-form portions of legacy tests 11, 14, 15, 16, 19, 20, and 24 pass against
-findent 4.3.8~pre01 as the oracle. Their supported rows pass; the
-reduced behavior is represented by the manifest and focused fixtures. Test 10's
-free-form label rows are represented by `label_matrix`; its six-column rows are fixed-form and are
-excluded. Test 18 exercises the `wfindent` wrapper and generated/reference files, so it remains an
-out-of-scope wrapper/dependency test.
-
-The remaining shell-suite differences are classified rather than hidden:
-
-- fixed-form rows in tests 10, 11, 14, 15, 16, 19, and 20 are rejected by the Rust contract;
-- relabeling and `query-relabel` rows in test 24 are post-MVP;
-- malformed option concatenation in test 20 is rejected as an invalid Rust option;
-- test 20's `WHERE`, derived-type, and `SELECT TYPE/RANK` rows are byte-exact after the shared
-  trailing-horizontal-whitespace normalization; and
-- test 24's malformed continued-string case is the documented conservative whitespace divergence.
-
-The full `test24` parenthesis-alignment fixture set is also checked in. Its only intentional difference
-is the two-line alignment of a deliberately malformed continued string whose quote state spans
-the physical group; Rust keeps the quote-aware interpretation instead of aligning parentheses
-inside that literal. The valid nested-parenthesis and label-left rows remain byte-exact.
-
-Tests 26 and 27's legacy `doit` calls pass the human-readable case description as an option and are
-therefore not executable differential commands as written. Their direct free-form features were
-checked independently and are covered by the `fortran2023` and `structures` manifest cases.
-
-## Manifest traceability
-
-The checked-in manifest runner in `tests/manifest.rs` executes every case in
-`tests/manifests/core.manifest` without requiring `/opt/findent`. Each case records input, expected
-stdout, expected stderr, status, CLI arguments, oracle provenance, category, support/exclusion
-status, and an allowed-normalization declaration.
-
-| Capability | Manifest or test coverage |
-| --- | --- |
-| Core structural indentation and `IF` branches | `core` |
-| Strings, semicolons, OpenMP sentinel | `lexical`, `openmp_disabled` |
-| Fixed-form rejection and status 2 | `fixed_rejected` |
-| Procedure declaration does not open a frame | `procedure_declaration` |
-| Parenthesis continuation alignment | `align_paren` |
-| `last-indent` / `last-usable` query output | `last_indent`, `last_usable` |
-| Redundant whitespace transformation | `ws_remred` |
-| Bare optional values and indent disabling | `ws_remred_bare`, `indent_none` |
-| Supported construct matrix | `constructs` |
-| Continued source around CPP directives | `cpp_continuation`, `cpp_continuation_indent` |
-| Nested CPP alternate branch snapshots | `cpp_nested` |
-| Include/label/ampersand CLI layout | `cli_layout`, `cli_include_left`, `cli_label_left`, `cli_indent_ampersand` |
-| Combined label/include/continuation layout | `cli_layout_combo` |
-| END completion and case policy | `refactor_end`, `refactor_end_upper` |
-| Procedure prefix/attribute boundary | `procedure_matrix` |
-| SELECT TYPE/RANK, named/shared-label, legacy structure families | `advanced_constructs` |
-| Unknown-option diagnostic divergence | `unknown_rejected` |
-| Conservative malformed-string whitespace boundary | `ws_malformed_string` |
-| Maximum-indent/start-indent state and branch clamping | `engine_max_indent_start`, `constructs_max_indent` |
-| CONTAINS restart state | `engine_contains_restart` |
-| OpenMP continuation/start-indent policies | `openmp_continuation_default`, `openmp_continuation_k`, `openmp_continuation_k9`, `continuation_none` |
-| Fortran 2023 procedure prefixes | `fortran2023` |
-| Nested legacy STRUCTURE/UNION/MAP | `structures` |
-| Legacy split `su broutine` recovery and comma-prefixed external END fallback | `legacy_split_procedure`, `legacy_orphan_procedure_end` |
-| Nested parenthesis alignment and label-left interaction | `align_nested`, `align_nested_label_right` |
-| Full Test026/Test027 parenthesis fixtures and malformed-string boundary | `align_legacy_full`, `align_legacy_full_label0` |
-| Compatibility audit regressions: first-item parenthesis target, CONTAINS frame retention, abstract-interface END guard | `compat_regressions` |
-| Shared-label `DO` closure across nested CPP branches | `labeled_cpp_do` |
-| Consolidated free-form legacy construct matrix | `legacy_free_matrix` |
-| Critical/change-team indentation controls | `legacy_controls` |
-| Malformed explicit-END recovery | `malformed_end_recovery` |
-| Malformed explicit-END matrix | `malformed_end_matrix` |
-| Per-construct long-option indentation matrix | `construct_options` |
-| Label placement with global/start indentation | `label_matrix_left0`, `label_matrix_left1` |
-| Arbitrary bytes, preservation, idempotence | `tests/properties.rs` |
-| Scanner quote/Hollerith/newline spans | `src/source/{buffer,scanner}.rs` unit tests |
-| Classifier families, keyword assignments, `TYPE IS` | `src/classify/recognizers.rs` unit tests |
-| CLI aliases, attached/separated values, optional values | `src/cli.rs` unit tests |
-
-The table is intentionally additive: legacy features that are not represented here remain release
-work, rather than being implied by a broad capability claim.
+- Multiline `(/ ... /)` array constructors are rewritten as complete, valid `[ ... ]` constructors.
+  The reference can change only the opening delimiter on a later continuation.
+- Comment bodies are changed only by the narrow, provably assignment-shaped comment rule. The
+  reference also respaces some nested or non-Fortran comment expressions; `forformat` preserves
+  them.
+- A kind suffix follows its governing declaration, including exponent literals, and does so
+  consistently on continuation lines where the reference can miss the declaration. Numeric kinds
+  such as `_8` and undeclared names are inert.
+- Conditional `!$` sentinels keep their authored boundary spacing while the Fortran-like body is
+  normalized, including declaration-driven identifier casing.
+- `--reduce-whitespace` (equivalent to findent-compatible `--ws_remred`) leaves the bytes of a valid literal intact. A legacy heuristic can treat the
+  quote after `error stop` as code and collapse spaces inside that literal.
 
 ## Whitespace boundary
 
-The Rust library's default contract replaces leading indentation and trims trailing spaces and tabs
-from each emitted physical line, matching findent's free-form emission. Other source spelling
-and body bytes are preserved when transformations are disabled, including spaces inside strings and
-comments. `--ws_remred` remains the explicit opt-in for broader redundant-whitespace reduction, and
-Hollerith-bearing statements bypass it.
-Malformed or ambiguous continued string expressions are reduced conservatively; this is an
-intentional divergence from findent's legacy handling of the `Test031` malformed-string case.
-There is one additional reviewed divergence: findent's `remred` heuristic treats the quote
-after `error stop ` as code and collapses spaces inside the valid character literal. Rust keeps the
-literal unchanged; `ws_remred_valid_literal` records this oracle defect explicitly.
+The default contract replaces leading indentation and trims trailing spaces and tabs, matching
+findent's free-form emission. `--reduce-whitespace` is the explicit opt-in for broader redundant
+whitespace reduction; statements bearing Hollerith constants bypass it, and malformed or ambiguous
+continued string expressions are reduced conservatively.
 
-`--ws_remred` also diverges from legacy findent around the two column-alignment options,
-`--align-declarations` (default on) and `--align-comments` (default off): each owns the one gap it
-aligns — the whitespace before a declaration's `::` and before a trailing comment, respectively —
-and `--ws_remred` leaves that gap alone whenever the corresponding option is enabled, rather than
-collapsing it before the alignment pass sees the authored spacing. Legacy findent has no equivalent
-alignment options, so this precedence is Rust-only behavior with no oracle to diverge from.
+`--reduce-whitespace` also interacts with the two column-alignment options, `--align-declarations`
+(on by default) and `--align-comments` (off by default). Each owns the one gap it aligns — the space
+before a declaration's `::`, and before a trailing comment. When the option is enabled,
+`--reduce-whitespace` leaves that gap alone instead of collapsing it before the alignment pass sees
+the authored spacing. findent has no equivalent options, so this precedence has no oracle to diverge
+from.
 
-COCO (`??`) and FYPP (`#:`) directive recognition is currently retained only for safe grouping and
-branch continuation. They are not part of the first compatibility release's supported semantic
-contract; CPP behavior is the supported preprocessor feature. Full COCO/FYPP behavior is deferred
-until it has checked-in fixtures and a separate compatibility decision.
+## Outside the supported contract
+
+Some inputs are not valid Fortran in isolation, or need preprocessing semantics the formatter does
+not provide:
+
+- FYPP template bodies whose template syntax is not valid Fortran on its own.
+- Preprocessor configurations whose branches open and close Fortran constructs asymmetrically.
+- Inputs using operators or syntax from another language.
+- COCO (`??`) and FYPP (`#:`) directives beyond safe grouping and continuation. CPP is the supported
+  preprocessor feature; fuller COCO/FYPP support is deferred.
+
+These are not silently promoted to supported behaviour. A family becomes supported only with a
+regression case and an explicit compatibility decision.
