@@ -4,6 +4,7 @@ use super::associations::select_association_spec;
 use crate::{
     analysis::{names::NameSpace, ScopeTree},
     source::tokens::{Token, TokenKind},
+    transform::{vocab, vocab_2023},
 };
 
 pub(super) fn is_use_statement(tokens: &[Token<'_>]) -> bool {
@@ -157,38 +158,53 @@ pub(super) fn is_intrinsic_kind_name(tokens: &[Token<'_>], index: usize) -> bool
             .any(|candidate| type_name.is_name(candidate))
 }
 
+/// The namespace a named `END` statement closes, when `index` is that name.
+///
+/// `end type t` and `endtype t` are one statement written two ways, and which
+/// one is in the buffer depends on whether the compound-keyword split has run
+/// over this line yet. That split runs in the same pass as this one, so reading
+/// only the split spelling meant `endtype t_NAME` was a statement with no name
+/// in it on the run that split the keyword, and carried a name only on the run
+/// after -- which is why it took two to settle. `endif` and `endmodule` hid the
+/// same gap: neither closes a construct whose name this pass would recase.
 pub(super) fn named_end_space(tokens: &[Token<'_>], index: usize) -> Option<NameSpace> {
     let first = tokens
         .iter()
         .position(|token| token.kind != TokenKind::Number)?;
-    if !tokens.get(first).is_some_and(|token| token.is_name(b"end")) {
+    let head = tokens.get(first)?;
+    let (kind, name) = if head.is_name(b"end") {
+        (tokens.get(first + 1)?.text.to_ascii_lowercase(), first + 2)
+    } else {
+        (joined_end_construct(head)?, first + 1)
+    };
+    if index != name {
         return None;
     }
-    if index != first + 2 {
-        return None;
-    }
-    match tokens.get(first + 1).map(|token| token.text) {
-        Some(kind)
-            if kind.eq_ignore_ascii_case(b"module") || kind.eq_ignore_ascii_case(b"submodule") =>
-        {
-            Some(NameSpace::Module)
-        }
-        Some(kind)
-            if [
-                b"function".as_slice(),
-                b"subroutine",
-                b"program",
-                b"procedure",
-                b"blockdata",
-            ]
-            .iter()
-            .any(|candidate| kind.eq_ignore_ascii_case(candidate)) =>
-        {
+    match kind.as_slice() {
+        b"module" | b"submodule" => Some(NameSpace::Module),
+        b"function" | b"subroutine" | b"program" | b"procedure" | b"blockdata" => {
             Some(NameSpace::Symbol)
         }
-        Some(kind) if kind.eq_ignore_ascii_case(b"type") => Some(NameSpace::Type),
+        b"type" => Some(NameSpace::Type),
         _ => None,
     }
+}
+
+/// The construct keyword inside a joined `END` keyword: `endtype` -> `type`.
+///
+/// The answer comes from the same tables the splitting rule rewrites from, so
+/// the two spellings of a head cannot come to disagree about what statement it
+/// is. Blanks are dropped from the split spelling because the joined form is
+/// what the arms above are written against: `endblockdata` is `end blockdata`
+/// here, as it is when the author writes the two words out.
+fn joined_end_construct(head: &Token<'_>) -> Option<Vec<u8>> {
+    if head.kind != TokenKind::Name {
+        return None;
+    }
+    let split = vocab::lookup_pair(vocab::COMPOUND_KEYWORDS, head.text)
+        .or_else(|| vocab::lookup_pair(vocab_2023::COMPOUND_KEYWORDS, head.text))?;
+    let kind = split.strip_prefix("end ")?;
+    Some(kind.replace(' ', "").into_bytes())
 }
 
 pub(super) fn scope_header_space(tokens: &[Token<'_>], index: usize) -> Option<NameSpace> {

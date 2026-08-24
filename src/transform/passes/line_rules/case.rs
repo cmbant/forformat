@@ -60,12 +60,16 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
             }
         }
     }
+    let verdicts = if normalize_whitespace {
+        operator_verdicts(line, &tokens, cx, context, &inside_paren)
+    } else {
+        Vec::new()
+    };
     let mut spacing = OperatorSpacing::default();
     for (index, token) in tokens.iter().enumerate() {
         match token.kind {
             TokenKind::Number => {
-                if let Some(marker) = real_exponent_marker(token.text) {
-                    let at = token.span.start + marker;
+                if let Some(at) = exponent_marker(line, &tokens, index) {
                     let marker = match cx.config.style.keyword_case {
                         KeywordCase::Lower => line[at].to_ascii_lowercase(),
                         KeywordCase::Upper => line[at].to_ascii_uppercase(),
@@ -125,39 +129,40 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                 }
             }
             TokenKind::Operator if normalize_whitespace => {
-                if !is_labelled_format_statement(&tokens)
-                    && !context.continued_format
-                    && is_spaced_operator_token(line, &tokens, index, token)
-                {
-                    let named = token.text == b"="
-                        && is_keyword_argument_equals(&tokens, index, &inside_paren, context);
-                    add_operator_edit(line, &mut edits, token, token.text, !named, &mut spacing);
-                    spacing.previous_compact_named = named;
-                } else if !is_labelled_format_statement(&tokens)
-                    && !context.continued_format
-                    && is_arithmetic_operator(token.text)
-                    && !is_data_value_delimiter(&tokens, token, context)
-                {
-                    if !is_io_specifier_star(&tokens, index, token, context)
-                        && (is_binary_arithmetic_operator(line, token.span.start, token.text)
-                            || context.continued_infix
-                                && is_leading_continuation_arithmetic(&tokens, index, token))
-                    {
-                        let declaration_star = is_declaration_type_star(&tokens, index, token.text);
+                let next = tokens.get(index + 1).map(|token| token.text);
+                match verdicts[index] {
+                    OperatorVerdict::Untouched => {}
+                    OperatorVerdict::Spaced => {
                         add_operator_edit(
                             line,
                             &mut edits,
                             token,
                             token.text,
-                            !declaration_star
-                                && binary_operator_spaced(
-                                    token.text,
-                                    cx.config.style.compact_multiplicative,
-                                ),
+                            true,
+                            next,
                             &mut spacing,
                         );
-                    } else {
-                        remove_operator_trailing_whitespace(line, &mut edits, token, &mut spacing);
+                    }
+                    OperatorVerdict::Compact { named } => {
+                        add_operator_edit(
+                            line,
+                            &mut edits,
+                            token,
+                            token.text,
+                            false,
+                            next,
+                            &mut spacing,
+                        );
+                        spacing.previous_compact_named = named;
+                    }
+                    OperatorVerdict::Tightened => {
+                        remove_operator_trailing_whitespace(
+                            line,
+                            &mut edits,
+                            token,
+                            next,
+                            &mut spacing,
+                        );
                     }
                 }
             }
@@ -273,6 +278,131 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
     edits.finish()
 }
 
+/// What the operator rules will do to one `Operator` token.
+///
+/// Deciding this separately from emitting it is what lets a whole glued run of
+/// operators be judged together — see [`operator_verdicts`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OperatorVerdict {
+    /// Not a spacing site: the token and its surroundings are left as written.
+    Untouched,
+    /// One space on each side.
+    Spaced,
+    /// Rewritten hard against its operands. `named` distinguishes a keyword
+    /// argument's `=`, which the operator that follows it must know about.
+    Compact { named: bool },
+    /// Not binary here — a unary sign, or an I/O `*`. Only the whitespace that
+    /// trails it is removed.
+    Tightened,
+}
+
+/// Decide every operator token on the line before any of them is written.
+///
+/// The neighbour guards in `is_spaced_operator_token` read the bytes beside a
+/// token to decide it is glued to another operator. Those bytes are exactly what
+/// this pass rewrites, so a run of glued operators used to come apart one
+/// operator per run of the formatter: `x=<1` spaced the `=`, which unglued the
+/// `<` for the run after it to space, so the input took two runs to settle. The
+/// comment path has never had this problem because `format_comment_operators`
+/// consults the output it is building rather than its input.
+///
+/// So does this, one step earlier: a run of operators with no bytes between them
+/// is judged as a unit, and if any member is being spaced the run is coming apart
+/// on this pass, so the members that only declined because they were glued are
+/// asked again with that fact in hand. Members that are compact for a reason of
+/// their own keep it -- the `=` of a keyword argument, a unary sign -- which is
+/// why `x =-1` stays `x =-1` rather than being pulled open by the `=` beside it.
+///
+/// A run whose members all decline is left glued, so `a<<b` still survives.
+fn operator_verdicts(
+    line: &[u8],
+    tokens: &[crate::source::Token<'_>],
+    cx: &PassContext,
+    context: &super::super::LineContext<'_>,
+    inside_paren: &[bool],
+) -> Vec<OperatorVerdict> {
+    let mut verdicts: Vec<OperatorVerdict> = (0..tokens.len())
+        .map(|index| operator_verdict(line, tokens, index, cx, context, inside_paren, false))
+        .collect();
+    let mut start = 0;
+    while start < tokens.len() {
+        if tokens[start].kind != TokenKind::Operator {
+            start += 1;
+            continue;
+        }
+        let mut end = start + 1;
+        while end < tokens.len()
+            && tokens[end].kind == TokenKind::Operator
+            && tokens[end].span.start == tokens[end - 1].span.end
+        {
+            end += 1;
+        }
+        if end - start > 1 && verdicts[start..end].contains(&OperatorVerdict::Spaced) {
+            for (offset, verdict) in verdicts[start..end].iter_mut().enumerate() {
+                if *verdict == OperatorVerdict::Untouched {
+                    *verdict = operator_verdict(
+                        line,
+                        tokens,
+                        start + offset,
+                        cx,
+                        context,
+                        inside_paren,
+                        true,
+                    );
+                }
+            }
+        }
+        start = end;
+    }
+    verdicts
+}
+
+/// One operator token's verdict, judged on its own.
+///
+/// `run_separates` is the caller's answer to "is this token's glued run coming
+/// apart anyway"; it reaches only the neighbour guards.
+fn operator_verdict(
+    line: &[u8],
+    tokens: &[crate::source::Token<'_>],
+    index: usize,
+    cx: &PassContext,
+    context: &super::super::LineContext<'_>,
+    inside_paren: &[bool],
+    run_separates: bool,
+) -> OperatorVerdict {
+    let token = &tokens[index];
+    if token.kind != TokenKind::Operator
+        || is_labelled_format_statement(tokens)
+        || context.continued_format
+    {
+        return OperatorVerdict::Untouched;
+    }
+    if is_spaced_operator_token(line, token, run_separates) {
+        let named =
+            token.text == b"=" && is_keyword_argument_equals(tokens, index, inside_paren, context);
+        return if named {
+            OperatorVerdict::Compact { named }
+        } else {
+            OperatorVerdict::Spaced
+        };
+    }
+    if !is_arithmetic_operator(token.text) || is_data_value_delimiter(tokens, token, context) {
+        return OperatorVerdict::Untouched;
+    }
+    if is_io_specifier_star(tokens, index, token, context)
+        || !(is_binary_arithmetic_operator(line, token.span.start, token.text)
+            || context.continued_infix && is_leading_continuation_arithmetic(tokens, index, token))
+    {
+        return OperatorVerdict::Tightened;
+    }
+    if is_declaration_type_star(tokens, index, token.text)
+        || !binary_operator_spaced(token.text, cx.config.style.compact_multiplicative)
+    {
+        return OperatorVerdict::Compact { named: false };
+    }
+    OperatorVerdict::Spaced
+}
+
 /// Canonicalize an operator token without taking ownership of its surrounding
 /// whitespace unless the active style includes whitespace normalization.
 fn add_operator_by_mode(
@@ -284,7 +414,9 @@ fn add_operator_by_mode(
     spacing: &mut OperatorSpacing,
 ) {
     if normalize_whitespace {
-        add_operator_edit(line, edits, token, replacement, true, spacing);
+        // A spaced operator leaves a trailing space, so it can never glue the
+        // token after it on: `next` has nothing to decide here.
+        add_operator_edit(line, edits, token, replacement, true, None, spacing);
     } else {
         edits.replace(token.span.clone(), replacement);
     }

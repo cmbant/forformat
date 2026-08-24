@@ -473,6 +473,64 @@ pub(super) fn inside_paren_at(
     result
 }
 
+/// Where in `line` the exponent marker of the real literal at `index` sits —
+/// including the spelling this pass has not finished assembling.
+///
+/// [`real_exponent_marker`] answers for a literal that is already one token. But
+/// `1D+ 1` is one literal with a blank in it, and this same pass closes that
+/// blank: the operator rules read the `+` as an exponent sign (`exponent_before`)
+/// and decline to space it, and whitespace reduction then pulls the digits up
+/// against it. Split, the literal is not a number token at all -- it lexes as
+/// `1`, the *name* `D`, `+`, `1` -- so the case rule had nothing to case and
+/// waited for the token the blank's closing left behind. That is one run too
+/// late, and `a = 1D+ 1` needed two to settle. Both halves now decide from
+/// `exponent_before`, so neither can see an exponent the other does not.
+fn exponent_marker(
+    line: &[u8],
+    tokens: &[crate::source::Token<'_>],
+    index: usize,
+) -> Option<usize> {
+    let token = &tokens[index];
+    if let Some(marker) = real_exponent_marker(token.text) {
+        return Some(token.span.start + marker);
+    }
+    // `1` `D` `+` `1`, each token hard against the last. The gap the pass is
+    // about to close is the one *after* the sign, so only these joins are
+    // required here; `exponent_before` supplies the rest of the shape, which is
+    // the marker letter and a digit or `.` before it.
+    let mut marker_index = index + 1;
+    // The mantissa is not always one token: a trailing `.` with no digits after
+    // it is not part of the number, so `1.E-` lexes as `1` `.` `E` `-`. Only a
+    // `.` may intervene. Anything else -- a `.and.` between the number and a
+    // name, say -- is not a literal being assembled, and casing its `E` would
+    // rename an identifier rather than spell a marker.
+    if tokens
+        .get(marker_index)
+        .is_some_and(|dot| dot.text == b"." && dot.span.start == token.span.end)
+    {
+        marker_index += 1;
+    }
+    let marker = tokens.get(marker_index)?;
+    let sign = tokens.get(marker_index + 1)?;
+    let digits = tokens.get(marker_index + 2)?;
+    if marker.kind != TokenKind::Name
+        || marker.text.len() != 1
+        || marker.span.start != tokens[marker_index - 1].span.end
+        || !matches!(sign.text, b"+" | b"-")
+        || sign.span.start != marker.span.end
+        || !exponent_before(line, sign.span.start)
+    {
+        return None;
+    }
+    // The exponent's own digits, which `real_exponent_marker` demands of the
+    // joined spelling too. Without them there is no exponent and no blank to
+    // close: `1D+ x` is a `D`-suffixed literal plus a name, and stays as written.
+    if digits.kind != TokenKind::Number || !digits.text.first().is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+    Some(marker.span.start)
+}
+
 fn real_exponent_marker(number: &[u8]) -> Option<usize> {
     let mut index = 0;
     let mut digits = 0;
@@ -624,28 +682,37 @@ fn is_spaced_dotted_operator(token: &[u8]) -> bool {
         .any(|operator| token.eq_ignore_ascii_case(operator))
 }
 
+/// Whether a relational operator token is written with a space on each side.
+///
+/// A single-character operator glued to another operator byte is left alone: the
+/// pair is more likely to be one thing this rule does not model than two things
+/// it does, and `a<<b` is better left as written than pulled apart a character at
+/// a time.
+///
+/// That guard reads the bytes beside the token, which is the whitespace the
+/// *previous* run of this pass wrote. It is therefore only stable while the pass
+/// leaves those bytes alone, and `run_separates` is how the caller says it will
+/// not: when any other operator in the same glued run is being spaced, the run is
+/// coming apart on this pass whatever this token decides, and a token that
+/// declined would be spaced by the next run once its neighbour had moved away.
+/// See [`super::case::operator_verdicts`], which computes the flag.
 fn is_spaced_operator_token(
     line: &[u8],
-    _tokens: &[crate::source::Token<'_>],
-    _index: usize,
     token: &crate::source::Token<'_>,
+    run_separates: bool,
 ) -> bool {
     let start = token.span.start;
     let end = token.span.end;
+    let unglued = |before: &[u8], after: &[u8]| {
+        run_separates
+            || ((start == 0 || !before.contains(&line[start - 1]))
+                && (end == line.len() || !after.contains(&line[end])))
+    };
     match token.text {
         b"=>" | b"==" | b"/=" | b"<=" | b">=" => true,
-        b"<" => {
-            (start == 0 || !matches!(line[start - 1], b'=' | b'<' | b'>'))
-                && (end == line.len() || !matches!(line[end], b'<' | b'>'))
-        }
-        b">" => {
-            (start == 0 || !matches!(line[start - 1], b'=' | b'<' | b'>' | b'-'))
-                && (end == line.len() || !matches!(line[end], b'<' | b'>'))
-        }
-        b"=" => {
-            (start == 0 || !matches!(line[start - 1], b'<' | b'>' | b'=' | b'/'))
-                && (end == line.len() || !matches!(line[end], b'=' | b'>'))
-        }
+        b"<" => unglued(b"=<>", b"<>"),
+        b">" => unglued(b"=<>-", b"<>"),
+        b"=" => unglued(b"<>=/", b"=>"),
         _ => false,
     }
 }
@@ -714,11 +781,22 @@ fn dotted_operator_before(line: &[u8], end: usize) -> bool {
     start < dot && start > 0 && line[start - 1] == b'.'
 }
 
+/// Whether the `+` or `-` at `index` is a real literal's exponent sign, and so
+/// belongs to the literal rather than to the expression around it.
 fn exponent_before(line: &[u8], index: usize) -> bool {
-    index > 0
-        && matches!(line[index - 1], b'e' | b'E' | b'd' | b'D')
-        && index > 1
-        && (line[index - 2].is_ascii_digit() || line[index - 2] == b'.')
+    if index < 2 || !matches!(line[index - 1], b'e' | b'E' | b'd' | b'D') {
+        return false;
+    }
+    if line[index - 2].is_ascii_digit() {
+        return true;
+    }
+    // A mantissa may end in `.`, but the literal still needs a digit in it:
+    // `1.E-3` is a real and `.E-3` is not. The `.` that closes a dotted operator
+    // is not a mantissa at all -- `1.and.E-3` is `.and.` between a number and
+    // the name `E` -- and reading it as one made the sign an exponent's while
+    // the operator was still glued and an ordinary subtraction once it had been
+    // spaced, so the line took two runs to settle.
+    line[index - 2] == b'.' && index >= 3 && line[index - 3].is_ascii_digit()
 }
 
 #[derive(Default)]
@@ -726,6 +804,35 @@ struct OperatorSpacing {
     previous_end: Option<usize>,
     previous_trailing_space: bool,
     previous_compact_named: bool,
+    /// What the last operator was written as, for [`joining_retokenizes`].
+    previous_operator: Vec<u8>,
+}
+
+/// Whether writing `next` hard against `previous` changes where the boundary
+/// between them falls.
+///
+/// Asked with the lexer rather than a table of pairs, because the question is
+/// exactly what the *next* run of the formatter will see, and that is whatever
+/// the lexer says.
+///
+/// The question is boundary preservation, not token count. Counting was the
+/// first thing tried and it is not enough: `=` and `==` written together spell
+/// `===`, which is still two tokens, but they are `==` and `=` -- a different
+/// pair, which the next run spaces differently. `*` and `**` are the same trap
+/// one operator longer, and it cost `x * * ** 1` its fixed point. Both are
+/// caught by asking whether the two tokens come back out where they went in.
+fn joining_retokenizes(previous: &[u8], next: &[u8]) -> bool {
+    if previous.is_empty() || next.is_empty() {
+        return false;
+    }
+    let mut joined = Vec::with_capacity(previous.len() + next.len());
+    joined.extend_from_slice(previous);
+    joined.extend_from_slice(next);
+    let tokens = tokenize(&joined, &mut LexState::default());
+    !(tokens.len() == 2
+        && tokens[0].span.start == 0
+        && tokens[0].span.end == previous.len()
+        && tokens[1].span.end == joined.len())
 }
 
 fn add_operator_edit(
@@ -734,6 +841,7 @@ fn add_operator_edit(
     token: &crate::source::Token<'_>,
     operator: &[u8],
     spaced: bool,
+    next: Option<&[u8]>,
     spacing: &mut OperatorSpacing,
 ) {
     let floor = spacing.previous_end.unwrap_or(0);
@@ -745,14 +853,29 @@ fn add_operator_edit(
     while right < line.len() && line[right].is_ascii_whitespace() {
         right += 1;
     }
+    // The blank after a compact operator is this edit's to swallow, and
+    // swallowing it must not spell a third token: `a/ /b` became `a//b`, which
+    // the next run lexes as one `//` and spaces. Leave the blank alone.
+    if !spaced && joining_retokenizes(operator, next.unwrap_or_default()) {
+        right = token.span.end;
+    }
     let abuts_previous = spacing.previous_end == Some(left);
     let suppress_leading_space =
         abuts_previous && (spacing.previous_trailing_space || spacing.previous_compact_named);
+    // The same rule on the other side of the gap: closing up to the operator
+    // *before* this one must not spell a third either. `f(a= = 1)` was written
+    // `f(a== 1)`, because the keyword argument's `=` is compact and this edit
+    // reaches back over the blank behind it, and the run after that lexes `==`
+    // as one operator and spaces it. A space is the smallest thing that keeps
+    // the two tokens two tokens.
+    let would_join = abuts_previous
+        && !spacing.previous_trailing_space
+        && joining_retokenizes(&spacing.previous_operator, operator);
     let mut replacement = Vec::new();
     if left == 0 {
         replacement.extend_from_slice(&line[..token.span.start]);
     }
-    if spaced && left > 0 && !suppress_leading_space {
+    if (spaced && left > 0 && !suppress_leading_space) || would_join {
         replacement.push(b' ');
     }
     replacement.extend_from_slice(operator);
@@ -763,6 +886,7 @@ fn add_operator_edit(
     spacing.previous_end = Some(right);
     spacing.previous_trailing_space = trailing;
     spacing.previous_compact_named = false;
+    spacing.previous_operator = operator.to_vec();
     edits.replace(left..right, &replacement);
 }
 
@@ -770,11 +894,17 @@ fn remove_operator_trailing_whitespace(
     line: &[u8],
     edits: &mut EditBuffer<'_>,
     token: &crate::source::Token<'_>,
+    next: Option<&[u8]>,
     spacing: &mut OperatorSpacing,
 ) {
     let mut end = token.span.end;
     while end < line.len() && line[end].is_ascii_whitespace() {
         end += 1;
+    }
+    // As in `add_operator_edit`: the blank this would remove is the only thing
+    // keeping two tokens from being read as one.
+    if joining_retokenizes(token.text, next.unwrap_or_default()) {
+        end = token.span.end;
     }
     if end > token.span.end && !is_trailing_continuation_marker(line, token.span.end) {
         edits.replace(token.span.end..end, b"");
@@ -784,6 +914,7 @@ fn remove_operator_trailing_whitespace(
     }
     spacing.previous_trailing_space = false;
     spacing.previous_compact_named = false;
+    spacing.previous_operator = token.text.to_vec();
 }
 
 fn is_trailing_continuation_marker(line: &[u8], start: usize) -> bool {

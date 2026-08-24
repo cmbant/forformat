@@ -127,6 +127,25 @@ struct Protected {
     well_formed: bool,
 }
 
+/// Trim spaces and tabs, and nothing else.
+///
+/// `trim_ascii` would also take `\x0b` and `\x0c`, which the emitter keeps: it
+/// normalizes *horizontal* whitespace around a directive and copies the rest of
+/// the line through byte for byte. Trimming more here than the emitter does
+/// would let a corrupted trailing form feed compare equal to an intact one, so
+/// the property would hold over bytes the formatter had actually changed.
+fn trim_horizontal(line: &[u8]) -> &[u8] {
+    let start = line
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t'))
+        .unwrap_or(line.len());
+    let end = line
+        .iter()
+        .rposition(|byte| !matches!(byte, b' ' | b'\t'))
+        .map_or(start, |last| last + 1);
+    &line[start..end]
+}
+
 fn protected(source: &[u8]) -> Protected {
     let mut literals: Vec<Literal> = Vec::new();
     let mut hollerith = Vec::new();
@@ -153,7 +172,7 @@ fn protected(source: &[u8]) -> Protected {
             // stream's state straight across it. Clearing the state here would
             // make the property disagree with the pipeline about where the
             // literal that opened before the `#if` ends.
-            preprocessor.push(line.trim_ascii().to_vec());
+            preprocessor.push(trim_horizontal(line).to_vec());
             continue;
         }
         let continued_literal = state.in_literal();

@@ -35,7 +35,10 @@ use crate::{
     error::FormatError,
     source::{
         regions::StreamLexStates,
-        syntax::{conditional_compilation_prefix, openmp_directive_prefix, SourceStream},
+        syntax::{
+            conditional_compilation_prefix, is_directive_comment, openmp_directive_prefix,
+            SourceStream,
+        },
         LogicalGroup, PhysicalLineKind, SourceBuffer,
     },
     transform::{document::Document, pipeline},
@@ -938,13 +941,19 @@ fn detach_final_inline_comment<B: AsRef<[u8]>>(
     // reads it at column zero and applies the directive case rule normalization
     // never had cause to apply inline.
     //
-    // The test is the whole reserved `!$` prefix rather than the sentinels this
-    // crate happens to parse, because being wrong in the two directions costs
-    // very different amounts. Refusing one comment leaves it inline, which is
-    // where the author put it. Manufacturing a sentinel this crate does not
-    // model — `!$acc` is the live example — hands a directive to a compiler
-    // that does model it, attached to whichever statement the comment trailed.
-    if text.starts_with(b"!$") {
+    // The test is `is_directive_comment`, which is what every other reader here
+    // uses to decide that a comment is really a directive, so this refusal and
+    // that recognition cannot drift apart. It is deliberately wider than the
+    // sentinels this crate parses: it covers the whole reserved `!$` prefix, so
+    // `!$acc` is refused even though nothing here models OpenACC, and the vendor
+    // prefixes `!DIR$`, `!DEC$` and `!GCC$` besides. Being wrong in the two
+    // directions costs very different amounts. Refusing one comment leaves it
+    // inline, which is where the author put it. Manufacturing a directive hands
+    // one to a compiler that does model it, attached to whichever statement the
+    // comment happened to trail — and `!DEC$ ATTRIBUTES` names the entity it
+    // sits on, so moving it does not merely relocate a directive, it retargets
+    // it.
+    if is_directive_comment(text) {
         return None;
     }
     let mut comment = vec![b' '; comment_indent];

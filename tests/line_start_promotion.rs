@@ -94,6 +94,32 @@ fn a_bare_continuation_line_keeps_its_marker() {
     assert_eq!(full(&once), once);
 }
 
+/// The sentinels this crate parses are not the only ones a compiler acts on.
+/// `&!$acc loop` and `&!DEC$ ATTRIBUTES ...` are continuation content, and
+/// dropping the marker leaves an active OpenACC or Intel directive at column
+/// zero — the second of which names the entity it sits on, so promoting it
+/// retargets it rather than merely moving it.
+#[test]
+fn a_continuation_body_is_never_promoted_to_an_unmodelled_directive() {
+    for body in [
+        b"!$acc loop".as_slice(),
+        b"!DEC$ ATTRIBUTES ALIGN: 64 :: b",
+        b"!dir$ vector always",
+        b"!GCC$ unroll 4",
+    ] {
+        let mut source = b"x = 1 + &\n&".to_vec();
+        source.extend_from_slice(body);
+        source.extend_from_slice(b"\n2\n");
+        let once = stable_without_promoted(&source, &[b"!$acc", b"!DEC$", b"!dir$", b"!GCC$"]);
+        assert!(
+            once.windows(body.len() + 1)
+                .any(|window| window[0] == b'&' && &window[1..] == body),
+            "expected the marker kept in {:?}",
+            String::from_utf8_lossy(&once),
+        );
+    }
+}
+
 /// A continuation body that is only a comment is genuinely safe to promote:
 /// `&! c` is already a continuation line carrying a trailing comment, so
 /// emitting `! c` changes neither the statement nor where the group ends.

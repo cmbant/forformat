@@ -190,6 +190,16 @@ pub(crate) enum LineStartSyntax {
     Conditional,
     /// `!$omp` or `!$ompx`: an OpenMP directive line.
     OpenMpDirective,
+    /// A directive comment this crate does not itself model: the rest of the
+    /// reserved `!$` space (`!$acc`), and the vendor prefixes `!DIR$`, `!DEC$`
+    /// and `!GCC$`. See [`is_directive_comment`].
+    ///
+    /// Not modelling one is the reason to be *more* careful with it, not less.
+    /// Refusing to move a comment costs a comment left where its author put it.
+    /// Promoting one hands a live directive to a compiler that does model it —
+    /// and `!DEC$ ATTRIBUTES` names the entity it sits on, so a promoted one is
+    /// not merely misplaced, it is retargeted.
+    DirectiveComment,
 }
 
 /// Classify what `line` commits to at its start. See [`LineStartSyntax`].
@@ -198,7 +208,9 @@ pub(crate) enum LineStartSyntax {
 /// conditional-compilation and OpenMP sentinels are examined before the plain
 /// `!` comment rule, because both begin with `!`, and the directive test comes
 /// before the code fallthrough because `SourceBuffer` decides `Preprocessor`
-/// before it decides `Code`.
+/// before it decides `Code`. The general directive-comment test comes last of
+/// the `!` tests, so the two sentinels this crate parses keep their own
+/// classification and it catches only what is left.
 pub(crate) fn line_start_syntax(line: &[u8]) -> LineStartSyntax {
     let Some(start) = line.iter().position(|byte| !matches!(byte, b' ' | b'\t')) else {
         return LineStartSyntax::Blank;
@@ -212,6 +224,8 @@ pub(crate) fn line_start_syntax(line: &[u8]) -> LineStartSyntax {
         LineStartSyntax::Conditional
     } else if openmp_directive_prefix(trimmed).is_some() {
         LineStartSyntax::OpenMpDirective
+    } else if is_directive_comment(trimmed) {
+        LineStartSyntax::DirectiveComment
     } else {
         LineStartSyntax::Ordinary
     }
