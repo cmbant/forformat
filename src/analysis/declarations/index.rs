@@ -276,9 +276,16 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
             // from the enclosing-scope registration above: it describes a
             // signature the project defines elsewhere, and its name has to stay
             // resolvable against that definition.
+            //
+            // A main program is excluded because neither justification reaches
+            // it: it has no result variable and cannot be referenced, so its
+            // name is global rather than local. Registering it only suppressed
+            // casing that should have applied — under `program data`, the
+            // `DATA` keyword of a `data eight /8/` statement stayed lowercase.
             if let Some(name) = scope
                 .name
                 .as_deref()
+                .filter(|_| scope.kind == ScopeKind::Procedure)
                 .filter(|_| !scopes.in_interface(scope.lines.start))
             {
                 header_names.push(name.to_vec());
