@@ -63,3 +63,12 @@ fn separator_normalization_survives_canonicalize_only() {
         b"\tx = 1 ;; y = 2 ;\n"
     );
 }
+
+#[test]
+fn conditional_continuation_semicolon_is_idempotent() {
+    let source = b"subroutine s\n!$ x = &\n!$ & 6 + &\n   ' !comment\n!$ & ; + &\n!$ 8\nend\n";
+    let config = FormatConfig::default();
+    let once = format_source(source, &config).unwrap().bytes;
+    let twice = format_source(&once, &config).unwrap().bytes;
+    assert_eq!(once, twice);
+}

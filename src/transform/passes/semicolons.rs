@@ -16,6 +16,12 @@ use crate::{
     },
 };
 
+fn has_statement_content(statement: &[u8]) -> bool {
+    statement
+        .iter()
+        .any(|byte| !byte.is_ascii_whitespace() && *byte != b'&')
+}
+
 /// Remove semicolons that delimit no statement, keeping exactly one separator
 /// between every adjacent pair of non-empty logical statements.
 pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
@@ -27,9 +33,14 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             continue;
         }
 
+        // A bare continuation marker is syntax, not a statement. It can appear
+        // as its own range when the other source stream physically interrupts a
+        // continued statement. Step 12 removes that marker later, so counting
+        // it here would make this pass see a different separator on the next run.
         let statement_ranges = group
             .statements
             .iter()
+            .filter(|statement| has_statement_content(&statement.text))
             .map(|statement| statement.offset..statement.offset + statement.text.len())
             .collect::<Vec<_>>();
         let mut separators = Vec::new();
@@ -55,7 +66,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             }
         }
 
-        let mut kept_internal = vec![false; group.statements.len().saturating_sub(1)];
+        let mut kept_internal = vec![false; statement_ranges.len().saturating_sub(1)];
         for (joined_offset, line, line_offset) in separators {
             let internal_gap = statement_ranges
                 .windows(2)
