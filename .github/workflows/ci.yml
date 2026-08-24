@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   checks:
     uses: ./.github/workflows/rust-checks.yml
@@ -17,7 +20,13 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-      - run: cargo build --locked --release
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-auditable@0.7.5
+      - run: cargo auditable build --locked --release
+      - name: Verify embedded dependency metadata
+        shell: bash
+        run: readelf -S target/release/forformat | grep -F .dep-v0
       - run: ./tools/check_cli_contract.sh target/release/forformat
       - run: ./tools/check_release.sh target/release/forformat | tee target/release-metrics.txt
       - run: ./tools/check_package.sh
@@ -47,37 +56,84 @@ jobs:
       - run: cargo check --locked --target ${{ matrix.target }} --all-targets
 
   static-artifacts:
-    name: static artifact
+    name: static Linux artifact (${{ matrix.target }})
     needs: checks
     if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - x86_64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+          target: ${{ matrix.target }}
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
       - uses: taiki-e/install-action@v2
         with:
-          tool: cross
-      - run: CARGO_TARGET_DIR=target/repro-a cross build --locked --release --target ${{ matrix.target }}
-      - run: CARGO_TARGET_DIR=target/repro-b cross build --locked --release --target ${{ matrix.target }}
-      - run: test "$(sha256sum target/repro-a/${{ matrix.target }}/release/forformat | awk '{print $1}')" = "$(sha256sum target/repro-b/${{ matrix.target }}/release/forformat | awk '{print $1}')"
-      - run: |
-          artifact=target/repro-a/${{ matrix.target }}/release/forformat
-          hash=$(sha256sum "$artifact" | awk '{print $1}')
-          printf '%s  %s\n' "$hash" "$(basename "$artifact")" > "$(dirname "$artifact")/forformat.sha256"
+          tool: cargo-auditable@0.7.5
+      - name: Verify release tag matches the package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)
+          test "$GITHUB_REF_NAME" = "v$version"
+      - run: CARGO_TARGET_DIR=target/repro-a cargo auditable build --locked --release --target ${{ matrix.target }}
+      - run: CARGO_TARGET_DIR=target/repro-b cargo auditable build --locked --release --target ${{ matrix.target }}
+      - name: Verify auditable and reproducible binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          a=target/repro-a/${{ matrix.target }}/release/forformat
+          b=target/repro-b/${{ matrix.target }}/release/forformat
+          readelf -S "$a" | grep -F .dep-v0
+          readelf -S "$b" | grep -F .dep-v0
+          test "$(sha256sum "$a" | awk '{print $1}')" = "$(sha256sum "$b" | awk '{print $1}')"
+      - name: Package deterministic release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          target=${{ matrix.target }}
+          root=target/release-package
+          directory="forformat-$target"
+          archive="$root/$directory.tar.gz"
+          check_archive="$root/$directory.repro.tar.gz"
+          source_date_epoch=$(git log -1 --format=%ct)
+
+          mkdir -p "$root/$directory"
+          install -m 0755 "target/repro-a/$target/release/forformat" "$root/$directory/forformat"
+          cp LICENSE LICENSE-THIRD-PARTY NOTICE README.md "$root/$directory/"
+
+          make_archive() {
+            output=$1
+            tar \
+              --sort=name \
+              --mtime="@$source_date_epoch" \
+              --owner=0 \
+              --group=0 \
+              --numeric-owner \
+              -C "$root" \
+              -cf - "$directory" | gzip -n > "$output"
+          }
+
+          make_archive "$archive"
+          make_archive "$check_archive"
+          cmp "$archive" "$check_archive"
+          rm "$check_archive"
+          (cd "$root" && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
       - uses: actions/upload-artifact@v7
         with:
-          name: forformat-${{ matrix.target }}
+          name: linux-release-${{ matrix.target }}
           path: |
-            target/repro-a/${{ matrix.target }}/release/forformat
-            target/repro-a/${{ matrix.target }}/release/forformat.sha256
+            target/release-package/forformat-${{ matrix.target }}.tar.gz
+            target/release-package/forformat-${{ matrix.target }}.tar.gz.sha256
 
   windows-artifact:
     name: Windows release artifact
@@ -115,21 +171,91 @@ jobs:
             target/repro-a/x86_64-pc-windows-msvc/release/forformat.exe.sha256
 
   artifact-verification:
-    name: verify uploaded release artifacts
+    name: verify Linux release artifacts
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [static-artifacts, windows-artifact]
+    needs: static-artifacts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
         with:
-          pattern: forformat-*
+          pattern: linux-release-*
           path: artifacts
+          merge-multiple: true
       - name: Verify artifact checksums
         shell: bash
         run: |
           set -euo pipefail
-          sidecars=$(find artifacts -type f -name '*.sha256' -print)
-          test -n "$sidecars"
-          while IFS= read -r sidecar; do
-            (cd "$(dirname "$sidecar")" && sha256sum -c "$(basename "$sidecar")")
-          done <<< "$sidecars"
+          shopt -s nullglob
+          archives=(artifacts/*.tar.gz)
+          sidecars=(artifacts/*.tar.gz.sha256)
+          test "${#archives[@]}" -eq 2
+          test "${#sidecars[@]}" -eq 2
+          for archive in "${archives[@]}"; do
+            sidecar="$archive.sha256"
+            test -f "$sidecar"
+            (cd artifacts && sha256sum -c "$(basename "$sidecar")")
+          done
+      - name: Smoke-test x86_64 archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive=artifacts/forformat-x86_64-unknown-linux-musl.tar.gz
+          mkdir smoke
+          tar -xzf "$archive" -C smoke
+          binary=smoke/forformat-x86_64-unknown-linux-musl/forformat
+          test -x "$binary"
+          output=$("$binary" --version)
+          case "$output" in
+            *"${GITHUB_REF_NAME#v}"*) ;;
+            *) echo "unexpected version output: $output" >&2; exit 1 ;;
+          esac
+          readelf -S "$binary" | grep -F .dep-v0
+
+  publish-linux-release:
+    name: publish Linux GitHub release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: artifact-verification
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: linux-release-*
+          path: artifacts
+          merge-multiple: true
+      - name: Re-verify checksums before publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          archives=(artifacts/*.tar.gz)
+          sidecars=(artifacts/*.tar.gz.sha256)
+          test "${#archives[@]}" -eq 2
+          test "${#sidecars[@]}" -eq 2
+          for archive in "${archives[@]}"; do
+            sidecar="$archive.sha256"
+            test -f "$sidecar"
+            (cd artifacts && sha256sum -c "$(basename "$sidecar")")
+          done
+      - name: Attest release archives
+        uses: actions/attest@v4
+        with:
+          subject-path: artifacts/*.tar.gz
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" artifacts/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              artifacts/* \
+              --verify-tag \
+              --generate-notes \
+              --title "forformat $GITHUB_REF_NAME"
+          fi
