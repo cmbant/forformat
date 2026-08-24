@@ -3,6 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+const CANONICALIZE_INDENT: &str = "--canonicalize-and-indent";
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct ConfigArguments {
     pub args: Vec<String>,
@@ -320,7 +322,7 @@ fn read_config(
                 "indent-only" | "indent_only" => "--indent-only",
                 "normalize-only" | "normalize_only" => "--normalize-only",
                 "canonicalize-only" | "canonicalize_only" => "--canonicalize-only",
-                "canonicalize-and-indent" | "canonicalize_and_indent" => "--canonicalize-and-indent",
+                "canonicalize-and-indent" | "canonicalize_and_indent" => CANONICALIZE_INDENT,
                 other => {
                     return Err(crate::error::FormatError::InvalidOption(format!(
                         "configuration key `mode` in {} has unknown value `{other}`",
@@ -589,7 +591,7 @@ mod tests {
     fn style_keys_load_from_the_standalone_toml_shape() {
         let config = config_from_text(
             "style-options",
-            "keyword_case = 'upper'\nopenmp-case = false\nrelational_symbols = false\ncompact_multiplicative = false\narray-brackets = false\njoin-goto = false\nsplit-compound-keywords = false\nstrip_empty_args = false\nremove-redundant-parens = false\nnormalize-semicolons = false\nremove_terminal_return = false\nprogram-unit-spacing = false\nmax_blank_lines = 'preserve'\ndelimiter-spacing = false\ncomment_spacing = false\ncontinuation-markers = false\n",
+            "keyword_case = 'upper'\nopenmp-case = false\nrelational_symbols = false\ncompact_multiplicative = false\narray-brackets = false\njoin-goto = false\nsplit-compound-keywords = false\nstrip_empty_args = false\nremove-redundant-parens = false\nnormalize-semicolons = false\nremove_terminal_return = false\nprogram_unit_spacing = false\nmax_blank_lines = 'preserve'\ndelimiter-spacing = false\ncomment_spacing = false\ncontinuation-markers = false\n",
         );
         assert_eq!(config.style.keyword_case, KeywordCase::Upper);
         assert!(!config.style.openmp_case);
