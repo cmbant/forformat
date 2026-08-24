@@ -41,13 +41,7 @@ where
             if value == "none" {
                 draft.config.apply_indent = false
             } else {
-                draft.config.indent = parse_num(&value)?;
-                draft.config.construct_indents.set_all(draft.config.indent);
-                draft.config.contains_indent = draft.config.indent;
-                draft.config.continuation_indent = draft.config.indent;
-                draft.config.case_indent =
-                    draft.config.indent.saturating_sub(draft.config.indent / 2);
-                draft.config.entry_indent = draft.config.case_indent
+                draft.config.set_indent(parse_num(&value)?);
             }
         }
         OptionId::StartIndent => {

@@ -255,6 +255,21 @@ pub struct FormatConfig {
     pub align_comments: bool,
 }
 
+impl FormatConfig {
+    /// Apply the derived indentation defaults associated with `-i N` / `--indent N`.
+    ///
+    /// Individual construct/continuation options may still override these later;
+    /// this only centralizes the shared baseline those two CLI spellings establish.
+    pub(crate) fn set_indent(&mut self, indent: usize) {
+        self.indent = indent;
+        self.construct_indents.set_all(indent);
+        self.contains_indent = indent;
+        self.continuation_indent = indent;
+        self.case_indent = indent.saturating_sub(indent / 2);
+        self.entry_indent = self.case_indent;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstructIndents {
     pub associate: usize,

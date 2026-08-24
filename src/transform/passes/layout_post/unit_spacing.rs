@@ -92,7 +92,7 @@ pub fn program_unit_spacing(
         }
         cpp_continuation = false;
 
-        let code = code_context(line);
+        let code = code_before_comment(line);
         let info = classify(code);
         let is_blank = line.iter().all(u8::is_ascii_whitespace);
         if pending.is_owed() {
@@ -187,33 +187,21 @@ fn is_program_unit_header(info: &StatementInfo, code: &[u8], type_depth: usize) 
 /// `module procedure` is the only `StatementKind::Procedure` that opens a unit
 /// for this spacing pass; an ordinary `procedure name` remains a declaration.
 fn is_module_procedure_header(code: &[u8]) -> bool {
-    let code = trimmed(code);
+    let code = code.trim_ascii();
     if !first_word(code).is_some_and(|word| word.eq_ignore_ascii_case(b"module")) {
         return false;
     }
     let first_len = first_word(code).map_or(0, <[u8]>::len);
-    let rest = skip_ascii_whitespace(&code[first_len..]);
+    let rest = code[first_len..].trim_ascii_start();
     first_word(rest).is_some_and(|word| word.eq_ignore_ascii_case(b"procedure"))
 }
 
-fn code_context(line: &[u8]) -> &[u8] {
+fn code_before_comment(line: &[u8]) -> &[u8] {
     comment_start(line).map_or(line, |index| &line[..index])
 }
 
-fn trimmed(code: &[u8]) -> &[u8] {
-    let mut start = 0;
-    let mut end = code.len();
-    while start < end && code[start].is_ascii_whitespace() {
-        start += 1;
-    }
-    while end > start && code[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    &code[start..end]
-}
-
 fn first_word(code: &[u8]) -> Option<&[u8]> {
-    let code = trimmed(code);
+    let code = code.trim_ascii();
     let end = code
         .iter()
         .position(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
@@ -221,16 +209,8 @@ fn first_word(code: &[u8]) -> Option<&[u8]> {
     (end > 0).then_some(&code[..end])
 }
 
-fn skip_ascii_whitespace(code: &[u8]) -> &[u8] {
-    let start = code
-        .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
-        .unwrap_or(code.len());
-    &code[start..]
-}
-
 fn is_program_unit_end(code: &[u8]) -> bool {
-    let code = trimmed(code);
+    let code = code.trim_ascii();
     if code.eq_ignore_ascii_case(b"end") {
         return true;
     }
@@ -241,12 +221,12 @@ fn is_program_unit_end(code: &[u8]) -> bool {
     {
         return false;
     }
-    let rest = skip_ascii_whitespace(&code[4..]);
+    let rest = code[4..].trim_ascii_start();
     let Some(word) = first_word(rest) else {
         return false;
     };
     if word.eq_ignore_ascii_case(b"block") {
-        let rest = skip_ascii_whitespace(&rest[word.len()..]);
+        let rest = rest[word.len()..].trim_ascii_start();
         return first_word(rest).is_some_and(|second| second.eq_ignore_ascii_case(b"data"));
     }
     word.eq_ignore_ascii_case(b"module")
@@ -258,35 +238,35 @@ fn is_program_unit_end(code: &[u8]) -> bool {
 }
 
 fn is_procedure_end(code: &[u8]) -> bool {
-    let code = trimmed(code);
+    let code = code.trim_ascii();
     if !code
         .get(..3)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"end"))
     {
         return false;
     }
-    let rest = skip_ascii_whitespace(&code[3..]);
+    let rest = code[3..].trim_ascii_start();
     first_word(rest).is_some_and(|word| word.eq_ignore_ascii_case(b"procedure"))
 }
 
 fn is_type_definition_end(code: &[u8]) -> bool {
-    let code = trimmed(code);
+    let code = code.trim_ascii();
     code.get(..3)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"end"))
         && code.get(3..).is_some_and(|rest| {
-            let rest = skip_ascii_whitespace(rest);
+            let rest = rest.trim_ascii_start();
             first_word(rest).is_some_and(|word| word.eq_ignore_ascii_case(b"type"))
         })
 }
 
 fn is_interface_end(code: &[u8]) -> bool {
-    let code = trimmed(code);
+    let code = code.trim_ascii();
     if !code
         .get(..3)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"end"))
     {
         return false;
     }
-    let rest = skip_ascii_whitespace(&code[3..]);
+    let rest = code[3..].trim_ascii_start();
     first_word(rest).is_some_and(|word| word.eq_ignore_ascii_case(b"interface"))
 }
