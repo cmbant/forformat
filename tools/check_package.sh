@@ -54,6 +54,8 @@ for entry in Cargo.toml \
              LICENSE-THIRD-PARTY \
              NOTICE \
              src/main.rs \
+             tests/fixtures/corpus_active_abinit_data.F90 \
+             tests/fixtures/corpus_active_cp2k_openmp_expr.F \
              tests/fixtures/construct_options.f90 \
              tests/fixtures/align_legacy_full.f90 \
              tests/fixtures/legacy_free_matrix.f90 \

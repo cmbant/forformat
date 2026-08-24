@@ -61,9 +61,8 @@ fn read_config(
     table_path: Option<&str>,
 ) -> Result<ConfigArguments, crate::error::FormatError> {
     let text = fs::read_to_string(path).map_err(|error| config_error(path, error))?;
-    let document = text
-        .parse::<toml::Value>()
-        .map_err(|error| config_error(path, error))?;
+    let document =
+        toml::from_str::<toml::Value>(&text).map_err(|error| config_error(path, error))?;
     let table = if let Some(table_path) = table_path {
         let mut value = &document;
         for component in table_path.split('.') {
