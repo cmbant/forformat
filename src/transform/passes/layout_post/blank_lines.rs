@@ -30,7 +30,16 @@ pub fn limit_blank_lines(
         cpp_continuation = false;
         if line.iter().any(|byte| !byte.is_ascii_whitespace()) {
             blank_count = 0;
-            statement_continuation = statement_continues(line);
+            // A comment carries no statement of its own, so it neither opens a
+            // continuation nor closes one: a comment sitting between a `&` and
+            // the line it continues leaves the statement exactly as open as it
+            // found it. Recomputing the flag from the comment instead would
+            // clear it and expose the following blank to the cap, which is the
+            // same mistake for the same statement. Preprocessor lines are
+            // passed over above and keep the flag for the same reason.
+            if let Some(continues) = statement_continues(line) {
+                statement_continuation = continues;
+            }
             limited.push(line.clone());
         } else if statement_continuation || blank_count < max_blank_lines {
             // A blank line between a `&` and the line it continues is part of
@@ -48,7 +57,10 @@ pub fn limit_blank_lines(
 
 /// Whether `line` leaves a Fortran statement open, so that a blank line after
 /// it belongs to that statement.
-fn statement_continues(line: &[u8]) -> bool {
+///
+/// `None` for a comment-only line, which says nothing either way and leaves
+/// the caller's answer standing.
+fn statement_continues(line: &[u8]) -> Option<bool> {
     // A continuation ampersand is the last nonblank character of the statement
     // part, which a trailing comment may follow.
     let mut state = crate::source::regions::LexState::default();
@@ -57,5 +69,9 @@ fn statement_continues(line: &[u8]) -> bool {
         .into_iter()
         .find(|region| region.kind == crate::source::regions::RegionKind::Comment)
         .map_or(line.len(), |comment| comment.range.start);
-    line[..code_end].trim_ascii_end().last() == Some(&b'&')
+    let code = line[..code_end].trim_ascii_end();
+    if code.is_empty() {
+        return None;
+    }
+    Some(code.last() == Some(&b'&'))
 }

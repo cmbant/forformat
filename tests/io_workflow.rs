@@ -1,4 +1,4 @@
-use forformat::io::{repository_root, tracked_sources};
+use forformat::io::{repository_root, tracked_sources, validate_extension};
 use std::{
     fs,
     io::Write,
@@ -698,7 +698,9 @@ fn stdin_and_file_routes_produce_identical_bytes_for_the_same_source() {
         fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == "f90"))
+            // The tool's own predicate, so the route comparison covers every
+            // fixture it would accept — `.F90` and `.F` included.
+            .filter(|path| validate_extension(path).is_ok())
             .collect();
     fixtures.sort();
 

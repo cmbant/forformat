@@ -1,5 +1,6 @@
 use forformat::{
     format_source, format_to, format_to_owned,
+    io::validate_extension,
     source::{
         regions::{map_code, regions, LexState},
         LogicalGroup, RegionKind, SourceBuffer,
@@ -7,6 +8,29 @@ use forformat::{
     FormatConfig, FormatMode, KeywordCase, StyleConfig,
 };
 use std::{fs, path::PathBuf};
+
+/// Every checked-in fixture the formatter would accept as a source, in a
+/// stable order.
+///
+/// The predicate is the tool's own, so a fixture is swept exactly when
+/// `forformat` would agree to format it. Matching on the literal `"f90"` used
+/// to leave the `.F90` and `.F` fixtures — the reduced corpus cases, which are
+/// the ones most likely to regress — outside every sweep in this file.
+fn fixture_sources() -> Vec<PathBuf> {
+    let mut fixtures: Vec<PathBuf> =
+        fs::read_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| validate_extension(path).is_ok())
+            .collect();
+    fixtures.sort();
+    assert!(
+        fixtures.len() > 50,
+        "fixture discovery found only {}",
+        fixtures.len()
+    );
+    fixtures
+}
 
 fn indent_only_config() -> FormatConfig {
     FormatConfig {
@@ -627,12 +651,7 @@ fn style_profiles_are_fixed_points_across_checked_in_fixtures() {
         unit_preserve,
         unlimited,
     ];
-    let mut fixtures: Vec<_> = fs::read_dir("tests/fixtures")
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "f90"))
-        .collect();
-    fixtures.sort();
+    let fixtures = fixture_sources();
     for style in profiles {
         let config = FormatConfig {
             style,
@@ -1412,15 +1431,7 @@ fn keyword_case_mutations_preserve_fixture_indent_depth() {
 
 #[test]
 fn case_and_spacing_mutations_of_every_fixture_are_fixed_points() {
-    let mut fixtures: Vec<PathBuf> =
-        fs::read_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures"))
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == "f90"))
-            .collect();
-    fixtures.sort();
-
-    for fixture in fixtures {
+    for fixture in fixture_sources() {
         let source = fs::read(&fixture).unwrap();
         for (name, mutated) in [
             ("case", mutate_fixture(&source, Mutation::Case)),

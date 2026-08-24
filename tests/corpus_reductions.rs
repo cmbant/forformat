@@ -326,3 +326,80 @@ fn a_data_statement_slash_is_not_a_division() {
     )
     .contains("x = a/b"));
 }
+
+/// A main program's name is global, not a name declared in its own scope, so
+/// registering it suppressed casing that should have applied: under
+/// `program data`, the `DATA` keyword of a data statement stayed lowercase.
+/// A procedure's name still registers — that is what
+/// [`an_external_procedure_name_is_not_the_intrinsic_it_spells`] needs.
+#[test]
+fn a_main_program_name_does_not_shadow_the_keyword_it_spells() {
+    let output = fixed_point(
+        b"program data\ninteger :: eight\ndata eight /8/\nprint *, eight\nend program data\n",
+        &upper(),
+    );
+
+    assert!(output.contains("DATA eight /8/"), "{output}");
+
+    // The same for an intrinsic a main program happens to be named after.
+    let output = fixed_point(
+        b"program erf\nreal :: x, y\nx = 1.0\ny = erf(x)\nend program erf\n",
+        &upper(),
+    );
+
+    assert!(output.contains("y = ERF(x)"), "{output}");
+}
+
+/// Fortran keywords are not reserved, so `data` at the head of a statement is
+/// not proof of a `DATA` statement: `data = a/b` assigns to a variable, and
+/// its slash is an ordinary division that the active policy still spaces.
+#[test]
+fn a_variable_named_data_is_not_a_data_statement() {
+    let output = fixed_point(
+        b"subroutine p(a, b, data, i)\nreal :: a, b, data(10)\ninteger :: i\ndata = a / b\ndata(i) = a / b\ndata(1) = a / b + data(2) / a\nend subroutine p\n",
+        &FormatConfig::default(),
+    );
+
+    assert!(output.contains("data = a/b"), "{output}");
+    assert!(output.contains("data(i) = a/b"), "{output}");
+    assert!(output.contains("data(1) = a/b + data(2)/a"), "{output}");
+
+    // An implied-do control's `=` sits inside the implied-do, so it does not
+    // make a real `DATA` statement look like an assignment.
+    let output = fixed_point(
+        b"subroutine p\ninteger :: k(3), i\ndata (k(i), i=1,3) /1, 2, 3/\nend subroutine p\n",
+        &FormatConfig::default(),
+    );
+
+    assert!(output.contains("/1, 2, 3/"), "{output}");
+}
+
+/// A comment between a `&` and the line it continues leaves the statement as
+/// open as it found it. Recomputing the continuation flag from the comment
+/// cleared it, so the blank after it was capped away — the same statement, and
+/// the same mistake, as
+/// [`a_blank_line_inside_a_continued_statement_is_not_a_separator`].
+#[test]
+fn a_comment_inside_a_continued_statement_does_not_close_it() {
+    let config = FormatConfig {
+        style: forformat::StyleConfig {
+            max_blank_lines: Some(0),
+            ..forformat::StyleConfig::default()
+        },
+        ..FormatConfig::default()
+    };
+    let output = fixed_point(
+        b"subroutine p(alpha, beta, gamma, delta)\nreal :: alpha, beta, gamma, delta\nalpha = beta + &\n! why this term is here\n\ngamma + delta\nend subroutine p\n",
+        &config,
+    );
+
+    assert!(output.contains("here\n\n"), "{output}");
+
+    // A blank between two statements is still a separator, and still capped.
+    let output = fixed_point(
+        b"subroutine p(a, b)\nreal :: a, b\na = 1.0\n! an unrelated remark\n\nb = 2.0\nend subroutine p\n",
+        &config,
+    );
+
+    assert!(output.contains("remark\n   b = 2.0"), "{output}");
+}

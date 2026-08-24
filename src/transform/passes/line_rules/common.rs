@@ -345,10 +345,33 @@ pub(super) fn is_named_parameter_token(tokens: &[crate::source::Token<'_>], inde
 /// A `DATA` statement's slashes delimit its value lists — `DATA EIGHT/8.0D0/`
 /// — and a data-stmt-constant is a literal, not an expression, so no top-level
 /// slash in one is a division.
+///
+/// Fortran keywords are not reserved, so the leading spelling is not enough:
+/// `data = a/b` and `data(i) = a/b` are assignments to a variable that happens
+/// to be called `data`, and their slashes are ordinary divisions. What
+/// separates them is the assignment itself. A `DATA` statement is a list of
+/// objects and slash-delimited values; the only `=` it can contain belongs to
+/// an implied-do control, which is inside the parentheses of the implied-do.
+/// So a depth-zero `=` — or `=>`, for a pointer assignment — means the
+/// statement is an assignment, whatever its first word says.
 pub(super) fn is_data_statement(tokens: &[crate::source::Token<'_>]) -> bool {
-    tokens
-        .get(first_statement_index(tokens))
+    let first = first_statement_index(tokens);
+    if !tokens
+        .get(first)
         .is_some_and(|token| token.is_name(b"data"))
+    {
+        return false;
+    }
+    !tokens.iter().skip(first + 1).any(is_top_level_assignment)
+}
+
+/// Whether `token` is the `=` or `=>` of an assignment rather than part of a
+/// larger operator: `==`, `/=`, `<=` and `>=` are comparisons, and anything
+/// inside parentheses belongs to an argument or an implied-do control.
+fn is_top_level_assignment(token: &crate::source::Token<'_>) -> bool {
+    token.depth == 0
+        && token.kind == TokenKind::Operator
+        && (token.text == b"=" || token.text == b"=>")
 }
 
 /// The statement's I/O keyword, when it opens the statement or follows an
