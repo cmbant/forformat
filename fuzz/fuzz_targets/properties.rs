@@ -4,31 +4,50 @@ use forformat::source::{regions::line_regions, LexState, RegionKind};
 use forformat::{format_source, FormatConfig, FormatMode};
 use libfuzzer_sys::fuzz_target;
 
-/// Did this literal region reach a closing delimiter?
-///
-/// The region is either a whole literal (`'abc'`) or the tail of one continued
-/// from an earlier line (`&def'`), so only the closing byte is a reliable
-/// signal; a lone `'` opening an unterminated literal has nothing after it.
-fn is_closed_literal(raw: &[u8]) -> bool {
-    raw.len() >= 2 && matches!(raw[raw.len() - 1], b'\'' | b'"')
+/// One character literal's bytes. The delimiter is part of the invariant: a
+/// formatter may split one literal for wrapping, but it must not silently change
+/// `'abc'` into `"abc"` or move bytes between unrelated literals.
+#[derive(Debug, PartialEq, Eq)]
+struct Literal {
+    delimiter: u8,
+    content: Vec<u8>,
 }
 
-/// One literal region's content, without its delimiters or the continuation
-/// marker that opens a continued tail.
-///
-/// A region is a whole literal (`'abc'`), the head of a continued one (`'abc`),
-/// or its tail (`&def'`), so both ends are stripped independently rather than
-/// assumed to be a matched pair.
-fn literal_content(raw: &[u8]) -> &[u8] {
-    let raw = raw.strip_prefix(b"&").unwrap_or(raw);
-    let raw = match raw.first() {
-        Some(b'\'' | b'"') => &raw[1..],
-        _ => raw,
-    };
-    match raw.last() {
-        Some(b'\'' | b'"') => &raw[..raw.len() - 1],
-        _ => raw,
+/// Drop the trailing `&` that continues an open character literal, plus any
+/// horizontal whitespace after it. Whitespace before the marker is still
+/// literal payload and must remain protected.
+fn without_trailing_continuation(raw: &[u8]) -> &[u8] {
+    let end = raw
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .map_or(0, |index| index + 1);
+    if end > 0 && raw[end - 1] == b'&' {
+        &raw[..end - 1]
+    } else {
+        raw
     }
+}
+
+/// Extract one region's literal payload without its syntactic delimiters or
+/// continuation markers. `continued` means the opening delimiter was on an
+/// earlier physical line; `continues` means this region leaves the literal open
+/// for the next line.
+fn literal_piece(raw: &[u8], delimiter: u8, continued: bool, continues: bool) -> (&[u8], bool) {
+    let mut raw = raw;
+    if continued {
+        raw = raw.trim_ascii_start();
+        raw = raw.strip_prefix(b"&").unwrap_or(raw);
+    } else if raw.first() == Some(&delimiter) {
+        raw = &raw[1..];
+    }
+
+    let closed = raw.last() == Some(&delimiter);
+    if closed {
+        raw = &raw[..raw.len() - 1];
+    } else if continues {
+        raw = without_trailing_continuation(raw);
+    }
+    (raw, closed)
 }
 
 /// The literal bytes full mode must carry through untouched.
@@ -48,14 +67,12 @@ fn literal_content(raw: &[u8]) -> &[u8] {
 /// corrupt its own answer identically and see nothing.
 #[derive(Debug, PartialEq, Eq)]
 struct Protected {
-    /// Every literal's content, concatenated in document order -- not a list of
-    /// regions. `docs/full-mode.md` documents that a long literal may split at a
-    /// whitespace boundary inside its content, which the wrapper emits as
-    /// `'two ' // &` / `'spac...'`. That turns one region into two while leaving
-    /// every payload byte in place, so a region-for-region comparison reports
-    /// documented behaviour as corruption. Concatenated content survives the
-    /// split and still catches a changed byte, which is what I3 is for.
-    literals: Vec<u8>,
+    /// Logical character literals in document order. A physical continuation
+    /// remains one entry, and the exact `'<piece>' // &` shape emitted by the
+    /// wrapper is folded back into that same entry on the following line. Other
+    /// literal boundaries stay visible, so bytes cannot migrate between
+    /// unrelated constants without I3 noticing.
+    literals: Vec<Literal>,
     /// Hollerith stays a region list: `docs/full-mode.md` says a Hollerith
     /// payload is never split, so its regions must match one for one.
     hollerith: Vec<Vec<u8>>,
@@ -73,11 +90,16 @@ struct Protected {
 }
 
 fn protected(source: &[u8]) -> Protected {
-    let mut literals = Vec::new();
+    let mut literals: Vec<Literal> = Vec::new();
     let mut hollerith = Vec::new();
     let mut well_formed = true;
     let mut state = LexState::default();
+    let mut merge_wrapped_literal = false;
     for line in source.split(|byte| *byte == b'\n') {
+        // A wrapper split is always resumed on the very next physical line.
+        // Taking this before classifying the line prevents comments/directives
+        // from accidentally carrying the merge forward.
+        let merge_from_previous = std::mem::take(&mut merge_wrapped_literal);
         if line.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'#') {
             // A directive is *stepped over*, not lexed: it neither closes nor
             // resets an open literal, and `SourceBuffer` carries the ordinary
@@ -92,40 +114,74 @@ fn protected(source: &[u8]) -> Protected {
         // marker ends there, and `LexState::scan` alone would keep it open
         // and claim every later line as protected payload.
         let regions = line_regions(&mut state, line);
-        // A literal still open when the line ends is a syntax error, and this
-        // walk has to stop asserting there (see `well_formed`). It has to be
-        // read off the *regions*, not off the state: `line_regions` has already
-        // applied the group reset by the time it returns, and probing the raw
-        // `LexState::scan` instead would lex the comment and blank lines a
-        // continued statement steps over -- which is how `! don't stop here`
-        // inside a continued literal in `continued_literal.f90` gets mistaken
-        // for a dangling quote.
-        if let Some(last) = regions.last() {
-            if last.kind == RegionKind::StringLiteral
-                && last.range.end == line.len()
-                && !is_closed_literal(&line[last.range.clone()])
-                && !line.trim_ascii_end().ends_with(b"&")
-            {
-                well_formed = false;
-            }
-        }
+        let literal_continues = state.in_literal();
+        let mut first_literal = true;
         for region in regions {
-            let mut payload = &line[region.range.clone()];
-            // Indentation on a continuation line is source layout, not part
-            // of the character literal's payload.
-            if continued_literal && region.range.start == 0 {
-                payload = payload.trim_ascii_start();
-            }
-            // The final whitespace pass removes horizontal whitespace at the
-            // end of every physical line. If an unterminated literal reaches
-            // that boundary, those bytes are layout whitespace rather than a
-            // stable literal payload for this malformed-input property.
-            if region.kind == RegionKind::StringLiteral && region.range.end == line.len() {
-                payload = payload.trim_ascii_end();
-            }
+            let raw = &line[region.range.clone()];
             match region.kind {
-                RegionKind::StringLiteral => literals.extend_from_slice(literal_content(payload)),
-                RegionKind::Hollerith => hollerith.push(payload.to_vec()),
+                RegionKind::StringLiteral => {
+                    let mut may_split_wrapped_literal = false;
+                    let closed = if continued_literal && region.range.start == 0 {
+                        if !raw.trim_ascii_start().starts_with(b"&") {
+                            well_formed = false;
+                        }
+                        let Some(literal) = literals.last_mut() else {
+                            well_formed = false;
+                            continue;
+                        };
+                        let (content, closed) =
+                            literal_piece(raw, literal.delimiter, true, literal_continues);
+                        literal.content.extend_from_slice(content);
+                        closed
+                    } else {
+                        let Some(&delimiter) = raw.first() else {
+                            continue;
+                        };
+                        if !matches!(delimiter, b'\'' | b'"') {
+                            well_formed = false;
+                            continue;
+                        }
+                        let (content, closed) =
+                            literal_piece(raw, delimiter, false, literal_continues);
+                        may_split_wrapped_literal = closed;
+                        let prefix = line[..region.range.start].trim_ascii();
+                        let resumes_wrapped = prefix.is_empty() || prefix == b"&";
+                        let merge = first_literal
+                            && merge_from_previous
+                            && resumes_wrapped
+                            && literals
+                                .last()
+                                .is_some_and(|literal| literal.delimiter == delimiter);
+                        if merge {
+                            literals
+                                .last_mut()
+                                .expect("merge requires a previous literal")
+                                .content
+                                .extend_from_slice(content);
+                        } else {
+                            literals.push(Literal {
+                                delimiter,
+                                content: content.to_vec(),
+                            });
+                        }
+                        first_literal = false;
+                        closed
+                    };
+                    if !closed && !literal_continues {
+                        well_formed = false;
+                    }
+
+                    // `literal_wrap_split` emits exactly `'<piece>' // &` and
+                    // resumes the same-delimiter literal after indentation (and
+                    // an optional authored leading `&`) on the next line. Fold
+                    // only that shape; ordinary neighboring
+                    // literals remain separate entries in the invariant.
+                    if may_split_wrapped_literal && line[region.range.end..].trim_ascii() == b"// &"
+                    {
+                        merge_wrapped_literal = true;
+                    }
+                }
+                RegionKind::Hollerith => hollerith.push(raw.to_vec()),
                 _ => {}
             }
         }
