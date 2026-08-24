@@ -1,7 +1,7 @@
 #!/bin/sh
-# Runs the same steps as the "checks" job in .github/workflows/ci.yml, in the
-# same order, so a local failure here means CI would fail too. Keep this in
-# sync with that job.
+# Runs the checks performed by the reusable workflow in
+# .github/workflows/rust-checks.yml, in their local order, so a local failure
+# here means CI would fail too. Keep this in sync with that workflow.
 set -eu
 
 cd "$(dirname "$0")/.."
