@@ -11,6 +11,13 @@ use std::{
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct ConfigArguments {
     pub(crate) layer: OptionLayer,
+    /// Whether this configuration terminates upward `pyproject.toml` discovery.
+    ///
+    /// This deliberately tracks the old synthetic-argv notion of presence,
+    /// independently of whether the typed layer changes runtime state. For
+    /// example, `output_format = "same"` validates successfully without storing
+    /// a setting, but historically still stopped discovery at that pyproject.
+    pub(crate) discovery_match: bool,
 }
 
 /// Load formatter settings from the nearest project configuration.
@@ -46,7 +53,7 @@ pub(crate) fn config_args(
         let pyproject = directory.join("pyproject.toml");
         if pyproject.is_file() {
             let config = read_config(&pyproject, Some("tool.forformat"))?;
-            if !config.layer.is_empty() {
+            if config.discovery_match {
                 return Ok(config);
             }
         }
@@ -84,20 +91,35 @@ fn read_config(
     };
 
     let mut layer = OptionLayer::default();
+    let mut discovery_match = false;
     for (raw_key, value) in table {
         let key = options::normalize_long(raw_key);
         if key == "mode" {
             parse_mode(value, path, &mut layer)?;
+            discovery_match = true;
             continue;
         }
 
         let spec = config_spec(&key)?;
         match spec.id {
-            OptionId::Define => parse_defines(value, &key, path, spec.id, &mut layer)?,
-            OptionId::Exclude | OptionId::ExtendExclude => {
-                parse_exclusions(value, &key, path, spec.id, &mut layer)?
+            OptionId::Define => {
+                parse_defines(value, &key, path, spec.id, &mut layer)?;
+                discovery_match |= match value {
+                    toml::Value::String(_) => true,
+                    toml::Value::Array(values) => !values.is_empty(),
+                    _ => false,
+                };
             }
-            OptionId::ContextPath => parse_context_paths(value, &key, path, &mut layer)?,
+            OptionId::Exclude | OptionId::ExtendExclude => {
+                parse_exclusions(value, &key, path, spec.id, &mut layer)?;
+                discovery_match |= value
+                    .as_array()
+                    .is_some_and(|patterns| !patterns.is_empty());
+            }
+            OptionId::ContextPath => {
+                parse_context_paths(value, &key, path, &mut layer)?;
+                discovery_match |= value.as_array().is_some_and(|paths| !paths.is_empty());
+            }
             OptionId::NoSubmodules => {
                 let enabled = value.as_bool().ok_or_else(|| {
                     crate::error::FormatError::InvalidOption(format!(
@@ -107,25 +129,32 @@ fn read_config(
                 })?;
                 if enabled {
                     layer.no_submodules = Some(true);
+                    discovery_match = true;
                 }
             }
             OptionId::InputFormat => {
                 let value = config_scalar(value, &key, path, spec)?;
                 layer.force_free_input = Some(settings::parse_input_format(&value)?);
+                discovery_match = true;
             }
             OptionId::OutputFormat => {
                 let value = config_scalar(value, &key, path, spec)?;
                 settings::parse_output_format(&value)?;
+                discovery_match = true;
             }
             _ => {
                 let value = config_scalar(value, &key, path, spec)?;
                 if let Some(setting) = settings::parse_format_setting(spec.id, Some(&value))? {
                     layer.push_format(spec.id, setting);
                 }
+                discovery_match = true;
             }
         }
     }
-    Ok(ConfigArguments { layer })
+    Ok(ConfigArguments {
+        layer,
+        discovery_match,
+    })
 }
 
 fn config_spec(key: &str) -> Result<&'static OptionSpec, crate::error::FormatError> {
@@ -319,6 +348,72 @@ fn config_scalar(
 
 fn config_error(path: &Path, error: impl fmt::Display) -> crate::error::FormatError {
     crate::error::FormatError::InvalidOption(format!("configuration {}: {error}", path.display()))
+}
+
+#[cfg(test)]
+mod discovery_tests {
+    use super::config_args;
+    use std::fs;
+
+    #[test]
+    fn noop_scalar_pyproject_stops_parent_discovery() {
+        let root = std::env::temp_dir().join(format!(
+            "forformat-pyproject-discovery-{}",
+            std::process::id()
+        ));
+        let child = root.join("child");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&child).unwrap();
+        fs::write(
+            root.join("pyproject.toml"),
+            "[tool.forformat]\nkeyword_case = 'upper'\n",
+        )
+        .unwrap();
+        fs::write(
+            child.join("pyproject.toml"),
+            "[tool.forformat]\noutput_format = 'same'\n",
+        )
+        .unwrap();
+
+        let config = config_args(&child, None).unwrap();
+        assert!(config.discovery_match);
+        assert!(
+            config.layer.is_empty(),
+            "the child pyproject should stop discovery without applying the parent"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn empty_repeatable_pyproject_still_falls_through_to_parent() {
+        let root = std::env::temp_dir().join(format!(
+            "forformat-empty-pyproject-discovery-{}",
+            std::process::id()
+        ));
+        let child = root.join("child");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&child).unwrap();
+        fs::write(
+            root.join("pyproject.toml"),
+            "[tool.forformat]\nkeyword_case = 'upper'\n",
+        )
+        .unwrap();
+        fs::write(
+            child.join("pyproject.toml"),
+            "[tool.forformat]\ndefines = []\n",
+        )
+        .unwrap();
+
+        let config = config_args(&child, None).unwrap();
+        assert!(config.discovery_match);
+        assert!(
+            !config.layer.is_empty(),
+            "an empty repeatable setting should preserve the old parent fallthrough"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }
 
 #[cfg(test)]
