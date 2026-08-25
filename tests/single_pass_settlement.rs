@@ -348,7 +348,7 @@ fn nothing_outside_the_condition_costs_it_its_gap() {
         b"if (a)x = f( &\n   1); y =)\n",
         b"if (a) x = f( &\n   1); y =)\n",
     );
-    settles_to(b"x=(; if(b)y=1\n", b"x = (; if (b)y = 1\n");
+    settles_to(b"x=(; if(b)y=1\n", b"x = (; if (b) y = 1\n");
     // The broken condition itself is still declined.
     settles_to(b"if (a) ) x = 1; y = 2\n", b"if (a)) x = 1; y = 2\n");
 }
