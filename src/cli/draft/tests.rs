@@ -1,11 +1,15 @@
-use crate::cli::{parse, Command};
+use crate::{
+    cli::{parse, Command},
+    error::FormatError,
+};
 
 fn error(args: &[&str]) -> String {
     let argv = std::iter::once("forformat")
         .chain(args.iter().copied())
         .map(str::to_owned);
     match parse(argv) {
-        Err(error) => error.to_string(),
+        Err(FormatError::InvalidOption(message)) => message,
+        Err(error) => panic!("expected an invalid option error for {args:?}, got {error}"),
         Ok(_) => panic!("expected an error for {args:?}"),
     }
 }
