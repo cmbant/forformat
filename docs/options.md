@@ -100,6 +100,23 @@ spacing and physical line structure; the second stage then owns the same leading
 trailing-whitespace changes as `--indent-only`. It does not run the wrapper, declaration/comment
 alignment, program-unit spacing, or blank-line limiting that belong to full mode.
 
+## Output language target
+
+| CLI | Configuration | Values | Default |
+| --- | --- | --- | --- |
+| `--target-standard=STANDARD` | `target_standard = "..."` | `f95`, `f2003`, `f2008`, `f2018`, `f2023` | `f2003` |
+
+The target is a ceiling on syntax the formatter itself may introduce; it is **not** an input
+standards validator or a downgrader. Existing newer syntax is not rewritten to an older spelling
+merely because a lower target is selected. The default `f2003` preserves existing output behavior.
+
+Selecting `f95` gates formatter-introduced Fortran 2003+ syntax. Currently that means enabled
+`--array-brackets=true` will not rewrite `(/ ... /)` constructors to `[ ... ]`, whose square-bracket
+spelling requires Fortran 2003 or newer. The target takes precedence over the style switch, so
+`--target-standard=f95 --array-brackets=true` still preserves the F95-compatible constructor
+spelling. Later target values are accepted now so future syntax upgrades can be gated by the same
+policy instead of adding independent compatibility switches.
+
 ## Selecting input and output
 
 | Option | Configuration | Meaning |
@@ -111,7 +128,7 @@ alignment, program-unit spacing, or blank-line limiting that belong to full mode
 | `--all-files [DIR]` | — | select tracked sources owned by the checkout; submodules provide context only |
 | `--all [DIR]` | — | select tracked sources recursively, including initialized submodule sources |
 | `--check` | — | do not rewrite; exit 1 when a selected file would change |
-| `--diff` | — | print unified diffs; exit 1 when a selected file would change |
+| `--diff` | — | print unified diffs; exit 1 if changed |
 | `--show-files` | — | print selected target paths without reading or formatting them |
 | `--query-format` | — | print `free` or `fixed` for each selected input and exit |
 | `--input-format=auto` | `input_format = "auto"` | use automatic fixed/free detection; default |
@@ -174,7 +191,7 @@ submodule behaviour, symlinks, and write semantics.
 | `-k-`, `--indent-continuation=none` | `indent_continuation = "none"` | disable continuation indentation | off |
 | `--indent-continuation=default` | `indent_continuation = "default"` | use the normal continuation policy | on |
 | `-K`, `--indent-ampersand[=BOOL]` | `indent_ampersand = BOOL` | boolean | false |
-| `--align-paren[=N]` | `align_paren = N/BOOL` | bare means `1`; `0` disables | `0` |
+| `--align-paren[=N|BOOL]` | `align_paren = N/BOOL` | bare/`true` means `1`; `false`/`0` disables; positive integers retain the numeric level | `0` |
 | `--label-left=BOOL` | `label_left = BOOL` | boolean | true |
 | `--include-left=BOOL` | `include_left = BOOL` | boolean | false |
 | `--openmp=BOOL` | `openmp = BOOL` | boolean | true |
@@ -222,7 +239,7 @@ presentation-only whitespace/layout changes; `--indent-only` deliberately ignore
 | `--keyword-case` / `keyword_case` | `lower`, `upper`, `preserve` | `lower` | recognized keyword/intrinsic spelling |
 | `--openmp-case` / `openmp_case` | boolean | true | uppercase reserved OpenMP sentinels and directive words |
 | `--relational-symbols` / `relational_symbols` | boolean | true | `.eq.` etc. become symbolic operators |
-| `--array-brackets` / `array_brackets` | boolean | true | `(/ ... /)` becomes `[ ... ]` where safe |
+| `--array-brackets` / `array_brackets` | boolean | true | `(/ ... /)` becomes `[ ... ]` where safe and permitted by `target_standard` |
 | `--compact-multiplicative` / `compact_multiplicative` | boolean | true | compact binary `*`, `/`, and `**` |
 | `--join-goto` / `join_goto` | boolean | true | `go to` becomes `goto` |
 | `--split-compound-keywords` / `split_compound_keywords` | boolean | true | `endif` becomes `end if` and similar |
@@ -371,8 +388,8 @@ Macro names participate in case resolution; the value is retained for preprocess
 This section records compatibility spellings that are useful alongside normal workflows; it is not
 an exhaustive findent alias list. See [migration.md](migration.md) for legacy command-line mapping.
 
-`-lastindent` / `--last-indent` prints the final indentation and exits. `-lastusable` /
-`--last-usable` prints the final usable indentation and exits. These are command-line query modes,
+`--last-indent` (`-lastindent`) prints the final indentation and exits. `--last-usable`
+(`-lastusable`) prints the final usable indentation and exits. These are command-line query modes,
 not project settings.
 
 Long option names are case-insensitive and treat `_` as `-`, so `--align_paren` and
@@ -397,6 +414,7 @@ A standalone file uses top-level keys; `pyproject.toml` uses the table:
 ```toml
 [tool.forformat]
 mode = "full"
+target_standard = "f2003"
 indent = 4
 indent_module = 0
 indent_procedure = 0
@@ -423,6 +441,8 @@ keys: `all`, `all-files`, `check`, `config`, `diff`, `isolated`, `last-indent`, 
 
 Boolean-valued options accept `true`/`false`, `yes`/`no`, or `1`/`0`. Optional boolean switches such
 as `--wrap`, `--rewrap`, `--indent-ampersand`, and `--no-submodules` use the bare spelling as `true`.
+The numeric compatibility options `--align-paren` and `--reduce-whitespace` also accept explicit
+`true`/`false`; for those options bare/`true` maps to numeric level `1` and `false` maps to `0`.
 
 Negated options apply the value to the *negated state*: `--no-wrap` disables wrapping, while
 `--no-wrap=false` explicitly leaves wrapping enabled.

@@ -1,9 +1,14 @@
 //! A byte-oriented, free-form Fortran formatter.
 //!
-//! The formatter intentionally does not build a Fortran AST.  It scans source
-//! spans, recognizes only the structural statements needed for indentation,
-//! and emits the original spelling with leading indentation adjusted and
-//! trailing horizontal whitespace removed.
+//! The formatter intentionally does not build a Fortran AST. It uses byte-oriented
+//! lexical and statement analysis instead. The default [`FormatMode::Full`] pipeline
+//! performs normalization, statement wrapping, findent-compatible structural layout,
+//! and post-layout alignment; [`FormatMode::IndentOnly`] is the spelling-preserving
+//! indentation path.
+//!
+//! Formatter-generated syntax targets Fortran 2003 by default. Set
+//! [`FormatConfig::target_standard`] to [`FortranStandard::F95`] to prevent syntax
+//! upgrades such as square-bracket array constructors.
 //!
 //! # Rust API status
 //!
@@ -41,7 +46,8 @@ pub mod transform;
 
 pub use analysis::{analyze_project, ProjectContext};
 pub use config::{
-    ConstructIndents, FormatConfig, FormatMode, KeywordCase, MacroDefine, StyleConfig, WrapConfig,
+    ConstructIndents, FormatConfig, FormatMode, FortranStandard, KeywordCase, MacroDefine,
+    StyleConfig, WrapConfig,
 };
 pub use error::FormatError;
 

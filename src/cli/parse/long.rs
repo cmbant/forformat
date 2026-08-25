@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     cli::{draft::DraftInvocation, options::OptionId},
-    config::{FormatMode, KeywordCase},
+    config::{FormatMode, FortranStandard, KeywordCase},
     error::FormatError,
 };
 use std::path::PathBuf;
@@ -84,8 +84,7 @@ where
             }
         }
         OptionId::AlignParen => {
-            draft.config.align_paren_value =
-                value.as_deref().map(parse_num).transpose()?.unwrap_or(1);
+            draft.config.align_paren_value = parse_paren_alignment(value.as_deref())?;
             draft.config.align_paren = draft.config.align_paren_value != 0;
         }
         OptionId::WsRemred => {
@@ -233,10 +232,24 @@ where
                 .as_deref()
                 .map(parse_bool)
                 .transpose()?
-                .unwrap_or(true);
+                .unwrap_or(true)
         }
         OptionId::LineLength => {
             draft.config.wrap.line_length = parse_num(&cursor.required_long(&mut value)?)?
+        }
+        OptionId::TargetStandard => {
+            let value = cursor.required_long(&mut value)?;
+            draft.config.target_standard = parse_style_choice(
+                name,
+                &value,
+                &[
+                    ("f95", FortranStandard::F95),
+                    ("f2003", FortranStandard::F2003),
+                    ("f2008", FortranStandard::F2008),
+                    ("f2018", FortranStandard::F2018),
+                    ("f2023", FortranStandard::F2023),
+                ],
+            )?;
         }
         OptionId::UppercaseSingleL => {
             draft.config.uppercase_single_l = value
@@ -373,6 +386,17 @@ where
         OptionId::Help | OptionId::Version => unreachable!("handled before long-option parsing"),
     }
     Ok(())
+}
+
+/// Parse the parenthesis-alignment level while retaining findent's numeric
+/// values. Boolean spellings mirror `--reduce-whitespace`: bare/true enable
+/// level 1 and false disables it.
+fn parse_paren_alignment(value: Option<&str>) -> Result<usize, FormatError> {
+    match value {
+        None | Some("true") => Ok(1),
+        Some("false") => Ok(0),
+        Some(value) => parse_num(value),
+    }
 }
 
 /// Parse the native reduction level while retaining findent's numeric levels.

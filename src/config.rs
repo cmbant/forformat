@@ -29,6 +29,34 @@ pub enum FormatMode {
     Full,
 }
 
+/// Highest Fortran language revision that formatting may introduce.
+///
+/// This is an output-generation policy, not a validator or downgrader: source
+/// that already uses newer syntax is left to the ordinary formatter rules. The
+/// default is Fortran 2003 so existing full-mode output remains unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FortranStandard {
+    F95,
+    F2003,
+    F2008,
+    F2018,
+    F2023,
+}
+
+impl FortranStandard {
+    /// Whether formatting may modernize `(/ ... /)` into the square-bracket
+    /// array-constructor syntax introduced in Fortran 2003.
+    pub const fn allows_square_array_constructors(self) -> bool {
+        !matches!(self, FortranStandard::F95)
+    }
+}
+
+impl Default for FortranStandard {
+    fn default() -> Self {
+        Self::F2003
+    }
+}
+
 /// Each predicate below names one question the pipeline asks of the mode, and
 /// is the only place that question is answered.  Several of them currently
 /// select the same single variant, and that is deliberate rather than
@@ -203,6 +231,8 @@ pub struct FormatConfig {
     /// Selects which stages of the pipeline run.  Everything below this field
     /// is either shared or specific to one stage.
     pub mode: FormatMode,
+    /// Highest Fortran revision syntax that formatting may introduce.
+    pub target_standard: FortranStandard,
     /// Full-mode reflow policy.
     pub wrap: WrapConfig,
     /// Repack already-continued eligible statements through the normal wrapper.
@@ -268,6 +298,19 @@ impl FormatConfig {
         self.case_indent = indent.saturating_sub(indent / 2);
         self.entry_indent = self.case_indent;
     }
+
+    /// Return the minimal effective override required by the output-language
+    /// target, if any. Applying this after all user settings makes the standard
+    /// gate independent of CLI/config ordering and also covers Rust API callers.
+    pub(crate) fn target_standard_override(&self) -> Option<Self> {
+        if self.style.array_brackets && !self.target_standard.allows_square_array_constructors() {
+            let mut adjusted = self.clone();
+            adjusted.style.array_brackets = false;
+            Some(adjusted)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -292,6 +335,7 @@ impl Default for FormatConfig {
     fn default() -> Self {
         Self {
             mode: FormatMode::Full,
+            target_standard: FortranStandard::default(),
             wrap: WrapConfig::default(),
             rewrap: false,
             defines: Vec::new(),

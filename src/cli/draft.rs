@@ -82,7 +82,7 @@ impl DraftInvocation {
         }
         if self.isolated && (self.all || self.all_files || self.paths.is_empty()) {
             return Err(FormatError::InvalidOption(
-                "--isolated requires one or more explicit paths and cannot be combined with --all-files".into(),
+                "--isolated requires one or more explicit paths and cannot be combined with --all or --all-files".into(),
             ));
         }
         if self.isolated && !self.context_paths.is_empty() {
