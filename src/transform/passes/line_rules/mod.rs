@@ -37,7 +37,7 @@ use crate::{
         PhysicalLineKind,
     },
     transform::{
-        document::Document,
+        document::{Document, StatementFacts},
         edit::EditBuffer,
         pipeline::{Changed, PassContext},
     },
@@ -72,6 +72,32 @@ fn canonicalize_presentation_whitespace(line: &[u8], incoming: LexState) -> Vec<
         .unwrap_or(line.len());
     output[..leading].copy_from_slice(&line[..leading]);
     output
+}
+
+/// Stable facts for the statement that owns one end of a physical source line.
+///
+/// A semicolon line can start in one statement and end in another. Current-line
+/// context follows the first statement with source on the line, while state
+/// carried through a trailing continuation marker follows the last. If a line
+/// has no mapped source piece, preserve the previous group-first fallback.
+fn statement_facts_on_line(cx: &PassContext<'_>, line: usize, last: bool) -> StatementFacts {
+    let owned = cx
+        .analysis
+        .line_group
+        .get(line)
+        .and_then(|group_index| {
+            let group = cx.analysis.groups.get(*group_index)?;
+            let statement_index = if last {
+                group.last_statement_index_on_line(line)
+            } else {
+                group.first_statement_index_on_line(line)
+            }?;
+            cx.analysis.facts.get(*group_index)?.get(statement_index)
+        })
+        .copied();
+    owned
+        .or_else(|| cx.analysis.facts_of_line(line).copied())
+        .unwrap_or_default()
 }
 
 /// Immutable facts about the line currently passing through the rule chain.
@@ -135,11 +161,7 @@ impl StatementState {
     ) -> LineContext<'a> {
         let preserve_comment_after =
             common::comment_spacing::preserve_full_comment_spacing(document, index, cx);
-        let facts = cx
-            .analysis
-            .facts_of_line(index)
-            .copied()
-            .unwrap_or_default();
+        let facts = statement_facts_on_line(cx, index, false);
         let continued_declaration = self.continued_statement && facts.declaration;
         let continued_format = self.continued_statement && facts.format;
         let statement_separator = facts.top_level_separator;
@@ -184,11 +206,7 @@ impl StatementState {
     ) {
         self.continued_statement = continues;
         self.continued_infix = continues && trailing_continuation_operand(code);
-        let facts = cx
-            .analysis
-            .facts_of_line(line_index)
-            .copied()
-            .unwrap_or_default();
+        let facts = statement_facts_on_line(cx, line_index, true);
         self.continued_named_parameter = self.continued_statement && facts.call_context;
         self.continued_bind_parameter = self.continued_statement && facts.bind_context;
         self.continued_component =
