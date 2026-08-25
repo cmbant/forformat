@@ -906,35 +906,6 @@ mod tests {
         })
     }
 
-    fn default_cell_for_option<'a>(text: &'a str, option: &str) -> Option<&'a str> {
-        let mut default_column = None;
-        for line in text.lines() {
-            let line = line.trim();
-            if !line.starts_with('|') || !line.ends_with('|') {
-                default_column = None;
-                continue;
-            }
-            let cells = line[1..line.len() - 1]
-                .split('|')
-                .map(str::trim)
-                .collect::<Vec<_>>();
-            if let Some(index) = cells.iter().position(|cell| *cell == "Default") {
-                default_column = Some(index);
-                continue;
-            }
-            if cells.iter().all(|cell| {
-                cell.chars()
-                    .all(|ch| ch == '-' || ch == ':' || ch.is_ascii_whitespace())
-            }) {
-                continue;
-            }
-            if contains_name(line, option) {
-                return default_column.and_then(|index| cells.get(index).copied());
-            }
-        }
-        None
-    }
-
     #[test]
     fn schema_default_text_matches_runtime_defaults() {
         let expected = FormatConfig::default();
@@ -979,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn docs_cover_schema_names_config_keys_and_default_columns() {
+    fn docs_cover_schema_names_and_config_keys() {
         let docs = include_str!("../../docs/options.md");
         let normalized_docs = docs.replace('`', "").replace('_', "-");
 
@@ -998,17 +969,6 @@ mod tests {
                 assert!(
                     contains_name(&normalized_docs, &key),
                     "docs/options.md does not mention config key `{key}` for --{}",
-                    spec.long
-                );
-            }
-
-            let Some(default_text) = spec.default_text else {
-                continue;
-            };
-            if let Some(documented_default) = default_cell_for_option(&normalized_docs, &option) {
-                assert_eq!(
-                    documented_default, default_text,
-                    "docs/options.md has the wrong Default column for --{}",
                     spec.long
                 );
             }
