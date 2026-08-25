@@ -721,7 +721,7 @@ mod rejoined_tests {
         let once = format_source(source, &config).unwrap().bytes;
         assert_eq!(
             once.as_slice(),
-            b"integer :: x; print *, &\n  sin(1.0)\ndata x/1/; call p(&\n  named=sin(1.0))\n"
+            b"integer :: x; print *, &\n  sin(1.0)\ndata x/1/; call p( &\n  named=sin(1.0))\n"
         );
         let twice = format_source(&once, &config).unwrap().bytes;
         assert_eq!(twice, once);
