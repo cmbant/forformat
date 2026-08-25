@@ -1,4 +1,4 @@
-use forformat::{cli, format_source, FormatError};
+use forformat::{analyze_project, cli, format_source, format_source_with_context, FormatError};
 use std::{fs, path::PathBuf};
 
 #[derive(Debug, Default)]
@@ -17,13 +17,16 @@ struct Case {
     /// Formatting mode this case pins. A checked-in case remains explicit so
     /// its expected bytes do not depend on the CLI default.
     mode: String,
+    /// Optional project context used by cases that exercise project-aware
+    /// normalization. `self` analyzes the input as its own project member.
+    project: String,
 }
 
 #[test]
 fn checked_in_manifest_covers_success_and_rejection_paths() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/manifests/core.manifest");
     let cases = parse_manifest(&manifest, &fs::read_to_string(&manifest).unwrap());
-    assert_eq!(cases.len(), 62);
+    assert_eq!(cases.len(), 63);
     for case in cases {
         assert!(!case.source_test.is_empty(), "{} source test", case.name);
         assert!(!case.oracle.is_empty(), "{} oracle", case.name);
@@ -34,7 +37,8 @@ fn checked_in_manifest_covers_success_and_rejection_paths() {
             "{} normalization",
             case.name
         );
-        let input = fs::read(manifest.parent().unwrap().join(&case.input)).unwrap();
+        let input_path = manifest.parent().unwrap().join(&case.input);
+        let input = fs::read(&input_path).unwrap();
         let expected_stdout = if case.stdout.is_empty() {
             Vec::new()
         } else {
@@ -52,7 +56,16 @@ fn checked_in_manifest_covers_success_and_rejection_paths() {
         let (stdout, stderr, status) = match cli::parse(argv) {
             Ok(cli::Command::Run(mut invocation)) => {
                 invocation.config.mode = mode;
-                match format_source(&input, &invocation.config) {
+                let formatted = match case.project.as_str() {
+                    "" => format_source(&input, &invocation.config),
+                    "self" => {
+                        let project = analyze_project([(input_path.as_path(), input.as_slice())])
+                            .expect("manifest project analyzes");
+                        format_source_with_context(&input, &project, &invocation.config)
+                    }
+                    other => panic!("unknown manifest project {other} in case {}", case.name),
+                };
+                match formatted {
                     Ok(result) => (result.bytes, String::new(), 0),
                     Err(error) => (Vec::new(), format_error(error), 1),
                 }
@@ -132,6 +145,7 @@ fn parse_manifest(path: &std::path::Path, source: &str) -> Vec<Case> {
             "status" => case.status = value.parse().expect("manifest status"),
             "args" => case.args = value,
             "mode" => case.mode = value,
+            "project" => case.project = value,
             other => panic!("unknown manifest key {other} in {}", path.display()),
         }
     }

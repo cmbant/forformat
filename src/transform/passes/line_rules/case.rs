@@ -167,6 +167,17 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                 }
             }
             TokenKind::Name => {
+                // The root of a data-ref is an identifier, even when its name
+                // is also a keyword or specifier (`File%Exists`, for example).
+                // The declared-case pass immediately before line rules has
+                // already settled any authoritative spelling, so do not let
+                // lexical keyword casing overwrite that decision.
+                if tokens
+                    .get(index + 1)
+                    .is_some_and(|token| token.text == b"%")
+                {
+                    continue;
+                }
                 let component_selector = index > 0 && tokens[index - 1].text == b"%"
                     || continues_component_selector(&tokens, index, context);
                 if component_selector {

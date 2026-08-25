@@ -47,14 +47,33 @@ use crate::{
 
 type ReflowResult = Vec<(usize, Decline)>;
 
-/// How many times wrapping re-derives its decisions against the layout the
-/// previous round produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FixedPointProgress {
+    New,
+    Stable,
+    Cycle,
+}
+
+/// Classify one deterministic transition result against the states already seen.
 ///
-/// Two rounds settle every corpus file observed — the second confirms the
-/// first, or corrects a block whose alignment the first round's own breaks
-/// changed. The third is the stop, so a file whose decisions genuinely
-/// oscillate ends on a definite layout instead of looping.
-const MAX_REFLOW_ROUNDS: usize = 3;
+/// Repeating the immediately preceding state proves a fixed point. Repeating an
+/// older state instead closes a cycle, so another iteration would only revisit
+/// states we have already processed.
+fn fixed_point_progress<T: PartialEq>(history: &[T], candidate: &T) -> FixedPointProgress {
+    if history.last().is_some_and(|previous| previous == candidate) {
+        FixedPointProgress::Stable
+    } else if history.contains(candidate) {
+        FixedPointProgress::Cycle
+    } else {
+        FixedPointProgress::New
+    }
+}
+
+fn convergence_cycle(stage: &str) -> FormatError {
+    FormatError::Unsupported(format!(
+        "{stage} entered a cycle before reaching a fixed point"
+    ))
+}
 
 /// Format one buffer with project context.
 pub fn format_with_context(
@@ -131,34 +150,42 @@ fn format_document_with_context_and_local(
     }
 
     if config.wrap.enabled {
+        // Rewrap settlement needs the normalized logical input that produced the
+        // first output. Capture it before reflow mutates `document`, and avoid
+        // the allocation entirely for ordinary wrapping.
+        let settlement_input = config.rewrap.then(|| document.to_bytes());
         let (mut output, mut meta) = reflow_and_lay_out(&mut document, project, local, config)?;
-        if !config.rewrap {
+        let Some(settlement_input) = settlement_input else {
             return Ok((output, meta));
-        }
+        };
 
         // Rewrap can change the logical body it is wrapping: splitting a long
         // literal inserts `//`, and final declaration alignment can repartition
-        // the continuation block whose breaks were just selected. The next
-        // external invocation rejoins those emitted continuations and therefore
-        // sees break candidates or widths the first normalization snapshot did
-        // not contain. Settle that rewrap-specific normalization plus layout
-        // here so one invocation reaches the same fixed point.
-        for _ in 1..MAX_REFLOW_ROUNDS {
+        // the continuation block whose breaks were just selected. Rejoin only
+        // wrapper-generated seams, then feed that prepared logical input back to
+        // the existing wrapper until the preparation itself reaches a fixed
+        // point. An immediate repeated input proves stability without paying for
+        // a redundant layout pass; a non-adjacent repeat is a real cycle.
+        let mut settlement_inputs = vec![settlement_input];
+        loop {
             let source = output.to_bytes();
             let mut candidate = Document::from_bytes(&source);
             pipeline::prepare_rewrap_settlement(&mut candidate, project, local, config)?;
-            let (next, next_meta) = reflow_and_lay_out(&mut candidate, project, local, config)?;
-            if next == output {
-                return Ok((next, next_meta));
+            let prepared = candidate.to_bytes();
+
+            // No wrapper-generated continuation was joined, so there is no new
+            // normalization evidence for another internal invocation.
+            if prepared == source {
+                return Ok((output, meta));
             }
-            output = next;
-            meta = next_meta;
+
+            match fixed_point_progress(&settlement_inputs, &prepared) {
+                FixedPointProgress::Stable => return Ok((output, meta)),
+                FixedPointProgress::Cycle => return Err(convergence_cycle("rewrap settlement")),
+                FixedPointProgress::New => settlement_inputs.push(prepared),
+            }
+            (output, meta) = reflow_and_lay_out(&mut candidate, project, local, config)?;
         }
-        debug_assert!(
-            false,
-            "the complete rewrap pipeline did not converge in {MAX_REFLOW_ROUNDS} rounds"
-        );
-        return Ok((output, meta));
     }
 
     lay_out(&document, config)
@@ -291,6 +318,16 @@ fn reflow_with_context_inner(
     };
     document.set_lines(lines);
     Ok(declined)
+}
+
+/// One wrapper round's visible state. `needs_reflow` is deliberately not stored:
+/// those flags only grow, and the history is cleared whenever one grows. Within
+/// one history segment the flags are therefore fixed, so repeating these bytes
+/// and group spans repeats the complete deterministic transition state.
+#[derive(PartialEq, Eq)]
+struct ReflowRoundState {
+    lines: Vec<Vec<u8>>,
+    spans: Vec<std::ops::Range<usize>>,
 }
 
 /// Everything a group's emission reads that is the same in every round.
@@ -427,8 +464,9 @@ impl<'a> ReflowScope<'a> {
     /// now a set of short lines: recomputed from scratch its answer would be
     /// "fits", the wrapper would take its own break away, the round after would
     /// find the long line again, and the decisions would flip with a period of
-    /// two forever.  Sticky, the sequence is monotone in a finite set and
-    /// therefore settles.
+    /// two forever. Sticky flags make discovery monotone. Once discovery stops,
+    /// the remaining transition is deterministic: an adjacent repeat is the
+    /// fixed point and any older repeat is a cycle.
     fn reflow(&self) -> Result<(Vec<Vec<u8>>, ReflowResult), FormatError> {
         let analysis = self.analysis();
         let config = self.config();
@@ -442,23 +480,26 @@ impl<'a> ReflowScope<'a> {
             .collect();
         let mut needs_reflow = vec![false; analysis.groups.len()];
         let mut measured = self.document.to_lf_bytes();
-        let mut emitted: Option<(Vec<Vec<u8>>, ReflowResult)> = None;
-        let mut converged = false;
+        let mut round_history: Vec<ReflowRoundState> = Vec::new();
 
-        for _ in 0..MAX_REFLOW_ROUNDS {
+        loop {
             let laid_out = self.lay_out(&measured)?;
             // Discovery.  On the first round `laid_out` is the authored document
             // laid out, so this reproduces the plain "an authored physical line
             // overruns" gate exactly; from the second round on it is the previous
             // round's output, which is where a statement widened by someone else's
             // wrap turns up.
+            let mut discovered = false;
             for (ordinal, span) in spans.iter().enumerate() {
                 if !self.wrappable[ordinal] || needs_reflow[ordinal] {
                     continue;
                 }
-                needs_reflow[ordinal] = span.clone().any(|line| {
+                if span.clone().any(|line| {
                     laid_out.lines.get(line).map_or(0, Vec::len) > config.wrap.line_length
-                });
+                }) {
+                    needs_reflow[ordinal] = true;
+                    discovered = true;
+                }
             }
 
             let mut lines: Vec<Vec<u8>> = Vec::with_capacity(self.document.lines.len());
@@ -481,35 +522,27 @@ impl<'a> ReflowScope<'a> {
                 next_spans.push(start..lines.len());
             }
 
-            // A round that reproduces the last one is the fixed point: its
-            // decisions already agree with the layout they were measured against.
-            if emitted
-                .as_ref()
-                .is_some_and(|(previous, _)| *previous == lines)
-            {
-                converged = true;
-                break;
+            // States collected before a new sticky wrap decision are no longer
+            // comparable: the transition function has gained another fixed
+            // `needs_reflow` input. Start a fresh history segment instead.
+            if discovered {
+                round_history.clear();
             }
+            let state = ReflowRoundState {
+                lines: lines.clone(),
+                spans: next_spans.clone(),
+            };
+            match fixed_point_progress(&round_history, &state) {
+                FixedPointProgress::Stable => return Ok((lines, declined)),
+                FixedPointProgress::Cycle => return Err(convergence_cycle("wrapping")),
+                FixedPointProgress::New => round_history.push(state),
+            }
+
             let mut probe = self.document.clone();
-            probe.set_lines(lines.clone());
+            probe.set_lines(lines);
             measured = probe.to_lf_bytes();
             spans = next_spans;
-            emitted = Some((lines, declined));
         }
-
-        // Exhausting the rounds means the last round still disagreed with the one
-        // before it, so the emitted layout is not known to be a fixed point and I1
-        // may not hold for this file. The sticky `needs_reflow` argument above says
-        // that cannot happen; this is where that argument is checked rather than
-        // assumed. A release build still emits the last round's definite layout —
-        // a formatter that looped or refused would be worse than one that is merely
-        // not idempotent — but a debug build, and so every test and every fuzz
-        // corpus run, turns the silence into a failure.
-        debug_assert!(
-            converged,
-            "wrapping did not converge in {MAX_REFLOW_ROUNDS} rounds; the output may not be a fixed point (I1)"
-        );
-        Ok(emitted.expect("the loop runs at least one round"))
     }
 
     /// One round's measurement: the text laid out by the engine, with the two
@@ -1399,6 +1432,23 @@ mod tests {
             },
             source,
         )
+    }
+
+    #[test]
+    fn fixed_point_progress_distinguishes_stability_from_cycles() {
+        let history = [1, 2];
+        assert_eq!(
+            super::fixed_point_progress(&history, &3),
+            super::FixedPointProgress::New
+        );
+        assert_eq!(
+            super::fixed_point_progress(&history, &2),
+            super::FixedPointProgress::Stable
+        );
+        assert_eq!(
+            super::fixed_point_progress(&history, &1),
+            super::FixedPointProgress::Cycle
+        );
     }
 
     #[test]

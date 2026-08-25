@@ -205,8 +205,11 @@ fn string_literals_and_comments_keep_their_case() {
 }
 
 #[test]
-fn a_component_after_percent_is_not_a_keyword() {
-    assert_eq!(normalized(b"X = State%Data\n"), "X = State%Data\n");
+fn data_ref_names_around_percent_are_not_keywords_or_specifiers() {
+    assert_eq!(
+        normalized(b"X = State%Data\nY = File%Exists\n"),
+        "X = State%Data\nY = File%Exists\n"
+    );
 }
 
 #[test]

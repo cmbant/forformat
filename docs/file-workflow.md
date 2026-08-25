@@ -105,3 +105,9 @@ All project source bytes are loaded into memory before analysis. One
 ProjectContext is then built and shared by every target in the invocation.
 In-place replacement writes a same-directory temporary, copies the original
 mode bits, fsyncs, and renames over the resolved symlink target.
+
+Every target is formatted before any of them is written, so a formatting failure leaves the tree
+untouched rather than half rewritten. The diagnostic names the input the same way a skip or a
+declined wrap does — `forformat: <path>: <reason>`, or `<stdin>` for an anonymous buffer — because
+that path is the only thing distinguishing the one failing file from the rest of the selection.
+`--exclude` is the way to proceed past a file the formatter refuses.

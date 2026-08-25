@@ -1,0 +1,32 @@
+module FileUtils
+    implicit none
+    private
+
+    type TFile
+    contains
+        procedure :: IsFullPath
+    end type TFile
+
+    type(TFile), public, save :: File
+
+contains
+
+    logical function IsFullPath(name)
+        character(len=*), intent(in) :: name
+        IsFullPath = .true.
+    end function IsFullPath
+
+end module FileUtils
+
+module User
+    use FileUtils
+    implicit none
+
+contains
+
+    subroutine check_name
+        logical :: ok
+        ok = File%IsFullPath('x')
+    end subroutine check_name
+
+end module User
