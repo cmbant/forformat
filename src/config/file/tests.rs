@@ -78,6 +78,29 @@ fn project_context_is_not_a_configuration_key() {
 }
 
 #[test]
+fn singular_context_path_is_not_a_configuration_key() {
+    let path = std::env::temp_dir().join(format!(
+        "forformat-context-path-config-{}.toml",
+        std::process::id()
+    ));
+    fs::write(&path, "context_path = 'configured'\n").unwrap();
+    let error = match parse([
+        "forformat".to_string(),
+        format!("--config={}", path.display()),
+    ]) {
+        Err(error) => error,
+        Ok(_) => panic!("singular context_path config key was accepted"),
+    };
+    let _ = fs::remove_file(&path);
+    assert!(
+        error
+            .to_string()
+            .contains("use `context-paths = [\"...\"]`"),
+        "{error}"
+    );
+}
+
+#[test]
 fn query_format_is_not_a_configuration_key() {
     let path = std::env::temp_dir().join(format!(
         "forformat-query-format-config-{}.toml",
