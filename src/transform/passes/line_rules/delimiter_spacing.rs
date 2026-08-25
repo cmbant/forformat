@@ -58,20 +58,19 @@ pub(in crate::transform::passes::line_rules) fn normalize_delimiter_spacing_with
     let mut state = incoming;
     let regions = state.regions(&text);
     let mut result = Vec::with_capacity(text.len());
+    let mut prefix_has_content = false;
     for (index, region) in regions.iter().enumerate() {
+        let source = &text[region.range.clone()];
         if region.kind == RegionKind::Code {
             let following_content = regions
                 .get(index + 1)
                 .is_some_and(|next| next.kind != RegionKind::Comment);
-            let floor = result.len();
-            normalize_delimiters_in_code(
-                &text[region.range.clone()],
-                &mut result,
-                following_content,
-                floor,
-            );
+            let one = normalize_delimiters_in_code(source, prefix_has_content, following_content);
+            prefix_has_content |= one.iter().any(|byte| !matches!(byte, b' ' | b'\t'));
+            result.extend_from_slice(&one);
         } else {
-            result.extend_from_slice(&text[region.range.clone()]);
+            prefix_has_content |= source.iter().any(|byte| !matches!(byte, b' ' | b'\t'));
+            result.extend_from_slice(source);
         }
     }
     compact_multiple_subscript_spacing(
@@ -224,36 +223,28 @@ fn normalize_old_style_code(code: &[u8], out: &mut Vec<u8>, followed: bool) {
     }
 }
 
-/// Normalize one code region of a line into `out`, which already holds every
-/// region before it.
+/// Normalize one code region in a buffer that owns only that region's bytes.
 ///
-/// `floor` is where this region's own bytes begin in `out`. The comma rule
-/// walks backwards over blanks, and `out` is shared across regions, so without
-/// a floor that walk runs off the front of the region and into whatever
-/// preceded it. When what preceded it was a Hollerith payload, the blanks it
-/// deleted were payload bytes: `call p(5habcd  ,y)` became
-/// `call p(5habcd, y)`, and `5h` still claims five characters, so the constant
-/// silently changed from `abcd ` to `abcd,`. The region scanner had the extent
-/// right all along -- the same payload is protected from case normalization --
-/// and this is the rule that was not asking it.
+/// `prefix_has_content` is the only fact the comma rule needs from earlier
+/// regions: it distinguishes indentation before a comma-led line from blanks
+/// separating a comma from preceding content. Protected bytes never enter this
+/// buffer, so walking backwards or truncating here cannot cross a region
+/// boundary. `following_content` similarly says whether content follows this
+/// region and therefore whether a comma at its end needs a trailing blank.
 fn normalize_delimiters_in_code(
     code: &[u8],
-    out: &mut Vec<u8>,
+    prefix_has_content: bool,
     following_content: bool,
-    floor: usize,
-) {
+) -> Vec<u8> {
+    let mut out = Vec::with_capacity(code.len());
     let mut index = 0;
     while index < code.len() {
         if code[index] == b',' {
             let mut keep = out.len();
-            // Only this region's blanks are this rule's to remove. The test
-            // below still reads all of `out`, because a payload before the
-            // floor is content: it is what makes the blank after it redundant
-            // rather than a comma-led line's indentation.
-            while keep > floor && matches!(out[keep - 1], b' ' | b'\t') {
+            while keep > 0 && matches!(out[keep - 1], b' ' | b'\t') {
                 keep -= 1;
             }
-            if out[..keep].iter().any(|byte| !matches!(byte, b' ' | b'\t')) {
+            if prefix_has_content || out[..keep].iter().any(|byte| !matches!(byte, b' ' | b'\t')) {
                 out.truncate(keep);
             }
             out.push(b',');
@@ -279,6 +270,7 @@ fn normalize_delimiters_in_code(
         out.push(code[index]);
         index += 1;
     }
+    out
 }
 
 pub(in crate::transform::passes::line_rules) fn advance_multiple_subscript_depths(
