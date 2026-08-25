@@ -224,7 +224,8 @@ impl StatementState {
         cx: &PassContext,
         line_index: usize,
     ) {
-        let (carry_code, carry_incoming, statement_boundary) = statement_carry_slice(code, incoming);
+        let (carry_code, carry_incoming, statement_boundary) =
+            statement_carry_slice(code, incoming);
         if statement_boundary {
             self.open_groups.clear();
             self.multiple_subscript_depths.clear();

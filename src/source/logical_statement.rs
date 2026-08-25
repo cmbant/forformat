@@ -75,9 +75,9 @@ impl LogicalGroup {
     /// First statement with source content on one physical line.
     pub fn first_statement_index_on_line(&self, line: usize) -> Option<usize> {
         let piece = self.piece_on_line(line)?;
-        let index = self
-            .statements
-            .partition_point(|statement| statement.offset + statement.text.len() <= piece.text.start);
+        let index = self.statements.partition_point(|statement| {
+            statement.offset + statement.text.len() <= piece.text.start
+        });
         self.statements
             .get(index)
             .filter(|statement| statement.offset < piece.text.end)
