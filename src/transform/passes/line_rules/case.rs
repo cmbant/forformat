@@ -34,7 +34,7 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
     context: &super::super::LineContext<'_>,
 ) -> Vec<u8> {
     let tokens = tokenize(line, state);
-    let inside_paren = inside_paren_at(context.open_groups, &tokens);
+    let inside_paren = inside_paren_at(line, context.open_groups, &tokens);
     // A declaration's `::` need not be on the physical line that is being
     // cased. Until it has been passed, the statement is still in its attribute
     // half, and both of the judgements below have to be made from the whole

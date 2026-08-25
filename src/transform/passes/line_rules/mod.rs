@@ -502,7 +502,7 @@ fn compact_joined_named_arguments(line: &[u8]) -> Vec<u8> {
 
 fn compact_continued_named_argument(line: &[u8], open_groups: &[bool]) -> Vec<u8> {
     let tokens = tokenize(line, &mut LexState::default());
-    let inside_paren = common::inside_paren_at(open_groups, &tokens);
+    let inside_paren = common::inside_paren_at(line, open_groups, &tokens);
     let mut edits = EditBuffer::new(line);
     for (index, token) in tokens.iter().enumerate() {
         if token.text != b"="
@@ -600,8 +600,12 @@ impl EntityListCursor {
 
 fn fold_open_groups(line: &[u8], open: &mut Vec<bool>, incoming: LexState) {
     let mut state = incoming;
-    for token in tokenize(line, &mut state) {
+    let tokens = tokenize(line, &mut state);
+    for (index, token) in tokens.iter().enumerate() {
         match token.kind {
+            TokenKind::LParen if common::opens_array_constructor(line, &tokens, index) => {
+                open.push(false);
+            }
             TokenKind::LParen => open.push(true),
             TokenKind::LBracket => open.push(false),
             TokenKind::RParen | TokenKind::RBracket => {

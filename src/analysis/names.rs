@@ -22,6 +22,10 @@ enum Entry {
     Unique(Vec<u8>),
     /// Two or more spellings differ: the name is off limits.
     Ambiguous,
+    /// The name is in use, but nothing that names it has been seen -- only
+    /// something that refers to it. It counts for membership and never for
+    /// spelling, and any declaration replaces it.
+    Reference,
 }
 
 /// A case-insensitive name index that remembers whether one spelling is
@@ -44,7 +48,7 @@ impl CaseMap {
         }
         let key = spelling.to_ascii_lowercase();
         match self.entries.get(&key) {
-            None => {
+            None | Some(Entry::Reference) => {
                 self.entries.insert(key, Entry::Unique(spelling.to_vec()));
             }
             Some(Entry::Unique(existing)) if existing.as_slice() != spelling => {
@@ -54,11 +58,28 @@ impl CaseMap {
         }
     }
 
+    /// Record that `name` is in use without offering its spelling as evidence.
+    ///
+    /// A use site says an entity exists -- which is what suppresses intrinsic
+    /// handling for a name the file also uses as its own -- but it does not say
+    /// what the entity is called. Letting it say so meant one careless
+    /// `type(modelparams)` made `ModelParams` ambiguous everywhere, including at
+    /// its own definition, and the definition is the only thing that actually
+    /// knows.
+    pub fn insert_reference(&mut self, name: &[u8]) {
+        if name.is_empty() {
+            return;
+        }
+        self.entries
+            .entry(name.to_ascii_lowercase())
+            .or_insert(Entry::Reference);
+    }
+
     /// The single agreed spelling of `name`, if there is one.
     pub fn get(&self, name: &[u8]) -> Option<&[u8]> {
         match self.entries.get(&name.to_ascii_lowercase())? {
             Entry::Unique(spelling) => Some(spelling),
-            Entry::Ambiguous => None,
+            Entry::Ambiguous | Entry::Reference => None,
         }
     }
 
@@ -70,9 +91,20 @@ impl CaseMap {
         )
     }
 
-    /// True when the name has been declared at all, however spelled.
+    /// True when the name is known at all, however spelled, and whether it was
+    /// declared or only referred to.
     pub fn contains(&self, name: &[u8]) -> bool {
         self.entries.contains_key(&name.to_ascii_lowercase())
+    }
+
+    /// True when something that *names* the entity has been seen, so this map
+    /// has an opinion about the spelling -- even the opinion that it is
+    /// contradictory. A bare reference is not one.
+    pub fn declares(&self, name: &[u8]) -> bool {
+        !matches!(
+            self.entries.get(&name.to_ascii_lowercase()),
+            None | Some(Entry::Reference)
+        )
     }
 
     /// Fold another map in.  Disagreement between the two makes the name
@@ -84,6 +116,14 @@ impl CaseMap {
                     self.entries.insert(key.clone(), entry.clone());
                 }
                 (Some(Entry::Ambiguous), _) => {}
+                // A reference carries no spelling, so it neither overrides what
+                // another file declared nor disagrees with it. One file writing
+                // `type(modelparams)` must not cost the project the spelling the
+                // file that defines the type gave it.
+                (_, Entry::Reference) => {}
+                (Some(Entry::Reference), entry) => {
+                    self.entries.insert(key.clone(), entry.clone());
+                }
                 (Some(Entry::Unique(_)), Entry::Ambiguous) => {
                     self.entries.insert(key.clone(), Entry::Ambiguous);
                 }
@@ -103,9 +143,14 @@ impl CaseMap {
     /// entity and must not make it ambiguous the way [`Self::merge`] would.
     pub fn overlay(&mut self, outer: &CaseMap) {
         for (key, entry) in &outer.entries {
-            self.entries
-                .entry(key.clone())
-                .or_insert_with(|| entry.clone());
+            match self.entries.get(key) {
+                // Not a shadow: the inner scope only referred to the name, so
+                // the host's declaration is a declaration of the same entity.
+                None | Some(Entry::Reference) => {
+                    self.entries.insert(key.clone(), entry.clone());
+                }
+                Some(_) => {}
+            }
         }
     }
 
@@ -161,7 +206,9 @@ impl ComponentCaseMap {
             .get(&(type_name.to_ascii_lowercase(), name.to_ascii_lowercase()))?
         {
             Entry::Unique(spelling) => Some(spelling),
-            Entry::Ambiguous => None,
+            // Nothing writes `Reference` into a component map: a component is
+            // only ever recorded where it is declared.
+            Entry::Ambiguous | Entry::Reference => None,
         }
     }
 
@@ -201,6 +248,10 @@ impl ComponentCaseMap {
                     self.entries.insert(key.clone(), entry.clone());
                 }
                 (Some(Entry::Ambiguous), _) => {}
+                // Unreachable, and left explicit rather than swept into a
+                // wildcard so that writing one would be a compile error here
+                // too: see [`ComponentCaseMap::get`].
+                (Some(Entry::Reference), _) | (_, Entry::Reference) => {}
                 (Some(Entry::Unique(_)), Entry::Ambiguous) => {
                     self.entries.insert(key.clone(), Entry::Ambiguous);
                 }
@@ -277,9 +328,14 @@ impl NameSpace {
 /// `local` is the file under formatting; `project` is every source in the
 /// project, including that file.
 pub fn resolve<'a>(local: &'a CaseMap, project: &'a CaseMap, name: &[u8]) -> Option<&'a [u8]> {
-    if local.contains(name) {
+    if local.declares(name) {
         // The file speaks for itself, whether or not it agrees with the rest of
         // the project.  If it contradicts itself, nothing is safe to do.
+        //
+        // Only where it *declares* the name, though. A file that merely writes
+        // `type(modelparams)` has said nothing about the spelling, and taking
+        // that as the file speaking for itself would let a use site veto the
+        // spelling the file that defines the type actually gave it.
         return local.get(name);
     }
     project.get(name)

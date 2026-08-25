@@ -10,7 +10,7 @@ fn full(source: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn keyword_spacing_is_per_statement_after_a_semicolon() {
+fn if_condition_spacing_is_per_statement_after_a_semicolon() {
     let once = full(b"y = 1; if(a)x=1\n");
     assert_eq!(once, b"y = 1; if (a) x = 1\n");
     assert_eq!(full(&once), once);

@@ -83,30 +83,53 @@ pub(crate) fn normalize_keyword_spacing_with_state(
     .then(|| canonicalize_code_whitespace(line, incoming));
     let line = canonical.as_deref().unwrap_or(line);
     let tokens = tokenize(line, &mut incoming.clone());
+    let rules = Rules {
+        line,
+        tokens: &tokens,
+        declared_names,
+        line_index,
+        style,
+        normalize_whitespace,
+        continued_format: statement.continued_format,
+    };
     let mut edits = EditBuffer::new(line);
 
-    // The stage owns statement-level rules, so give every rule one statement
-    // even when several share a physical line. `Semicolon` tokens come from the
-    // real tokenizer, which means semicolons in literals and Hollerith payloads
-    // never become boundaries here. Only the first non-empty slice can continue
-    // a FORMAT statement from an earlier physical line.
-    let mut first_statement = true;
-    for statement_tokens in tokens.split(|token| token.kind == TokenKind::Semicolon) {
-        if statement_tokens.is_empty() {
-            continue;
-        }
-        let rules = Rules {
-            line,
-            tokens: statement_tokens,
-            declared_names,
-            line_index,
-            style,
-            normalize_whitespace,
-            continued_format: statement.continued_format && first_statement,
-        };
-        rules.apply(&mut edits);
-        first_statement = false;
+    // The order is the rule order and is load-bearing: a later rule replaces a
+    // range the earlier one has already rewritten.
+    if normalize_whitespace {
+        rules.common_block(&mut edits);
     }
+    rules.array_constructor_brackets(&mut edits);
+    rules.join_goto(&mut edits);
+    rules.multiword_keywords(&mut edits);
+    rules.split_compound_keywords(&mut edits);
+    rules.token_local(&mut edits);
+    if normalize_whitespace {
+        rules.delimiter_adjacency(&mut edits);
+
+        // This is the one Rule 2 operation whose grammar is explicitly keyed to
+        // a statement head. Keep the rest of the stage's established physical-
+        // line scope, but give this rule tokenizer-defined statement slices so
+        // `y = 1; if(a)x=1` is treated like the same IF on its own line. Using
+        // Semicolon tokens means strings and Hollerith payloads never become
+        // boundaries here.
+        for statement_tokens in tokens.split(|token| token.kind == TokenKind::Semicolon) {
+            if statement_tokens.is_empty() {
+                continue;
+            }
+            Rules {
+                line,
+                tokens: statement_tokens,
+                declared_names,
+                line_index,
+                style,
+                normalize_whitespace,
+                continued_format: false,
+            }
+            .if_condition_gap(&mut edits);
+        }
+    }
+    rules.strip_empty_args(&mut edits);
 
     let mut output = edits.finish();
     let start = output
@@ -124,8 +147,11 @@ pub(crate) fn normalize_keyword_spacing_with_state(
     output
 }
 
-/// One statement's tokens, plus the physical line and settings every rule below
-/// consults.
+/// A token slice from one physical line, plus the settings every rule below consults.
+///
+/// Most rules receive the whole physical line. The one rule whose grammar is
+/// explicitly keyed to a statement head, [`Rules::if_condition_gap`], is also
+/// invoked on tokenizer-defined semicolon statement slices.
 ///
 /// The rules divide in two, and which half a rule is in is the answer to
 /// "does canonicalize-only run it?".
@@ -160,26 +186,6 @@ struct SplitWord<'a> {
 }
 
 impl Rules<'_> {
-    /// Apply this stage's rules to one semicolon-delimited statement.
-    ///
-    /// The order is load-bearing: a later rule may replace a range an earlier
-    /// one has already rewritten.
-    fn apply(&self, edits: &mut EditBuffer) {
-        if self.normalize_whitespace {
-            self.common_block(edits);
-        }
-        self.array_constructor_brackets(edits);
-        self.join_goto(edits);
-        self.multiword_keywords(edits);
-        self.split_compound_keywords(edits);
-        self.token_local(edits);
-        if self.normalize_whitespace {
-            self.delimiter_adjacency(edits);
-            self.if_condition_gap(edits);
-        }
-        self.strip_empty_args(edits);
-    }
-
     /// Is there authored horizontal whitespace between these two offsets?
     fn gap(&self, end: usize, start: usize) -> bool {
         horizontal_gap(self.line, end, start)
@@ -208,12 +214,9 @@ impl Rules<'_> {
         if !self.style.array_brackets || is_format_statement(self.tokens) || self.continued_format {
             return;
         }
-        for pair in self.tokens.windows(2) {
-            if pair[0].kind == TokenKind::LParen
-                && pair[1].kind == TokenKind::Operator
-                && pair[1].text == b"/"
-                && self.gap(pair[0].span.end, pair[1].span.start)
-            {
+        for index in 0..self.tokens.len() {
+            if super::opens_array_constructor(self.line, self.tokens, index) {
+                let pair = &self.tokens[index..index + 2];
                 let mut end = pair[1].span.end;
                 if self.normalize_whitespace {
                     while end < self.line.len() && matches!(self.line[end], b' ' | b'\t') {
@@ -636,14 +639,11 @@ impl Rules<'_> {
     /// adopted as the fixed point. Declining leaves the delimiter rule
     /// unopposed and the line settles on `if (a)) x = 1`.
     ///
-    /// The test is deliberately this local. A guard that asked whether the
-    /// whole *statement*'s delimiters balanced was tried first and was both
-    /// blunter and less accurate: a statement continued onto another line
-    /// cannot balance within it, so `if (a)x = f( &` lost a gap it had always
-    /// had, and the question had to be bounded at a `;`, which meant a second
-    /// definition of where a statement ends that the scanner's own splitter did
-    /// not share. Nothing here needs to know any of that. Whether `)` can begin
-    /// a statement is answered by the token itself.
+    /// The delimiter test itself stays deliberately local. Statement ownership
+    /// is supplied by the caller through tokenizer-defined semicolon slices, so
+    /// this rule does not scan raw bytes for `;` or carry a second statement
+    /// splitter. Whether `)` can begin the guarded statement is still answered
+    /// by the token itself.
     fn if_condition_gap(&self, edits: &mut EditBuffer) {
         let Some(close) = if_condition_close(self.tokens) else {
             return;
