@@ -10,10 +10,19 @@ use std::path::PathBuf;
 enum InputSelection {
     #[default]
     Implicit,
-    Stdin { project_context: Option<PathBuf> },
-    ExplicitPaths { paths: Vec<PathBuf>, isolated: bool },
-    All { directory: Option<PathBuf> },
-    AllFiles { directory: Option<PathBuf> },
+    Stdin {
+        project_context: Option<PathBuf>,
+    },
+    ExplicitPaths {
+        paths: Vec<PathBuf>,
+        isolated: bool,
+    },
+    All {
+        directory: Option<PathBuf>,
+    },
+    AllFiles {
+        directory: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
