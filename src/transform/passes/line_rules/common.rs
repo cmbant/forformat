@@ -785,11 +785,20 @@ fn is_trailing_continuation_marker(line: &[u8], start: usize) -> bool {
     while index < line.len() && line[index].is_ascii_whitespace() {
         index += 1;
     }
-    index < line.len()
-        && line[index] == b'&'
-        && line[index + 1..]
-            .iter()
-            .all(|byte| byte.is_ascii_whitespace())
+    if line.get(index) != Some(&b'&') {
+        return false;
+    }
+    index += 1;
+    while index < line.len() && line[index].is_ascii_whitespace() {
+        index += 1;
+    }
+
+    // A trailing comment does not stop `&` being the line's continuation
+    // marker. Treating only `&` followed directly by end-of-line as trailing
+    // made delimiter adjacency close `[ & ! note` to `[& ! note` on the next
+    // normalization pass, while the layout engine deliberately emits the
+    // former continuation spelling.
+    index == line.len() || line.get(index) == Some(&b'!')
 }
 
 pub fn is_protected(line: &[u8], offset: usize) -> bool {

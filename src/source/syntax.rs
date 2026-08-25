@@ -336,6 +336,15 @@ pub(crate) fn is_declaration_statement(tokens: &[Token<'_>]) -> bool {
     if first.kind != TokenKind::Name {
         return false;
     }
+    // Fortran keywords are not reserved. A name that also spells a type or
+    // declaration attribute is still an ordinary variable when an immediate
+    // top-level assignment follows (`value = f(...)`, `save = .true.`). Calling
+    // that a declaration drops carried call context on continuation lines and
+    // makes a wrapped named argument change from compact to spaced one pass
+    // late.
+    if tokens.get(index + 1).is_some_and(is_top_level_assignment) {
+        return false;
+    }
     if declaration_type_head_len(tokens, index).is_some() {
         return true;
     }
@@ -603,6 +612,12 @@ mod tests {
         let declaration = tokens(b"integer, optional :: x");
         assert!(is_declaration_statement(&declaration));
         assert!(top_level_separator(&declaration).is_some());
+        for source in [b"value = f(x)".as_slice(), b"save = .true.", b"real = 1"] {
+            assert!(
+                !is_declaration_statement(&tokens(source)),
+                "assignment was classified as a declaration: {source:?}"
+            );
+        }
 
         let format = tokens(b"10 format(i0)");
         assert_eq!(first_statement_index(&format), 1);

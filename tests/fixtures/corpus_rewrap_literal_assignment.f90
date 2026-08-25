@@ -1,0 +1,1 @@
+err_string="Sorry, no MPI_Error_string routine is available to interpret the error message"

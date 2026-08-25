@@ -1,0 +1,2 @@
+        real, dimension(ims:ime, jms:jme), intent(in), optional :: mean_fct_agtf, mean_fct_agef, &
+            mean_fct_agsv, mean_fct_aggr, firesize_agtf, firesize_agef, firesize_agsv, firesize_aggr

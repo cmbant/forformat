@@ -265,6 +265,24 @@ pub fn normalize(
     Ok(())
 }
 
+/// Prepare only wrapper-generated continuations for an internal rewrap round.
+///
+/// Full normalization has already reached a fixed point before wrapping. The
+/// only new normalization evidence is at the continuation seams the wrapper
+/// itself emitted, and [`passes::rewrap::prepare_settlement`] canonicalizes
+/// those while preserving every unrelated line and its project-case decision.
+pub(crate) fn prepare_rewrap_settlement(
+    document: &mut Document,
+    project: &ProjectContext,
+    local: &FileFacts,
+    config: &FormatConfig,
+) -> Result<(), FormatError> {
+    let mut contexts = PassContextCache::new(project, local, config);
+    contexts.run(document, passes::rewrap::prepare_settlement)?;
+    passes::layout_post::trim_trailing_horizontal(document);
+    Ok(())
+}
+
 /// Steps 17-20, run on the laid-out text.
 ///
 /// A pass here may change width only when wrapping has already measured its

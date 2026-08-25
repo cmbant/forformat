@@ -1,0 +1,2 @@
+WRITE (UNIT=ounit, FMT="(T2,A,1X,I0,3(1X,ES20.12))") &
+  "SKALA_GPW| Accurate-XCINT atom force", atom_a, my_force_scale*aforce(:, atom_a)

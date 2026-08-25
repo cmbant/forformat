@@ -23,6 +23,29 @@ use crate::{
 };
 
 pub fn prepare(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
+    prepare_inner(document, cx, false)
+}
+
+/// Rejoin wrapper-generated continuations for an internal fixed-point round.
+///
+/// The ordinary pipeline follows [`prepare`] with the physical line-rule pass.
+/// An internal round must not rerun that pass over every unrelated line while
+/// holding the previous project snapshot, because project casing is a
+/// whole-checkout decision. The joined statement has already been normalized
+/// by `respace_joined` for the safety probe, so this variant emits exactly that
+/// spelling and leaves unrelated lines byte-identical.
+pub(crate) fn prepare_settlement(
+    document: &mut Document,
+    cx: &PassContext,
+) -> Result<Changed, FormatError> {
+    prepare_inner(document, cx, true)
+}
+
+fn prepare_inner(
+    document: &mut Document,
+    cx: &PassContext,
+    emit_measured: bool,
+) -> Result<Changed, FormatError> {
     let config = cx.config;
     let analysis = cx.analysis;
     let declared_names = scoped_declared_names(analysis, cx.scopes);
@@ -99,16 +122,18 @@ pub fn prepare(document: &mut Document, cx: &PassContext) -> Result<Changed, For
             continue;
         }
 
-        // Keep this pass structural: the physical line-rule pass that follows
-        // owns the actual seam normalization. This also ensures there is still
-        // only one user-visible normalization path for newly joined lines.
+        // The ordinary pass stays structural: the physical line-rule pass that
+        // follows owns user-visible seam normalization. An internal settlement
+        // round cannot safely rerun that whole-file pass against a project
+        // snapshot from before the first round, so it emits the same measured
+        // joined spelling directly and touches no unrelated line.
         let first = &document.lines[group.lines.start];
         let indent_end = first
             .iter()
             .position(|byte| !matches!(byte, b' ' | b'\t'))
             .unwrap_or(first.len());
         let mut joined = first[..indent_end].to_vec();
-        joined.extend_from_slice(&body);
+        joined.extend_from_slice(if emit_measured { measured_body } else { &body });
         lines.push(joined);
         changed = Changed::Structure;
     }

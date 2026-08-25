@@ -131,21 +131,59 @@ fn format_document_with_context_and_local(
     }
 
     if config.wrap.enabled {
-        let declined = reflow_with_context_inner(&mut document, project, local, config)?;
-        // Every long line the wrapper refuses is explainable; the diagnostic
-        // separates "unwrappable by design" from a wrapper bug.
-        let (output, meta) = lay_out(&document, config)?;
-        return Ok((
-            output,
-            FormatMeta {
-                last_indent: meta.last_indent,
-                last_usable: meta.last_usable,
-                declines: declined,
-            },
-        ));
+        let (mut output, mut meta) = reflow_and_lay_out(&mut document, project, local, config)?;
+        if !config.rewrap {
+            return Ok((output, meta));
+        }
+
+        // Rewrap can change the logical body it is wrapping: splitting a long
+        // literal inserts `//`, and final declaration alignment can repartition
+        // the continuation block whose breaks were just selected. The next
+        // external invocation rejoins those emitted continuations and therefore
+        // sees break candidates or widths the first normalization snapshot did
+        // not contain. Settle that rewrap-specific normalization plus layout
+        // here so one invocation reaches the same fixed point.
+        for _ in 1..MAX_REFLOW_ROUNDS {
+            let source = output.to_bytes();
+            let mut candidate = Document::from_bytes(&source);
+            pipeline::prepare_rewrap_settlement(&mut candidate, project, local, config)?;
+            let (next, next_meta) = reflow_and_lay_out(&mut candidate, project, local, config)?;
+            if next == output {
+                return Ok((next, next_meta));
+            }
+            output = next;
+            meta = next_meta;
+        }
+        debug_assert!(
+            false,
+            "the complete rewrap pipeline did not converge in {MAX_REFLOW_ROUNDS} rounds"
+        );
+        return Ok((output, meta));
     }
 
     lay_out(&document, config)
+}
+
+/// Wrap one normalized document and apply the layout/post-layout stages whose
+/// output determines both the next rewrap round and the final diagnostics.
+fn reflow_and_lay_out(
+    document: &mut Document,
+    project: &ProjectContext,
+    local: &crate::analysis::FileFacts,
+    config: &FormatConfig,
+) -> Result<(Document, FormatMeta), FormatError> {
+    let declined = reflow_with_context_inner(document, project, local, config)?;
+    // Every long line the wrapper refuses is explainable; the diagnostic
+    // separates "unwrappable by design" from a wrapper bug.
+    let (output, meta) = lay_out(document, config)?;
+    Ok((
+        output,
+        FormatMeta {
+            last_indent: meta.last_indent,
+            last_usable: meta.last_usable,
+            declines: declined,
+        },
+    ))
 }
 
 /// Run the layout engine and the post-layout passes over the normalized text.

@@ -98,6 +98,210 @@ fn rewrap_restores_a_wider_wrap_after_a_narrower_wrap() {
 }
 
 #[test]
+fn rewrap_settles_a_literal_split_before_choosing_write_breaks() {
+    // Reduced from CP2K `src/accint_weights_forces.F`.  The first wrap has to
+    // split the literal before the generated `//` exists.  Rejoining that
+    // generated spelling exposes a better break, which must be selected in
+    // this invocation rather than the next one.
+    let source = b"WRITE (UNIT=ounit, FMT=\"(T2,A,1X,I0,3(1X,ES20.12))\") &\n  \
+\"SKALA_GPW| Accurate-XCINT atom force\", atom_a, my_force_scale*aforce(:, atom_a)\n";
+    let mut config = FormatConfig {
+        rewrap: true,
+        ..FormatConfig::default()
+    };
+    config.wrap.line_length = 100;
+    config.start_indent = 28;
+    config.continuation_indent = 4;
+    config.align_paren = true;
+    config.align_paren_value = 4;
+
+    let once = format_source(source, &config).unwrap().bytes;
+    let twice = format_source(&once, &config).unwrap().bytes;
+
+    assert_eq!(
+        String::from_utf8_lossy(&once),
+        String::from_utf8_lossy(&twice)
+    );
+    assert!(
+        String::from_utf8_lossy(&once).contains(
+            "write(unit=ounit, fmt=\"(T2,A,1X,I0,3(1X,ES20.12))\")  \
+\"SKALA_GPW| \" // &"
+        ),
+        "{}",
+        String::from_utf8_lossy(&once)
+    );
+}
+
+#[test]
+fn rewrap_settles_a_generated_literal_split_at_an_assignment() {
+    // Reduced from ABINIT `m_xmpi.F90`.  Splitting the original one-token
+    // literal creates a concatenation expression; that generated expression
+    // fits after an assignment break even though the original layout did not.
+    let source =
+        b"err_string=\"Sorry, no MPI_Error_string routine is available to interpret the error message\"\n";
+    let mut config = FormatConfig {
+        rewrap: true,
+        ..FormatConfig::default()
+    };
+    config.wrap.line_length = 100;
+    config.start_indent = 8;
+    config.continuation_indent = 4;
+    config.align_paren = true;
+    config.align_paren_value = 4;
+
+    let once = format_source(source, &config).unwrap().bytes;
+    let twice = format_source(&once, &config).unwrap().bytes;
+
+    assert_eq!(
+        String::from_utf8_lossy(&once),
+        String::from_utf8_lossy(&twice)
+    );
+    assert!(
+        String::from_utf8_lossy(&once).contains("err_string = &\n"),
+        "{}",
+        String::from_utf8_lossy(&once)
+    );
+}
+
+#[test]
+fn rewrap_settles_post_layout_declaration_breaks() {
+    // Reduced from WRF `chem/emissions_driver.F`.  The first pass joins the
+    // authored attribute continuations, while final `::` alignment changes the
+    // emitted declaration width.  Rewrapping only the pre-layout snapshot left
+    // the final entity on its own line until the next formatter invocation.
+    let source = concat!(
+        "REAL, DIMENSION(ims:ime, jms:jme), &\n",
+        "  OPTIONAL, &\n",
+        "  INTENT(IN) :: &\n",
+        "  mean_fct_agtf,mean_fct_agef, &\n",
+        "  mean_fct_agsv,mean_fct_aggr,firesize_agtf,firesize_agef, &\n",
+        "  firesize_agsv,firesize_aggr\n",
+    )
+    .as_bytes();
+    let mut config = FormatConfig {
+        rewrap: true,
+        ..FormatConfig::default()
+    };
+    config.wrap.line_length = 100;
+    config.start_indent = 8;
+    config.continuation_indent = 4;
+    config.align_paren = true;
+    config.align_paren_value = 4;
+
+    let once = format_source(source, &config).unwrap().bytes;
+    let twice = format_source(&once, &config).unwrap().bytes;
+
+    assert_eq!(
+        String::from_utf8_lossy(&once),
+        String::from_utf8_lossy(&twice)
+    );
+    assert!(
+        String::from_utf8_lossy(&once).contains("firesize_agsv, firesize_aggr\n"),
+        "{}",
+        String::from_utf8_lossy(&once)
+    );
+}
+
+#[test]
+fn rewrap_settles_a_write_control_list_break() {
+    // Reduced from Quantum ESPRESSO `Modules/environment.f90`.  Parenthesis
+    // alignment moves the closing `)` after the first generated break, so the
+    // full rewrap/layout composition must settle rather than moving it on the
+    // following invocation.
+    let source = concat!(
+        "IF ( nproc_bgrp > 1 ) WRITE( stdout, &\n",
+        "  '(5X,\"R & G space division:  proc/nbgrp/npool/nimage = \",I7)' ) nproc_bgrp\n",
+    )
+    .as_bytes();
+    let mut config = FormatConfig {
+        rewrap: true,
+        ..FormatConfig::default()
+    };
+    config.wrap.line_length = 100;
+    config.start_indent = 8;
+    config.continuation_indent = 4;
+    config.align_paren = true;
+    config.align_paren_value = 4;
+
+    let once = format_source(source, &config).unwrap().bytes;
+    let twice = format_source(&once, &config).unwrap().bytes;
+
+    assert_eq!(
+        String::from_utf8_lossy(&once),
+        String::from_utf8_lossy(&twice)
+    );
+    assert!(
+        String::from_utf8_lossy(&once)
+            .contains("' &\n                                  )  nproc_bgrp"),
+        "{}",
+        String::from_utf8_lossy(&once)
+    );
+}
+
+#[test]
+fn a_wrapped_compact_named_argument_settles_operator_spacing() {
+    // Reduced from CP2K `src/input/input_val_types.F`. `value` is a valid name
+    // even though it also spells a declaration attribute. Misclassifying the
+    // assignment as a declaration made the continuation lose call context and
+    // space the compact named-argument `=` on the second pass.
+    let source = b"value = cp_unit_from_cp2k(value=val%r_val(i), &\n  \
+unit_str=cp_unit_desc(unit=unit))\n";
+    let mut config = FormatConfig::default();
+    config.wrap.line_length = 72;
+    config.start_indent = 14;
+    config.continuation_indent = 4;
+    config.align_paren = true;
+    config.align_paren_value = 2;
+    config.style.max_blank_lines = Some(0);
+
+    let once = format_source(source, &config).unwrap().bytes;
+    let twice = format_source(&once, &config).unwrap().bytes;
+
+    assert_eq!(
+        String::from_utf8_lossy(&once),
+        String::from_utf8_lossy(&twice)
+    );
+    assert!(
+        String::from_utf8_lossy(&once).contains("unit_str= &"),
+        "{}",
+        String::from_utf8_lossy(&once)
+    );
+}
+
+#[test]
+fn rewrap_preserves_the_gap_before_a_commented_continuation() {
+    // Reduced from OpenFAST `modules/aerodyn/src/AeroDyn_IO_Params.f90`.
+    // Rewriting the legacy constructor and wrapping the following declaration
+    // consumes all internal reflow rounds. The next invocation must not then
+    // reinterpret `[ & ! comment` as ordinary delimiter whitespace and close
+    // the gap that layout deliberately preserved before the continuation.
+    let source = include_bytes!("fixtures/corpus_rewrap_commented_constructor.f90");
+    let mut config = FormatConfig {
+        rewrap: true,
+        ..FormatConfig::default()
+    };
+    config.wrap.line_length = 100;
+    config.start_indent = 0;
+    config.continuation_indent = 4;
+    config.align_paren = true;
+    config.align_paren_value = 4;
+
+    let once = format_source(source, &config).unwrap().bytes;
+    let twice = format_source(&once, &config).unwrap().bytes;
+
+    assert_eq!(
+        String::from_utf8_lossy(&once),
+        String::from_utf8_lossy(&twice)
+    );
+    assert!(
+        String::from_utf8_lossy(&once)
+            .contains("reshape([ &           ! Undisturbed wind velocity"),
+        "{}",
+        String::from_utf8_lossy(&once)
+    );
+}
+
+#[test]
 fn every_mode_removes_line_terminal_whitespace() {
     // Interior whitespace can be deliberate alignment, so the modes that do not
     // own presentation preserve it. Whitespace at end of line is invisible in
