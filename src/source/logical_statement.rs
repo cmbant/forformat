@@ -56,6 +56,51 @@ impl LogicalGroup {
     ) -> Option<(usize, u32)> {
         self.source_of(statement.offset + offset)
     }
+
+    /// Which logical statement owns one byte of physical source.
+    ///
+    /// Separators themselves deliberately have no owner. Statement content is
+    /// mapped through the existing joined-text provenance rather than through a
+    /// second index, so semicolon splitting and continuation joining keep one
+    /// source of truth.
+    pub fn statement_index_at_source(&self, line: usize, byte: u32) -> Option<usize> {
+        let piece = self
+            .pieces
+            .iter()
+            .find(|piece| piece.line == line && piece.bytes.contains(&byte))?;
+        let joined = piece.text.start + (byte - piece.bytes.start) as usize;
+        self.statements.iter().position(|statement| {
+            (statement.offset..statement.offset + statement.text.len()).contains(&joined)
+        })
+    }
+
+    /// First statement with source content on one physical line.
+    pub fn first_statement_index_on_line(&self, line: usize) -> Option<usize> {
+        self.statements
+            .iter()
+            .enumerate()
+            .find(|(_, statement)| self.statement_has_source_on_line(statement, line))
+            .map(|(index, _)| index)
+    }
+
+    /// Last statement with source content on one physical line.
+    pub fn last_statement_index_on_line(&self, line: usize) -> Option<usize> {
+        self.statements
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, statement)| self.statement_has_source_on_line(statement, line))
+            .map(|(index, _)| index)
+    }
+
+    fn statement_has_source_on_line(&self, statement: &LogicalStatement, line: usize) -> bool {
+        let statement = statement.offset..statement.offset + statement.text.len();
+        self.pieces.iter().any(|piece| {
+            piece.line == line
+                && piece.text.start < statement.end
+                && statement.start < piece.text.end
+        })
+    }
 }
 
 impl LogicalGroup {
@@ -291,6 +336,29 @@ x = 1
         assert_eq!(groups[0].lines, 0..6);
         assert_eq!(groups[0].statements.len(), 1);
         assert_eq!(groups[0].statements[0].text, b"x = a  b  c");
+    }
+
+    #[test]
+    fn semicolon_statement_ownership_follows_source_pieces() {
+        let buffer = SourceBuffer::new(b"data x/1/; call p(&\n& a=1)\n").unwrap();
+        let groups = LogicalGroup::assemble(&buffer);
+        let group = &groups[0];
+        assert_eq!(group.statements.len(), 2);
+        assert_eq!(group.first_statement_index_on_line(0), Some(0));
+        assert_eq!(group.last_statement_index_on_line(0), Some(1));
+        assert_eq!(group.first_statement_index_on_line(1), Some(1));
+        assert_eq!(group.last_statement_index_on_line(1), Some(1));
+
+        let line = &buffer.lines[0];
+        let code = buffer.code_bytes(line);
+        let call = code
+            .windows(4)
+            .position(|window| window.eq_ignore_ascii_case(b"call"))
+            .unwrap();
+        assert_eq!(
+            group.statement_index_at_source(0, line.code_span.start + call as u32),
+            Some(1)
+        );
     }
 
     #[test]
