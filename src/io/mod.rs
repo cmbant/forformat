@@ -294,19 +294,18 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
             stdin_local.as_ref(),
         );
     }
+    let prepared = PreparedRun {
+        invocation: &invocation,
+        scope: &scope,
+        selection: &selection,
+        loaded: &loaded,
+        facts: &facts,
+        context: &context,
+    };
     if invocation.stdout {
-        return format_to_stdout(&invocation, &scope, &selection, &loaded, &facts, &context);
+        return format_to_stdout(&prepared);
     }
-    format_files(
-        &invocation,
-        &scope,
-        &selection,
-        &loaded,
-        &target_indices,
-        &facts,
-        &context,
-        &profile,
-    )
+    format_files(&prepared, &target_indices, &profile)
 }
 
 fn expect_stdin(source: Option<&[u8]>) -> &[u8] {
@@ -446,28 +445,34 @@ fn format_project_stdin(
     Ok(0)
 }
 
-fn format_to_stdout(
-    invocation: &Invocation,
-    scope: &Scope,
-    selection: &Selection,
-    loaded: &Loaded,
-    facts: &[Option<crate::analysis::FileFacts>],
-    context: &crate::analysis::ProjectContext,
-) -> Result<i32, WorkflowError> {
-    let path = &selection.targets[0];
-    let source_index = loaded.index[path];
+/// Correlated immutable inputs shared by the prepared file-output routes.
+///
+/// Target indices and profiling stay explicit at the call site because they
+/// describe a particular route's execution rather than the prepared context.
+struct PreparedRun<'a> {
+    invocation: &'a Invocation,
+    scope: &'a Scope,
+    selection: &'a Selection,
+    loaded: &'a Loaded,
+    facts: &'a [Option<crate::analysis::FileFacts>],
+    context: &'a crate::analysis::ProjectContext,
+}
+
+fn format_to_stdout(run: &PreparedRun<'_>) -> Result<i32, WorkflowError> {
+    let path = &run.selection.targets[0];
+    let source_index = run.loaded.index[path];
     let mut declines = DeclineReporter::default();
-    if loaded.sources[source_index].form == SourceForm::Fixed {
-        declines.report_fixed(path, scope.root.as_deref());
-        write_all_stdout(&loaded.sources[source_index].bytes)?;
+    if run.loaded.sources[source_index].form == SourceForm::Fixed {
+        declines.report_fixed(path, run.scope.root.as_deref());
+        write_all_stdout(&run.loaded.sources[source_index].bytes)?;
     } else {
         let formatted = format_one(
-            &loaded.sources[source_index],
-            facts[source_index].as_ref(),
-            context,
-            &invocation.config,
+            &run.loaded.sources[source_index],
+            run.facts[source_index].as_ref(),
+            run.context,
+            &run.invocation.config,
         )?;
-        declines.report(&formatted.meta, Some(path), scope.root.as_deref());
+        declines.report(&formatted.meta, Some(path), run.scope.root.as_deref());
         write_all_stdout(&formatted.bytes)?;
     }
     declines.finish();
@@ -479,57 +484,54 @@ fn format_to_stdout(
 ///
 /// Every target is formatted before anything is written, so a failure part-way
 /// through cannot leave a half-rewritten tree.
-#[allow(clippy::too_many_arguments)]
 fn format_files(
-    invocation: &Invocation,
-    scope: &Scope,
-    selection: &Selection,
-    loaded: &Loaded,
+    run: &PreparedRun<'_>,
     target_indices: &[usize],
-    facts: &[Option<crate::analysis::FileFacts>],
-    context: &crate::analysis::ProjectContext,
     profile: &Profile,
 ) -> Result<i32, WorkflowError> {
     let formatting_start = Instant::now();
     let formatted = format_targets(
-        &loaded.sources,
+        &run.loaded.sources,
         target_indices,
-        facts,
-        context,
-        &invocation.config,
+        run.facts,
+        run.context,
+        &run.invocation.config,
     )?;
     let mut changed = Vec::new();
     let mut declines = DeclineReporter::default();
     let mut formatted = formatted.into_iter();
-    for path in &selection.targets {
-        let target = &loaded.sources[loaded.index[path]];
+    for path in &run.selection.targets {
+        let target = &run.loaded.sources[run.loaded.index[path]];
         if target.form == SourceForm::Fixed {
-            declines.report_fixed(path, scope.root.as_deref());
+            declines.report_fixed(path, run.scope.root.as_deref());
             continue;
         }
         let (meta, output) = formatted
             .next()
             .expect("one formatting result per free-form target");
-        declines.report(&meta, Some(path), scope.root.as_deref());
+        declines.report(&meta, Some(path), run.scope.root.as_deref());
         let Some(formatted) = output else {
             continue;
         };
         changed.push(path.clone());
-        if invocation.diff {
+        if run.invocation.diff {
             write_all_stdout(&unified_diff(
                 path,
                 &target.bytes,
                 &formatted,
-                scope.root.as_deref(),
+                run.scope.root.as_deref(),
             ))?;
-        } else if !invocation.check {
+        } else if !run.invocation.check {
             atomic_replace(path, &formatted)?;
         }
     }
     declines.finish();
-    if !invocation.diff {
+    if !run.invocation.diff {
         for path in &changed {
-            println!("{}", display_path(path, scope.root.as_deref()).display());
+            println!(
+                "{}",
+                display_path(path, run.scope.root.as_deref()).display()
+            );
         }
     }
     profile.report(|| {
@@ -541,6 +543,6 @@ fn format_files(
         )
     });
     Ok(i32::from(
-        (invocation.check || invocation.diff) && !changed.is_empty(),
+        (run.invocation.check || run.invocation.diff) && !changed.is_empty(),
     ))
 }
