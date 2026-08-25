@@ -1,17 +1,9 @@
 pub fn leading_ampersand(line: &[u8]) -> bool {
-    let mut s = line;
-    while s.first().is_some_and(|c| c.is_ascii_whitespace()) {
-        s = &s[1..];
-    }
-    s.first() == Some(&b'&')
+    line.trim_ascii_start().first() == Some(&b'&')
 }
 
 pub fn trailing_ampersand(line: &[u8]) -> bool {
-    let mut s = line;
-    while s.last().is_some_and(|c| c.is_ascii_whitespace()) {
-        s = &s[..s.len() - 1];
-    }
-    s.last() == Some(&b'&')
+    line.trim_ascii_end().last() == Some(&b'&')
 }
 
 pub fn paren_alignment(line: &[u8]) -> Option<usize> {
