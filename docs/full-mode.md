@@ -37,6 +37,9 @@ makes I2 structural rather than empirical. I1 remains an obligation of every pas
 No pass may rewrite protected literal, Hollerith, preprocessor, or ordinary comment bytes except
 the narrow documented commented-assignment rule. Edits are span-based and byte-oriented, so source
 that is not valid UTF-8 remains supported.
+Delimiter spacing enforces that structurally: each editable code region is normalized into its own
+output buffer, so backwards comma/delimiter cleanup cannot truncate bytes belonging to an adjacent
+protected region. Only whether earlier/later content exists crosses that region boundary.
 
 ## Per-line normalization
 
@@ -52,10 +55,17 @@ spellings. Its ordered rules are:
 - modernize `(/ ... /)` to `[ ... ]` outside `FORMAT`, add output-item spacing, and apply the
   narrow comment rule.
 
-A continuation line has no statement context by itself. `LineState` carries facts between physical
-lines and exposes them to each stage through `LineContext`, including declaration, named-argument,
-FORMAT, and open-group state. When wrapping rejoins a statement, the joined text runs through the
-appropriate rules again.
+Stable statement context is analyzed once per logical statement. `Analysis::StatementFacts` caches
+policy-free recognizers from `source::syntax`; source provenance maps physical bytes back to the
+statement that owns them. On a semicolon line, current-line context uses the first statement with
+source on that line, while continuation carry uses the last. Dynamic state such as open groups and
+declaration-entity cursors resets at the same real semicolon boundary.
+
+`LineState` carries only the dynamic state that genuinely spans physical lines and exposes it through
+`LineContext`. The line-rule chain scans scratch lexical state; `source::regions::advance_stream_line`
+is the single authority for what protected-region state survives a physical line, shared with
+`SourceBuffer`. When wrapping rejoins a statement, the joined text runs through the appropriate
+rules again.
 
 ### Style controls
 
@@ -105,9 +115,10 @@ For example:
 
 The per-line gates live in `passes::line_rules`; the line-count gates for redundant parentheses,
 terminal returns, and continuations live in `transform::pipeline`; program-unit spacing and blank
-caps are post-layout passes. This ownership keeps `--indent-only` on its early engine return and
-keeps continuation-sensitive facts in `LineState` and `LineContext` rather than inferring statement
-kind from a continuation line.
+caps are post-layout passes. Stable statement facts live in `Analysis`, ownership comes from
+`LogicalGroup` provenance, and only dynamic continuation state lives in `LineState`/`LineContext`.
+This keeps `--indent-only` on its early engine return and avoids re-inferring statement kind from a
+continuation line.
 
 Examples of the intended shapes:
 
@@ -176,11 +187,12 @@ bits and updates a symlink target rather than replacing the link.
 
 | Concern | Module |
 |---|---|
-| Protected regions and lexical state | `src/source/regions.rs` |
-| Tokens and statement assembly | `src/source/tokens.rs`, `src/source/logical_statement.rs` |
+| Protected regions and lexical-state advancement | `src/source/regions.rs` |
+| Policy-free syntax recognition | `src/source/syntax.rs` |
+| Tokens, statement assembly, and source ownership | `src/source/tokens.rs`, `src/source/logical_statement.rs` |
 | Layout planning and emission | `src/format/planner.rs`, `src/format/engine.rs` |
 | Wrapping | `src/format/wrapping.rs` |
-| Full-mode driver | `src/format/full.rs` |
+| Full-mode facade and driver | `src/format/full/mod.rs`, `src/format/full/driver.rs` |
 | Mutable document and re-analysis | `src/transform/document.rs` |
 | Pass order | `src/transform/pipeline.rs` |
 | Normalization passes | `src/transform/passes/` |
@@ -191,8 +203,11 @@ bits and updates a symlink target rather than replacing the link.
 
 - A pass is complete or inert; half-applied normalization is not acceptable.
 - Every new rule needs a fixture or focused test proving I1.
-- A continuation rule must receive statement facts explicitly; it must not infer them from the
-  continuation's first token.
+- A continuation rule must use the owning logical statement's cached facts; it must not infer them
+  from the continuation's first token. Semicolon-separated statements on one physical line have
+  distinct owners and distinct carried state.
+- Do not create a second carried lexical-state path in line rules. `advance_stream_line` is the
+  shared authority for `SourceBuffer` and step 11; individual rules only inspect scratch scans.
 - Any new post-layout width change must be included in emitted-width measurement.
 - A behavioral claim should be explained in terms of Fortran syntax or formatter invariants, not a
   private input tree.
