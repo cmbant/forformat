@@ -90,11 +90,16 @@ jobs:
   # runs the mutation loop, which is where new inputs actually come from.
   #
   # It is non-blocking *for now*. A failure here is never a false alarm -- the
-  # crashing input is uploaded and reproduces exactly -- but `TODO.md` records
-  # two known unfixed I1 defects that a mutating run rediscovers on its own,
-  # so gating merges on it today would just mean random red builds for bugs the
-  # PR did not introduce. Once those are fixed, drop `continue-on-error` and
-  # make this required.
+  # crashing input is uploaded and reproduces exactly -- but it is often not the
+  # PR's fault either: `TODO.md` no longer lists a known unfixed I1 defect, and
+  # a 120s-per-target run still turned up a long-standing one (a wrap that broke
+  # onto a stray `&`, now fixed and covered by `line_start_promotion.rs`). While
+  # the loop keeps finding pre-existing bugs, gating merges on it means red
+  # builds for defects the PR did not introduce.
+  #
+  # The condition for making it required is therefore not "TODO.md is empty" but
+  # "a long run finds nothing new" -- when a campaign well past 120s per target
+  # comes back clean, drop `continue-on-error`.
   fuzz:
     name: fuzz (mutating, non-blocking)
     needs: fast-checks

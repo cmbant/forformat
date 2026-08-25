@@ -120,6 +120,32 @@ fn a_continuation_body_is_never_promoted_to_an_unmodelled_directive() {
     }
 }
 
+/// The wrapper picks where a statement breaks, so it can manufacture one of
+/// these openings too. A stray `&` inside a statement is data; put first on the
+/// continuation the wrapper just created, it is the optional leading marker,
+/// and the next pass eats it. `program bf=&,(zzz...)` wrapped to
+/// `program bf = &` / `&, (zzz...` and the run after that wrote `   , (zzz...`,
+/// deleting a byte the author wrote.
+///
+/// Found by `FUZZ_TIME=120 ./tools/check_fuzz_regression.sh` in the
+/// `properties` target and reduced from the 134-byte artifact.
+#[test]
+fn a_wrapped_line_never_breaks_onto_a_continuation_marker() {
+    let mut source = b"program bf=&,(".to_vec();
+    source.extend(std::iter::repeat_n(b'z', 101));
+    source.extend_from_slice(b"a&c\n");
+    // No line may *open* on the marker; the wrapper's own marker closes a line
+    // and is not at stake.
+    let once = stable_without_promoted(&source, &[b"&"]);
+    // Both authored `&` survive, alongside the one marker the wrap added.
+    assert_eq!(
+        once.iter().filter(|byte| **byte == b'&').count(),
+        3,
+        "expected both authored & plus one wrap marker in {:?}",
+        String::from_utf8_lossy(&once),
+    );
+}
+
 /// A continuation body that is only a comment is genuinely safe to promote:
 /// `&! c` is already a continuation line carrying a trailing comment, so
 /// emitting `! c` changes neither the statement nor where the group ends.

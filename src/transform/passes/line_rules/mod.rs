@@ -403,8 +403,10 @@ fn apply_rules(
         declared_names,
         line_index,
         incoming,
-        context.continued_format,
-        normalize_whitespace,
+        common::keyword_spacing::Statement {
+            continued_format: context.continued_format,
+            normalize_whitespace,
+        },
         &cx.config.style,
     );
     // 3. WRITE output spacing (physical lines only).

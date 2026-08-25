@@ -63,10 +63,12 @@ pub(in crate::transform::passes::line_rules) fn normalize_delimiter_spacing_with
             let following_content = regions
                 .get(index + 1)
                 .is_some_and(|next| next.kind != RegionKind::Comment);
+            let floor = result.len();
             normalize_delimiters_in_code(
                 &text[region.range.clone()],
                 &mut result,
                 following_content,
+                floor,
             );
         } else {
             result.extend_from_slice(&text[region.range.clone()]);
@@ -137,21 +139,43 @@ fn trim_ascii(mut bytes: &[u8]) -> &[u8] {
 
 fn normalize_old_style_declaration(line: &[u8], incoming: LexState) -> Vec<u8> {
     let mut state = incoming;
+    let regions = state.regions(line);
     let mut result = Vec::with_capacity(line.len());
-    state.scan(line, |region| {
+    for (index, region) in regions.iter().enumerate() {
         if region.kind == RegionKind::Code {
-            let code = &line[region.range];
+            let code = &line[region.range.clone()];
+            // A comment does not count, exactly as in
+            // [`normalize_delimiter_spacing_with_context`]: the gap in front of
+            // one belongs to `normalize_comment_spacing`, which sizes it from
+            // the code that ends up before it. Counting it here left that rule
+            // a blank this one had already decided to keep, and it took the
+            // extra one back out on the next pass.
+            let followed = regions
+                .get(index + 1)
+                .is_some_and(|next| next.kind != RegionKind::Comment);
             let mut one = Vec::new();
-            normalize_old_style_code(code, &mut one);
+            normalize_old_style_code(code, &mut one, followed);
             result.extend_from_slice(&one);
         } else {
-            result.extend_from_slice(&line[region.range]);
+            result.extend_from_slice(&line[region.range.clone()]);
         }
-    });
+    }
     result
 }
 
-fn normalize_old_style_code(code: &[u8], out: &mut Vec<u8>) {
+/// Squeeze one code region of an old-style declaration into `out`.
+///
+/// `followed` says a region of *content* comes after this one, which decides
+/// what a blank at the region's end is. Ending the line, it is trailing
+/// whitespace and goes. Ending a region, it is the only thing between this
+/// declaration and whatever opens the next one -- and a Hollerith region begins
+/// at its own `4h` prefix, so `REAL 4habcd` splits as the code `REAL ` and the
+/// Hollerith `4habcd`. Dropping that blank spelled `real4habcd`, one
+/// identifier, and the character constant was simply gone: not a byte changed
+/// inside the payload but the whole constant destroyed from outside it.
+///
+/// A trailing comment is not content for this purpose; see the caller.
+fn normalize_old_style_code(code: &[u8], out: &mut Vec<u8>, followed: bool) {
     let mut source = code.to_vec();
     let tokens = crate::source::tokens::tokens(code);
     let first = first_statement_index(&tokens);
@@ -195,14 +219,38 @@ fn normalize_old_style_code(code: &[u8], out: &mut Vec<u8>) {
             out.push(*byte);
         }
     }
+    if pending && followed {
+        out.push(b' ');
+    }
 }
 
-fn normalize_delimiters_in_code(code: &[u8], out: &mut Vec<u8>, following_content: bool) {
+/// Normalize one code region of a line into `out`, which already holds every
+/// region before it.
+///
+/// `floor` is where this region's own bytes begin in `out`. The comma rule
+/// walks backwards over blanks, and `out` is shared across regions, so without
+/// a floor that walk runs off the front of the region and into whatever
+/// preceded it. When what preceded it was a Hollerith payload, the blanks it
+/// deleted were payload bytes: `call p(5habcd  ,y)` became
+/// `call p(5habcd, y)`, and `5h` still claims five characters, so the constant
+/// silently changed from `abcd ` to `abcd,`. The region scanner had the extent
+/// right all along -- the same payload is protected from case normalization --
+/// and this is the rule that was not asking it.
+fn normalize_delimiters_in_code(
+    code: &[u8],
+    out: &mut Vec<u8>,
+    following_content: bool,
+    floor: usize,
+) {
     let mut index = 0;
     while index < code.len() {
         if code[index] == b',' {
             let mut keep = out.len();
-            while keep > 0 && matches!(out[keep - 1], b' ' | b'\t') {
+            // Only this region's blanks are this rule's to remove. The test
+            // below still reads all of `out`, because a payload before the
+            // floor is content: it is what makes the blank after it redundant
+            // rather than a comma-led line's indentation.
+            while keep > floor && matches!(out[keep - 1], b' ' | b'\t') {
                 keep -= 1;
             }
             if out[..keep].iter().any(|byte| !matches!(byte, b' ' | b'\t')) {

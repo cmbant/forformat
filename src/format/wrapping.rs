@@ -15,6 +15,7 @@
 use crate::format::continuation::ParenAlignmentState;
 use crate::source::{
     regions::LexState,
+    syntax::{line_start_syntax, LineStartSyntax},
     tokens::{tokenize, Token, TokenKind},
 };
 
@@ -115,7 +116,9 @@ pub fn wrap_body_with_alignment(
         let limit = line_length.saturating_sub(current + 2);
         let mut position = None;
         if first_break {
-            if let Some(candidate) = assignment_wrap_position(&rest, limit) {
+            if let Some(candidate) = assignment_wrap_position(&rest, limit)
+                .filter(|candidate| !continuation_head_is_line_start_syntax(&rest, *candidate))
+            {
                 let remainder = trim_start(&rest[candidate..]);
                 let mut trial_state = paren_state.clone();
                 let next = next_continuation(
@@ -264,13 +267,50 @@ fn next_continuation(
 pub fn wrap_position(body: &[u8], limit: usize) -> Option<usize> {
     let tokens = tokenize(body, &mut LexState::default());
     let limit = scan_limit(&tokens, limit);
+    let safe = |position: &usize| !continuation_head_is_line_start_syntax(body, *position);
     let head_end = statement_head_end(&tokens, limit);
     if head_end > 0 {
-        return operator_break_position(&tokens, head_end, limit).or(Some(head_end));
+        return operator_break_position(body, &tokens, head_end, limit)
+            .or_else(|| Some(head_end).filter(safe));
     }
-    operator_break_position(&tokens, 0, limit)
-        .or_else(|| assignment_break_position(&tokens, limit))
-        .or_else(|| whitespace_break_position(body, &tokens, limit))
+    operator_break_position(body, &tokens, 0, limit)
+        .or_else(|| assignment_break_position(&tokens, limit).filter(safe))
+        .or_else(|| whitespace_break_position(body, &tokens, limit).filter(safe))
+}
+
+/// Whether breaking `body` at `position` would open the continuation with
+/// syntax that only means something at the start of a physical line.
+///
+/// A stray `&` is the one that bites. Written inside a statement it is a byte
+/// the formatter carries through; first on a continuation line it is the
+/// optional leading marker, and the next pass consumes it. `program bf=&,(...`
+/// wrapped to `program bf = &` / `&, (...`, and the run after that spelled the
+/// second line `   , (...` -- an I1 break that *deletes* a byte, which is worse
+/// than the ones that only move blanks around.
+///
+/// The test is [`line_start_syntax`], the same one the continuation pass reads,
+/// so the wrapper cannot come to disagree with the reader about what it has
+/// just written. `Blank` is not a refusal: a break that leaves nothing after it
+/// is impossible here, and refusing on it would only ever be a false positive.
+///
+/// This is [`continuation_head_would_gain_relational_space`] one level up --
+/// same reason, that the next pass would rewrite what this break produced, and
+/// the same remedy, which is to break somewhere else.
+///
+/// [`wrap_position`]'s other caller reflows a directive, where each physical
+/// line opens with `!$omp ` rather than at column zero. The test still holds
+/// there, and for the same reason: a `&` right after the sentinel is that
+/// stream's own continuation marker, which is the doubled-marker case in
+/// `tests/line_start_promotion.rs`.
+///
+/// Refusing every candidate ends in [`Decline::NoSafeBreak`] and an over-long
+/// line. That is the right way to be wrong here: a line nobody wrapped is a
+/// fixed point, and a line wrapped onto a marker loses a byte.
+fn continuation_head_is_line_start_syntax(body: &[u8], position: usize) -> bool {
+    !matches!(
+        line_start_syntax(&body[position..]),
+        LineStartSyntax::Ordinary | LineStartSyntax::Blank
+    )
 }
 
 /// Stop scanning at an inline comment marker.
@@ -284,7 +324,12 @@ fn scan_limit(tokens: &[Token], limit: usize) -> usize {
 /// The tiered operator search.  Candidates are ranked by, in order: filling the
 /// line at all, shallowest bracket depth, loosest operator, and then the
 /// rightmost position.
-fn operator_break_position(tokens: &[Token], start: usize, limit: usize) -> Option<usize> {
+fn operator_break_position(
+    body: &[u8],
+    tokens: &[Token],
+    start: usize,
+    limit: usize,
+) -> Option<usize> {
     let minimum_fill = (limit as f64 * crate::transform::vocab::MINIMUM_BREAK_FILL) as usize;
     let mut best: Option<(bool, usize, BreakTier, usize)> = None;
     for (index, token) in tokens.iter().enumerate() {
@@ -299,6 +344,12 @@ fn operator_break_position(tokens: &[Token], start: usize, limit: usize) -> Opti
             continue;
         };
         if continuation_head_would_gain_relational_space(tokens, index) {
+            continue;
+        }
+        // Rejected here rather than around the result, so the search falls
+        // through to the next-best candidate instead of giving up on the
+        // whole tier.
+        if continuation_head_is_line_start_syntax(body, position) {
             continue;
         }
         let candidate = (position < minimum_fill, token.depth, tier, position);
