@@ -226,20 +226,31 @@ impl Rules<'_> {
                 edits.replace(pair[0].span.start..end, b"[");
             }
         }
-        for pair in self.tokens.windows(2) {
-            if pair[0].kind == TokenKind::Operator
+        for index in 0..self.tokens.len().saturating_sub(1) {
+            let pair = &self.tokens[index..index + 2];
+            if !(pair[0].kind == TokenKind::Operator
                 && pair[0].text == b"/"
                 && pair[1].kind == TokenKind::RParen
-                && self.gap(pair[0].span.end, pair[1].span.start)
+                && self.gap(pair[0].span.end, pair[1].span.start))
             {
-                let mut start = pair[0].span.start;
-                if self.normalize_whitespace {
-                    while start > 0 && matches!(self.line[start - 1], b' ' | b'\t') {
-                        start -= 1;
-                    }
-                }
-                edits.replace(start..pair[1].span.end, b"]");
+                continue;
             }
+            // An empty `(/ /)` is both halves of one construct with a single run
+            // of blanks between them, and the loop above has already claimed
+            // that run for the opening `[`. Absorbing it here as well made the
+            // two edits overlap, so the buffer applied one and dropped the
+            // other: `(/ /)` came back as `[/)`, and the `/)` left behind became
+            // `]` only on the next run.
+            let claimed_by_opening = index
+                .checked_sub(2)
+                .is_some_and(|open| super::opens_array_constructor(self.line, self.tokens, open));
+            let mut start = pair[0].span.start;
+            if self.normalize_whitespace && !claimed_by_opening {
+                while start > 0 && matches!(self.line[start - 1], b' ' | b'\t') {
+                    start -= 1;
+                }
+            }
+            edits.replace(start..pair[1].span.end, b"]");
         }
     }
 

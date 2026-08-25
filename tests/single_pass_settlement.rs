@@ -422,3 +422,108 @@ fn a_declaration_is_not_squeezed_onto_a_hollerith_constant() {
     settles_to(b"real a   ! c\n", b"real a ! c\n");
     settles_to(b"character(8) rh   ! rah\n", b"character(8) rh ! rah\n");
 }
+
+/// A named END has to be read through both spellings of its keyword.
+///
+/// `named_end.rs` restates a scope's name at the END that closes it, and it
+/// matched only `end type t`. The compound-keyword split that turns `endtype`
+/// into `end type` runs in the line rules, in the same pass — so a joined head
+/// was a statement with no name in it on the run that split the keyword, and
+/// carried a name only on the run after.
+///
+/// The second and third lines define one type twice, which is what makes the
+/// difference visible: the END closes the inner definition, so a reader that
+/// recognizes it moves the name to `t_name`, and a reader that does not leaves
+/// the authored `t_Name` for the next pass to move.
+///
+/// Found by `FUZZ_TIME=180 ./tools/check_fuzz_regression.sh`, and the same
+/// evidence split as `named_end_space` — which is why the table lookup behind
+/// both now lives in one place, `vocab::joined_end_construct`.
+#[test]
+fn a_joined_end_closes_the_same_scope_as_a_split_one() {
+    settles_to(
+        b"type :: t_Name\ntype, public :: t_name\nendtype t_Name\n",
+        b"type :: t_Name\n   type, public :: t_name\n   end type t_name\n",
+    );
+    // The split spelling was already right, and still is.
+    settles_to(
+        b"type :: t_Name\ntype, public :: t_name\nend type t_Name\n",
+        b"type :: t_Name\n   type, public :: t_name\n   end type t_name\n",
+    );
+    // A joined END whose name matches its own scope keeps that scope's
+    // spelling, which is the case the rule exists for.
+    settles_to(
+        b"module MyMod\nendmodule mymod\n",
+        b"module MyMod\nend module MyMod\n",
+    );
+    // `endblock` closes a construct, not a named scope: nothing to restate.
+    settles_to(b"block\nendblock\n", b"block\nend block\n");
+}
+
+/// A literal a line opens and never closes stops at the end of that line.
+///
+/// The line rules threaded one lexical state through the whole file and only
+/// ever cleared it when a literal closed, so a stray `"` put every statement
+/// after it inside a character literal for the rest of the file. The reader in
+/// `format::full::driver` that detaches a trailing comment ends its state at
+/// each logical group and so disagreed: on an over-budget line it hoisted the
+/// comment above the statement, while the comment rule — still believing itself
+/// inside a literal — left the `!` unspaced. The space arrived on the pass
+/// after, once sitting at column zero made it a comment to both readers.
+///
+/// Found by `FUZZ_TIME=180 ./tools/check_fuzz_regression.sh`.
+#[test]
+fn a_stray_quote_does_not_swallow_the_statements_after_it() {
+    settles_to(b"\"\nx = 1 !c\n", b"\"\nx = 1 ! c\n");
+    settles_to(b"'\ny = 2 !d\ny = 3 !e\n", b"'\ny = 2 ! d\ny = 3 ! e\n");
+    // The over-budget line the two readers disagreed about: the comment is
+    // hoisted *and* spaced on the same pass.
+    //
+    // The body is varied text on purpose. A comment whose body is one repeated
+    // byte is a visual separator, and `truncate_comment_separator` shortens
+    // those to the wrap budget once layout has placed them — which would make
+    // this test about that rule instead of this one.
+    let body = "the quick brown fox jumps over the lazy dog".repeat(3);
+    let source = format!("\"\nQ6 x!{body}\n");
+    let expected = format!("\"\n! {body}\nQ6 x\n");
+    settles_to(source.as_bytes(), expected.as_bytes());
+}
+
+/// The clearing above must not reach a literal that legitimately spans lines.
+///
+/// A literal opened on an earlier line and resumed on a later one is open
+/// across the lines between, and those lines do not end with a continuation of
+/// their own. Clearing the state there would reinterpret the bytes the literal
+/// protects — the `!` in `&def!ghi'` would come back as a comment marker — so
+/// the reset applies only to a line that *began* outside a protected region.
+#[test]
+fn a_literal_spanning_an_intervening_line_stays_one_literal() {
+    let source = b"program p\ncharacter(len=40) :: s\ninteger :: y\ny = 0\n\
+                   !$ s = 'abc &\n!$ y = 2\n!$ &def!ghi'\nend program p\n";
+    let out = settled(source);
+    assert!(
+        String::from_utf8_lossy(&out).contains("def!ghi"),
+        "literal corrupted:\n{}",
+        String::from_utf8_lossy(&out),
+    );
+}
+
+/// An empty array constructor is both halves of one construct with a single run
+/// of blanks between them, and each half absorbs the blanks beside it. Both
+/// halves claimed the same run, the edit buffer applied one and dropped the
+/// other, and `(/ /)` came back as `[/)` — a `/)` that became `]` on the run
+/// after.
+///
+/// Found by a fragment sweep over array-constructor and continuation syntax.
+#[test]
+fn an_empty_array_constructor_is_rewritten_in_one_pass() {
+    settles_to(b"x = (/ /)\n", b"x = []\n");
+    settles_to(b"x = (/  /)\n", b"x = []\n");
+    settles_to(b"x = (/ (/ /) /)\n", b"x = [[]]\n");
+    // The blanks either half absorbs when the other is not there.
+    settles_to(b"x = (/ 1 /)\n", b"x = [1]\n");
+    settles_to(b"x = (/1/)\n", b"x = [1]\n");
+    settles_to(b"x = [ ]\n", b"x = []\n");
+    // `(//)` is `(`, the concatenation operator, `)`. Nothing here may touch it.
+    settles_to(b"x = (//)\n", b"x = (//)\n");
+}

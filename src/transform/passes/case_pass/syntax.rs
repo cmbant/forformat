@@ -4,7 +4,7 @@ use super::associations::select_association_spec;
 use crate::{
     analysis::{names::NameSpace, ScopeTree},
     source::tokens::{Token, TokenKind},
-    transform::{vocab, vocab_2023},
+    transform::vocab,
 };
 
 pub(super) fn is_use_statement(tokens: &[Token<'_>]) -> bool {
@@ -190,21 +190,15 @@ pub(super) fn named_end_space(tokens: &[Token<'_>], index: usize) -> Option<Name
     }
 }
 
-/// The construct keyword inside a joined `END` keyword: `endtype` -> `type`.
+/// The construct keyword inside a joined `END` keyword, for a head token.
 ///
-/// The answer comes from the same tables the splitting rule rewrites from, so
-/// the two spellings of a head cannot come to disagree about what statement it
-/// is. Blanks are dropped from the split spelling because the joined form is
-/// what the arms above are written against: `endblockdata` is `end blockdata`
-/// here, as it is when the author writes the two words out.
+/// A thin wrapper over [`vocab::joined_end_construct`], which is shared with
+/// [`super::super::named_end`]: the token kind is the only thing this reader
+/// adds, and the table lookup is the part that must not be written twice.
 fn joined_end_construct(head: &Token<'_>) -> Option<Vec<u8>> {
-    if head.kind != TokenKind::Name {
-        return None;
-    }
-    let split = vocab::lookup_pair(vocab::COMPOUND_KEYWORDS, head.text)
-        .or_else(|| vocab::lookup_pair(vocab_2023::COMPOUND_KEYWORDS, head.text))?;
-    let kind = split.strip_prefix("end ")?;
-    Some(kind.replace(' ', "").into_bytes())
+    (head.kind == TokenKind::Name)
+        .then(|| vocab::joined_end_construct(head.text))
+        .flatten()
 }
 
 pub(super) fn scope_header_space(tokens: &[Token<'_>], index: usize) -> Option<NameSpace> {

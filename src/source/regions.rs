@@ -452,6 +452,60 @@ pub(crate) fn resumes_protected_region(state: &LexState, body: &[u8]) -> bool {
     !state.in_literal() || body.trim_ascii_start().starts_with(b"&")
 }
 
+/// What one source stream made of a code line, and how its state moved.
+pub(crate) enum StreamLine {
+    /// The stream lexed the line: its regions, comment span and continuation
+    /// all come from this scan, and `state` has been advanced over it.
+    Lexed(LineScan),
+    /// The line is transparent to this stream. It is code-shaped but cannot
+    /// resume the protected region the stream is carrying, so the state is
+    /// left untouched and only the line's own continuation syntax counts.
+    Transparent { continued: bool },
+}
+
+/// Advance one stream's lexical state across one code line.
+///
+/// The two streams differ only in which gate decides that a line is stepped
+/// over rather than lexed. The ordinary stream walks raw lines, so it uses the
+/// shape gate inside [`scan_group_line`] — blank, comment, directive. The
+/// conditional stream's body is always code-shaped, so only the strict "a
+/// literal resumes on `&`" rule can apply to it.
+///
+/// Every reader that needs to know what is protected on a given line has to
+/// advance the same way or it disagrees about which bytes are literal text.
+/// [`SourceBuffer`] and step 11 both go through here for exactly that reason:
+/// while step 11 carried a state of its own, a literal left open by a line that
+/// did not continue leaked into every statement after it, and the `!` that the
+/// wrapper detached as a trailing comment was one step 11 still believed was
+/// inside a literal — so the hoisted comment gained its space a pass late.
+///
+/// [`SourceBuffer`]: super::SourceBuffer
+/// [`scan_group_line`]: self::scan_group_line
+pub(crate) fn advance_stream_line(
+    state: &mut LexState,
+    code: &[u8],
+    conditional: bool,
+) -> StreamLine {
+    if !conditional {
+        return StreamLine::Lexed(line_scan(state, code));
+    }
+    if resumes_protected_region(state, code) {
+        let scan = state.scan_line(code, |_| {});
+        if !scan.continued {
+            *state = LexState::default();
+        }
+        return StreamLine::Lexed(scan);
+    }
+    // A code-looking line that cannot resume the carried literal is transparent
+    // to that protected state. It still owns its *own* physical continuation
+    // syntax, though: the malformed-string compatibility fixture has exactly
+    // such a line ending in `&`. Classify only that fact from a clean state,
+    // without consuming the carried literal or changing its comment spans.
+    StreamLine::Transparent {
+        continued: LexState::default().scan_line(code, |_| {}).continued,
+    }
+}
+
 /// Scan one line of a continuation group, then decide whether lexical state
 /// survives it. Protected bytes that merely happen to be `&` never license a
 /// carry into the next physical line.

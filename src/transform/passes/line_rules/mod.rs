@@ -179,9 +179,21 @@ impl StatementState {
         code: &[u8],
         continues: bool,
         incoming: LexState,
+        conditional: bool,
         cx: &PassContext,
         line_index: usize,
     ) {
+        // Re-derive the outgoing lexical state from the incoming one the way
+        // `SourceBuffer` does, rather than keeping whatever the rule chain's own
+        // scan of the rewritten body left behind. The rules scan to find the
+        // protected bytes *in* a line; only this decides what survives it, and
+        // the two answers are not the same on malformed input -- a raw scan
+        // keeps an unterminated literal open across a line that never continued
+        // it, so one stray quote put every statement after it inside a literal.
+        // See `regions::advance_stream_line` for why the wrapper's disagreement
+        // with that cost a pass of settling.
+        self.lex = incoming;
+        crate::source::regions::advance_stream_line(&mut self.lex, code, conditional);
         self.continued_statement = continues;
         self.continued_infix = continues && trailing_continuation_operand(code);
         let facts = cx
@@ -279,6 +291,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                         cx.analysis.buffer.code_bytes(physical),
                         physical.continues,
                         incoming_lex,
+                        true,
                         cx,
                         index,
                     );
@@ -336,6 +349,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                     cx.analysis.buffer.code_bytes(physical),
                     physical.continues,
                     incoming_lex,
+                    false,
                     cx,
                     index,
                 );

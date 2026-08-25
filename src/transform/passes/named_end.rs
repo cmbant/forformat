@@ -24,6 +24,7 @@ use crate::{
         edit::EditBuffer,
         passes::provenance::{source_spans, spread_replacement},
         pipeline::{Changed, PassContext},
+        vocab,
     },
 };
 
@@ -118,27 +119,47 @@ fn enclosing_name<'a>(
 
 /// The trailing name of an `END <kind> <name>` statement and the kind of scope
 /// such a statement closes, when the statement is exactly that shape.
+///
+/// `endtype t` is that shape too. The compound-keyword split runs in the line
+/// rules, which is the same pass this one belongs to, so which spelling is in
+/// the buffer here depends on ordering: reading only `end type` meant a joined
+/// head was a statement with no name in it on the run that split the keyword,
+/// and carried a name only on the run after. That cost a pass of settling
+/// wherever an `endtype` closed a type whose header spelling had moved.
 fn end_name<'a>(tokens: &'a [Token<'a>]) -> Option<(usize, ScopeKind)> {
     let first = tokens
         .iter()
         .position(|token| token.kind != TokenKind::Number)?;
-    if !tokens[first].is_name(b"end") {
-        return None;
-    }
-    let keyword = tokens.get(first + 1)?;
-    // `END BLOCK DATA name` spells its keyword in two words; `END BLOCKDATA
-    // name` spells it in one. A bare `END BLOCK` closes a BLOCK construct,
-    // which is a different scope kind and carries no entity name.
-    let (index, kind) = if keyword.is_name(b"block") {
-        (
-            first + 3,
-            tokens
-                .get(first + 2)
-                .filter(|token| token.is_name(b"data"))
-                .map(|_| ScopeKind::Procedure)?,
-        )
+    let head = tokens.get(first)?;
+    let (index, kind) = if head.is_name(b"end") {
+        let keyword = tokens.get(first + 1)?;
+        // `END BLOCK DATA name` spells its keyword in two words; `END BLOCKDATA
+        // name` spells it in one. A bare `END BLOCK` closes a BLOCK construct,
+        // which is a different scope kind and carries no entity name.
+        if keyword.is_name(b"block") {
+            (
+                first + 3,
+                tokens
+                    .get(first + 2)
+                    .filter(|token| token.is_name(b"data"))
+                    .map(|_| ScopeKind::Procedure)?,
+            )
+        } else if keyword.kind == TokenKind::Name {
+            (first + 2, scope_kind(keyword.text)?)
+        } else {
+            return None;
+        }
     } else {
-        (first + 2, scope_kind(keyword)?)
+        // The joined spelling puts the construct inside the head, so the name
+        // is one token earlier. `endblock` resolves to `block`, which is not a
+        // named scope kind, and is rejected below just as `end block` is above.
+        if head.kind != TokenKind::Name {
+            return None;
+        }
+        (
+            first + 1,
+            scope_kind(&vocab::joined_end_construct(head.text)?)?,
+        )
     };
     if index + 1 != tokens.len() {
         return None;
@@ -147,30 +168,21 @@ fn end_name<'a>(tokens: &'a [Token<'a>]) -> Option<(usize, ScopeKind)> {
     (name.kind == TokenKind::Name).then_some((index, kind))
 }
 
-fn scope_kind(keyword: &Token<'_>) -> Option<ScopeKind> {
-    if keyword.is_name(b"module") {
-        return Some(ScopeKind::Module);
+/// The scope kind a construct keyword closes.
+///
+/// Takes the word rather than the token because the joined spelling has no
+/// token of its own to offer: `endtype` yields `type` from the vocabulary, and
+/// both spellings have to reach the same arms here.
+fn scope_kind(keyword: &[u8]) -> Option<ScopeKind> {
+    match keyword.to_ascii_lowercase().as_slice() {
+        b"module" => Some(ScopeKind::Module),
+        b"submodule" => Some(ScopeKind::Submodule),
+        b"program" => Some(ScopeKind::Program),
+        b"function" | b"subroutine" | b"procedure" | b"blockdata" => Some(ScopeKind::Procedure),
+        b"type" => Some(ScopeKind::DerivedType),
+        b"interface" => Some(ScopeKind::Interface),
+        _ => None,
     }
-    if keyword.is_name(b"submodule") {
-        return Some(ScopeKind::Submodule);
-    }
-    if keyword.is_name(b"program") {
-        return Some(ScopeKind::Program);
-    }
-    if keyword.is_name(b"function")
-        || keyword.is_name(b"subroutine")
-        || keyword.is_name(b"procedure")
-        || keyword.is_name(b"blockdata")
-    {
-        return Some(ScopeKind::Procedure);
-    }
-    if keyword.is_name(b"type") {
-        return Some(ScopeKind::DerivedType);
-    }
-    if keyword.is_name(b"interface") {
-        return Some(ScopeKind::Interface);
-    }
-    None
 }
 
 /// Cheap rejection before tokenizing: only a statement whose first word is

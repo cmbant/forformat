@@ -126,31 +126,16 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         if matches!(kind, PhysicalLineKind::Code | PhysicalLineKind::FindentFix) {
             let code = &content[code_offset..];
             let state = states.select_mut(stream);
-            // The two streams differ only in which gate decides that a line is
-            // stepped over rather than lexed. The ordinary stream walks raw
-            // lines, so it uses the shape gate (blank, comment, directive);
-            // the conditional stream's body is always code-shaped, so only the
-            // strict "a literal resumes on `&`" rule can apply to it.
-            let scan = match stream {
-                SourceStream::Ordinary => Some(super::regions::line_scan(&mut state.lex, code)),
-                SourceStream::Conditional
-                    if super::regions::resumes_protected_region(&state.lex, code) =>
-                {
-                    let scan = state.lex.scan_line(code, |_| {});
-                    if !scan.continued {
-                        state.lex = LexState::default();
-                    }
-                    Some(scan)
-                }
-                SourceStream::Conditional => {
-                    // A code-looking line that cannot resume the carried
-                    // literal is transparent to that protected state. It still
-                    // owns its *own* physical continuation syntax, though: the
-                    // malformed-string compatibility fixture has exactly such
-                    // a line ending in `&`. Classify only that fact from a
-                    // clean state, without consuming the carried literal or
-                    // changing its comment spans/stream-continuation state.
-                    continues = LexState::default().scan_line(code, |_| {}).continued;
+            // Shared with step 11, which has to agree byte for byte about what
+            // is protected on this line; see `regions::advance_stream_line`.
+            let scan = match super::regions::advance_stream_line(
+                &mut state.lex,
+                code,
+                stream.is_conditional(),
+            ) {
+                super::regions::StreamLine::Lexed(scan) => Some(scan),
+                super::regions::StreamLine::Transparent { continued } => {
+                    continues = continued;
                     None
                 }
             };

@@ -24,6 +24,27 @@ pub fn lookup_pair<'a>(table: &'a [(&'a str, &'a str)], word: &[u8]) -> Option<&
     Some(table[index].1)
 }
 
+/// The construct keyword inside a joined `END` keyword: `endtype` -> `type`.
+///
+/// `end type t` and `endtype t` are one statement written two ways, and which
+/// one is in the buffer depends on whether the compound-keyword split has run
+/// over the line yet. Every reader that asks what an `END` closes has to accept
+/// both spellings or it answers differently on the run that does the splitting
+/// than on the run after -- which is a whole pass of settling, twice found and
+/// twice fixed. It lives here, beside the tables the splitting rule rewrites
+/// from, so the two spellings of a head cannot come to disagree about what
+/// statement it is.
+///
+/// Blanks are dropped from the split spelling because the joined form is what
+/// callers match against: `endblockdata` is `end blockdata` here, as it is when
+/// the author writes the two words out.
+pub fn joined_end_construct(word: &[u8]) -> Option<Vec<u8>> {
+    let split = lookup_pair(super::vocab::COMPOUND_KEYWORDS, word)
+        .or_else(|| lookup_pair(super::vocab_2023::COMPOUND_KEYWORDS, word))?;
+    let kind = split.strip_prefix("end ")?;
+    Some(kind.replace(' ', "").into_bytes())
+}
+
 /// Compare a lowercase table entry against an arbitrary-case word.
 fn compare(entry: &[u8], word: &[u8]) -> core::cmp::Ordering {
     let mut left = entry.iter();
