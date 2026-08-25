@@ -55,11 +55,11 @@ spellings. Its ordered rules are:
 - modernize `(/ ... /)` to `[ ... ]` outside `FORMAT`, add output-item spacing, and apply the
   narrow comment rule.
 
-Stable statement context is analyzed once per logical statement. `Analysis::StatementFacts` caches
-policy-free recognizers from `source::syntax`; source provenance maps physical bytes back to the
-statement that owns them. On a semicolon line, current-line context uses the first statement with
-source on that line, while continuation carry uses the last. Dynamic state such as open groups and
-declaration-entity cursors resets at the same real semicolon boundary.
+Stable statement context is analyzed once per logical statement. `transform::document::StatementFacts`
+values are cached by `Analysis` from policy-free recognizers in `source::syntax`; source provenance
+maps physical lines to the statements that own them. On a semicolon line, current-line context uses
+the first statement with source on that line, while continuation carry uses the last. Dynamic state
+such as open groups and declaration-entity cursors resets at the same real semicolon boundary.
 
 `LineState` carries only the dynamic state that genuinely spans physical lines and exposes it through
 `LineContext`. The line-rule chain scans scratch lexical state; `source::regions::advance_stream_line`
