@@ -1,5 +1,5 @@
 use crate::cli::{
-    options::{self, ConfigMapping, OptionId, OptionSpec, Repeatability, ValueKind},
+    options::{self, ConfigMapping, OptionId, OptionSpec, ValueKind},
     settings::{self, OptionLayer},
     ContextPath,
 };
@@ -93,9 +93,9 @@ fn read_config(
 
         let spec = config_spec(&key)?;
         match spec.id {
-            OptionId::Define => parse_defines(value, &key, path, spec, &mut layer)?,
+            OptionId::Define => parse_defines(value, &key, path, spec.id, &mut layer)?,
             OptionId::Exclude | OptionId::ExtendExclude => {
-                parse_exclusions(value, &key, path, spec, &mut layer)?
+                parse_exclusions(value, &key, path, spec.id, &mut layer)?
             }
             OptionId::ContextPath => parse_context_paths(value, &key, path, &mut layer)?,
             OptionId::NoSubmodules => {
@@ -180,13 +180,12 @@ fn parse_defines(
     value: &toml::Value,
     key: &str,
     path: &Path,
-    spec: &OptionSpec,
+    id: OptionId,
     layer: &mut OptionLayer,
 ) -> Result<(), crate::error::FormatError> {
-    debug_assert_eq!(spec.repeatability, Repeatability::Append);
     let mut push = |define: &str| -> Result<(), crate::error::FormatError> {
-        if let Some(setting) = settings::parse_format_setting(spec.id, Some(define))? {
-            layer.push_format(spec.id, setting);
+        if let Some(setting) = settings::parse_format_setting(id, Some(define))? {
+            layer.push_format(id, setting);
         }
         Ok(())
     };
@@ -215,13 +214,9 @@ fn parse_exclusions(
     value: &toml::Value,
     key: &str,
     path: &Path,
-    spec: &OptionSpec,
+    id: OptionId,
     layer: &mut OptionLayer,
 ) -> Result<(), crate::error::FormatError> {
-    debug_assert!(matches!(
-        spec.repeatability,
-        Repeatability::Append | Repeatability::ReplaceLayer
-    ));
     let specs = value.as_array().ok_or_else(|| {
         crate::error::FormatError::InvalidOption(format!(
             "configuration key `{key}` in {} must be an array of strings",
@@ -241,7 +236,7 @@ fn parse_exclusions(
                 path.display()
             )));
         }
-        if spec.id == OptionId::Exclude {
+        if id == OptionId::Exclude {
             layer.push_exclude(pattern.to_string());
         } else {
             layer.extend_exclude.push(pattern.to_string());
