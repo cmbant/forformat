@@ -1,17 +1,18 @@
-use super::{
-    parse_bool, parse_num, parse_style_choice, push_define, reject_value, set_construct, set_start,
-    ArgCursor, ConfigSelection,
-};
+use super::{ArgCursor, ConfigSelection};
 use crate::{
-    cli::{draft::DraftInvocation, options::OptionId},
-    config::{FormatMode, FortranStandard, KeywordCase},
+    cli::{
+        draft::DraftInvocation,
+        options::{self, CliArity, OptionId},
+        settings::{self, parse_bool},
+        ContextPath,
+    },
     error::FormatError,
 };
 use std::path::PathBuf;
 
 pub(super) fn parse_long<I>(
     name: &str,
-    mut value: Option<String>,
+    value: Option<String>,
     cursor: &mut ArgCursor<I>,
     draft: &mut DraftInvocation,
     config_selection: &mut ConfigSelection,
@@ -19,394 +20,118 @@ pub(super) fn parse_long<I>(
 where
     I: Iterator<Item = String>,
 {
-    let Some(option) = crate::cli::options::lookup_long(name) else {
+    let Some(spec) = options::lookup_long(name) else {
         if let Some(construct) = name.strip_prefix("indent-") {
-            let value = parse_num(&cursor.required_long(&mut value)?)?;
-            return set_construct(&mut draft.config, construct, value);
+            let mut value = value;
+            let parsed = cursor.required_long(&mut value)?;
+            settings::parse_num(&parsed)?;
+            return Err(FormatError::InvalidOption(format!("--indent-{construct}")));
         }
         return Err(FormatError::InvalidOption(format!("--{name}")));
     };
+    let value = consume_value(spec.cli_arity, name, value, cursor)?;
 
-    match option {
+    match spec.id {
         OptionId::Config => {
-            let path = cursor.required_long(&mut value)?;
-            config_selection.explicit.push(path);
+            config_selection
+                .explicit
+                .push(value.expect("required option has a value"));
         }
-        OptionId::NoConfig => {
-            reject_value(name, &value)?;
-            config_selection.no_config = true;
-        }
-        OptionId::Indent => {
-            let value = cursor.required_long(&mut value)?;
-            if value == "none" {
-                draft.config.apply_indent = false
-            } else {
-                draft.config.set_indent(parse_num(&value)?);
-            }
-        }
-        OptionId::StartIndent => {
-            let value = cursor.required_long(&mut value)?;
-            set_start(&mut draft.config, &value)?;
-        }
-        OptionId::IndentContains => {
-            let value = cursor.required_long(&mut value)?;
-            if value == "restart" {
-                draft.config.contains_restart = true
-            } else {
-                draft.config.contains_indent = parse_num(&value)?
-            }
-        }
-        OptionId::IncludeLeft => {
-            draft.config.include_left = parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::LabelLeft => {
-            draft.config.label_left = parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::MaxIndent => {
-            draft.config.max_indent = parse_num(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::Openmp => draft.config.openmp = parse_bool(&cursor.required_long(&mut value)?)?,
-        OptionId::IndentAmpersand => {
-            draft.config.indent_ampersand = value
-                .as_deref()
-                .map(parse_bool)
-                .transpose()?
-                .unwrap_or(true)
-        }
-        OptionId::IndentContinuation => {
-            let value = cursor.required_long(&mut value)?;
-            if value == "none" || value == "-" {
-                draft.config.indent_continuation = false;
-            } else if value == "default" || value == "d" {
-                draft.config.indent_continuation = true;
-            } else {
-                draft.config.continuation_indent = parse_num(&value)?;
-            }
-        }
-        OptionId::AlignParen => {
-            draft.config.align_paren_value = parse_paren_alignment(value.as_deref())?;
-            draft.config.align_paren = draft.config.align_paren_value != 0;
-        }
-        OptionId::WsRemred => {
-            draft.config.ws_remred_value = parse_whitespace_reduction(value.as_deref())?;
-            draft.config.ws_remred = draft.config.ws_remred_value != 0;
-        }
-        OptionId::AlignDeclarations => {
-            draft.config.align_declarations = parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::AlignComments => {
-            draft.config.align_comments = parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::LastIndent => {
-            reject_value(name, &value)?;
-            draft.config.last_indent = true;
-        }
-        OptionId::LastUsable => {
-            reject_value(name, &value)?;
-            draft.config.last_usable = true;
-        }
-        OptionId::All => {
-            reject_value(name, &value)?;
-            draft.all = true;
-        }
-        OptionId::AllFiles => {
-            reject_value(name, &value)?;
-            draft.all_files = true;
-        }
+        OptionId::NoConfig => config_selection.no_config = true,
+        OptionId::LastIndent => draft.set_last_indent()?,
+        OptionId::LastUsable => draft.set_last_usable()?,
+        OptionId::All => draft.select_all(false)?,
+        OptionId::AllFiles => draft.select_all(true)?,
         OptionId::NoSubmodules => {
-            draft.no_submodules = value
-                .as_deref()
-                .map(parse_bool)
-                .transpose()?
-                .unwrap_or(true)
+            draft.options.no_submodules = Some(
+                value
+                    .as_deref()
+                    .map(parse_bool)
+                    .transpose()?
+                    .unwrap_or(true),
+            );
         }
         OptionId::ContextPath => {
-            let path = cursor.required_long(&mut value)?;
+            let path = value.expect("required option has a value");
             if path.is_empty() {
                 return Err(FormatError::InvalidOption(
                     "--context-path requires a path".into(),
                 ));
             }
-            draft.context_paths.push(crate::cli::ContextPath {
+            draft.push_context_path(ContextPath {
                 path: PathBuf::from(path),
                 base: None,
-            });
+            })?;
         }
         OptionId::ProjectContext => {
-            let path = cursor.required_long(&mut value)?;
+            let path = value.expect("required option has a value");
             if path.is_empty() {
                 return Err(FormatError::InvalidOption(
                     "--project-context requires a path".into(),
                 ));
             }
-            if draft.project_context.is_some() {
-                return Err(FormatError::InvalidOption(
-                    "--project-context may be specified only once".into(),
-                ));
-            }
-            draft.project_context = Some(PathBuf::from(path));
+            draft.select_project_context(PathBuf::from(path))?;
         }
-        OptionId::Stdin => {
-            reject_value(name, &value)?;
-            draft.stdin = true;
-        }
-        OptionId::Stdout => {
-            reject_value(name, &value)?;
-            draft.stdout = true;
-        }
-        OptionId::Isolated => {
-            reject_value(name, &value)?;
-            draft.isolated = true;
-        }
-        OptionId::Check => {
-            reject_value(name, &value)?;
-            draft.check = true;
-        }
-        OptionId::Diff => {
-            reject_value(name, &value)?;
-            draft.diff = true;
-        }
-        OptionId::ShowFiles => {
-            reject_value(name, &value)?;
-            draft.show_files = true;
-        }
-        OptionId::QueryFormat => {
-            reject_value(name, &value)?;
-            draft.query_format = true;
-        }
+        OptionId::Stdin => draft.select_stdin()?,
+        OptionId::Stdout => draft.set_stdout()?,
+        OptionId::Isolated => draft.set_isolated()?,
+        OptionId::Check => draft.set_check()?,
+        OptionId::Diff => draft.set_diff()?,
+        OptionId::ShowFiles => draft.set_show_files()?,
+        OptionId::QueryFormat => draft.set_query_format()?,
         OptionId::Exclude | OptionId::ExtendExclude => {
-            let pattern = cursor.required_long(&mut value)?;
+            let pattern = value.expect("required option has a value");
             if pattern.is_empty() {
                 return Err(FormatError::InvalidOption(format!(
                     "--{name} requires a non-empty glob"
                 )));
             }
-            if option == OptionId::Exclude {
-                draft.exclude.get_or_insert_with(Vec::new).push(pattern);
+            if spec.id == OptionId::Exclude {
+                draft.options.push_exclude(pattern);
             } else {
-                draft.extend_exclude.push(pattern);
+                draft.options.extend_exclude.push(pattern);
             }
-        }
-        // The five mode options write one field, so the last one on the command
-        // line wins outright and no combination of them can leave half of one
-        // mode behind.
-        OptionId::IndentOnly => {
-            reject_value(name, &value)?;
-            draft.config.mode = FormatMode::IndentOnly;
-        }
-        OptionId::Full => {
-            reject_value(name, &value)?;
-            draft.config.mode = FormatMode::Full;
-        }
-        OptionId::NormalizeOnly => {
-            reject_value(name, &value)?;
-            draft.config.mode = FormatMode::NormalizeOnly;
-        }
-        OptionId::CanonicalizeOnly => {
-            reject_value(name, &value)?;
-            // Canonicalization takes the same no-layout return path as
-            // normalize-only while line rules suppress whitespace-only edits.
-            draft.config.mode = FormatMode::CanonicalizeOnly;
-        }
-        OptionId::CanonicalizeAndIndent => {
-            reject_value(name, &value)?;
-            draft.config.mode = FormatMode::CanonicalizeAndIndent;
-        }
-        OptionId::Wrap => {
-            draft.config.wrap.enabled = value
-                .as_deref()
-                .map(parse_bool)
-                .transpose()?
-                .unwrap_or(true)
-        }
-        OptionId::NoWrap => {
-            let disabled = value
-                .as_deref()
-                .map(parse_bool)
-                .transpose()?
-                .unwrap_or(true);
-            draft.config.wrap.enabled = !disabled;
-        }
-        OptionId::Rewrap => {
-            draft.config.rewrap = value
-                .as_deref()
-                .map(parse_bool)
-                .transpose()?
-                .unwrap_or(true)
-        }
-        OptionId::LineLength => {
-            draft.config.wrap.line_length = parse_num(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::TargetStandard => {
-            let value = cursor.required_long(&mut value)?;
-            draft.config.target_standard = parse_style_choice(
-                name,
-                &value,
-                &[
-                    ("f95", FortranStandard::F95),
-                    ("f2003", FortranStandard::F2003),
-                    ("f2008", FortranStandard::F2008),
-                    ("f2018", FortranStandard::F2018),
-                    ("f2023", FortranStandard::F2023),
-                ],
-            )?;
-        }
-        OptionId::UppercaseSingleL => {
-            draft.config.uppercase_single_l = value
-                .as_deref()
-                .map(parse_bool)
-                .transpose()?
-                .unwrap_or(true)
-        }
-        OptionId::Define => {
-            let value = cursor.required_long(&mut value)?;
-            push_define(&mut draft.config, &value);
-        }
-        OptionId::KeywordCase => {
-            let value = cursor.required_long(&mut value)?;
-            draft.config.style.keyword_case = parse_style_choice(
-                name,
-                &value,
-                &[
-                    ("lower", KeywordCase::Lower),
-                    ("upper", KeywordCase::Upper),
-                    ("preserve", KeywordCase::Preserve),
-                ],
-            )?;
-        }
-        OptionId::OpenmpCase => {
-            draft.config.style.openmp_case = parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::RelationalSymbols => {
-            draft.config.style.relational_symbols = parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::ArrayBrackets => {
-            draft.config.style.array_brackets = parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::CompactMultiplicative => {
-            draft.config.style.compact_multiplicative =
-                parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::JoinGoto => {
-            draft.config.style.join_goto = parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::SplitCompoundKeywords => {
-            draft.config.style.split_compound_keywords =
-                parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::StripEmptyArgs => {
-            draft.config.style.strip_empty_args = parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::RemoveRedundantParens => {
-            draft.config.style.remove_redundant_parens =
-                parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::NormalizeSemicolons => {
-            draft.config.style.normalize_semicolons =
-                parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::RemoveTerminalReturn => {
-            draft.config.style.remove_terminal_return =
-                parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::ProgramUnitSpacing => {
-            draft.config.style.program_unit_spacing =
-                parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::MaxBlankLines => {
-            let value = cursor.required_long(&mut value)?;
-            draft.config.style.max_blank_lines = if value == "preserve" {
-                None
-            } else {
-                Some(parse_num(&value)?)
-            };
-        }
-        OptionId::DelimiterSpacing => {
-            draft.config.style.delimiter_spacing = parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::CommentSpacing => {
-            draft.config.style.comment_spacing = parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::ContinuationMarkers => {
-            draft.config.style.continuation_markers =
-                parse_bool(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::IndentChangeteam => {
-            draft.config.construct_indents.changeteam =
-                parse_num(&cursor.required_long(&mut value)?)?
-        }
-        OptionId::RefactorEnd => {
-            let (enabled, uppercase) = match value.as_deref() {
-                None => (true, false),
-                Some("upcase") => (true, true),
-                Some(value) => (parse_bool(value)?, false),
-            };
-            draft.config.refactor_end = enabled;
-            draft.config.uppercase_end = uppercase;
         }
         OptionId::InputFormat => {
-            match cursor
-                .required_long(&mut value)?
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "free" => draft.force_free_input = true,
-                "auto" => draft.force_free_input = false,
-                "fixed" => {
-                    return Err(FormatError::Unsupported(
-                        "fixed-form input/output is not supported".into(),
-                    ));
-                }
-                other => {
-                    return Err(FormatError::InvalidOption(format!(
-                        "--input-format={other}"
-                    )));
-                }
-            }
+            draft.options.force_free_input = Some(settings::parse_input_format(
+                value.as_deref().expect("required option has a value"),
+            )?);
         }
         OptionId::OutputFormat => {
-            match cursor
-                .required_long(&mut value)?
-                .to_ascii_lowercase()
-                .as_str()
-            {
-                "free" | "same" => {}
-                "fixed" => {
-                    return Err(FormatError::Unsupported(
-                        "fixed-form input/output is not supported".into(),
-                    ));
-                }
-                other => {
-                    return Err(FormatError::InvalidOption(format!(
-                        "--output-format={other}"
-                    )));
-                }
+            settings::parse_output_format(value.as_deref().expect("required option has a value"))?
+        }
+        OptionId::Help | OptionId::Version => {
+            unreachable!("handled before long-option parsing")
+        }
+        _ => {
+            if let Some(setting) = settings::parse_format_setting(spec.id, value.as_deref())? {
+                draft.push_format(spec.id, setting);
             }
         }
-        OptionId::Help | OptionId::Version => unreachable!("handled before long-option parsing"),
     }
     Ok(())
 }
 
-/// Parse the parenthesis-alignment level while retaining findent's numeric
-/// values. Boolean spellings mirror `--reduce-whitespace`: bare/true enable
-/// level 1 and false disables it.
-fn parse_paren_alignment(value: Option<&str>) -> Result<usize, FormatError> {
-    match value {
-        None | Some("true") => Ok(1),
-        Some("false") => Ok(0),
-        Some(value) => parse_num(value),
-    }
-}
-
-/// Parse the native reduction level while retaining findent's numeric levels.
-/// TOML booleans are serialized through the same option parser, so accepting
-/// `true` and `false` here makes `reduce_whitespace = true/false` natural
-/// without losing `--reduce-whitespace=N` or legacy numeric diagnostics.
-fn parse_whitespace_reduction(value: Option<&str>) -> Result<usize, FormatError> {
-    match value {
-        None | Some("true") => Ok(1),
-        Some("false") => Ok(0),
-        Some(value) => parse_num(value),
+fn consume_value<I>(
+    arity: CliArity,
+    name: &str,
+    mut value: Option<String>,
+    cursor: &mut ArgCursor<I>,
+) -> Result<Option<String>, FormatError>
+where
+    I: Iterator<Item = String>,
+{
+    match arity {
+        CliArity::None => {
+            if value.is_some() {
+                Err(FormatError::InvalidOption(format!(
+                    "--{name} does not accept a value"
+                )))
+            } else {
+                Ok(None)
+            }
+        }
+        CliArity::Required => cursor.required_long(&mut value).map(Some),
+        CliArity::Optional => Ok(value),
     }
 }

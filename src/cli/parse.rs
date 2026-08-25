@@ -1,5 +1,8 @@
-use super::{draft::DraftInvocation, options::single_dash_long_option_suggestion, Command};
-use crate::{config::ConfigArguments, error::FormatError};
+use super::{
+    draft::DraftInvocation, options::single_dash_long_option_suggestion, settings::OptionLayer,
+    Command,
+};
+use crate::{config::FormatConfig, error::FormatError};
 use std::path::PathBuf;
 
 mod config;
@@ -7,16 +10,13 @@ mod long;
 mod short;
 mod value;
 
-use config::config_start;
-use config::ConfigSelection;
-use value::{
-    parse_bool, parse_num, parse_style_choice, push_define, reject_value, set_construct, set_short,
-    set_start, ArgCursor,
-};
+use config::{config_start, ConfigSelection};
+use value::ArgCursor;
 
 pub(super) struct ParsedCommand {
     pub(super) command: Command,
     pub(super) config_selection: ConfigSelection,
+    pub(super) cli_layer: OptionLayer,
 }
 
 pub fn parse<I>(args: I) -> Result<Command, FormatError>
@@ -25,13 +25,14 @@ where
     I::IntoIter: Iterator<Item = String>,
 {
     let args: Vec<String> = args.into_iter().collect();
-    let preliminary = parse_inner(args.clone())?;
+    let preliminary = parse_inner(args)?;
     if matches!(preliminary.command, Command::Help | Command::Version) {
         return Ok(preliminary.command);
     }
+
     let (no_config, explicit_config) = preliminary.config_selection.resolve()?;
-    let mut config = if no_config {
-        ConfigArguments::default()
+    let config_arguments = if no_config {
+        crate::config::ConfigArguments::default()
     } else {
         let cwd = std::env::current_dir().map_err(|error| {
             FormatError::InvalidOption(format!("cannot determine current directory: {error}"))
@@ -39,41 +40,58 @@ where
         let start = config_start(&preliminary.command, &cwd);
         crate::config::config_args(&start, explicit_config.as_deref())?
     };
-    // Config args are merged by prepending them to argv, which makes the
-    // command line win for scalar options and accumulate for repeatable ones.
-    // `--exclude` must not accumulate: it selects a set rather than adding to
-    // one, so giving it on the command line discards the config file's
-    // `exclude` the way it discards the built-in defaults. `--extend-exclude`
-    // is the additive spelling and keeps accumulating. `preliminary` is a parse
-    // of the command line alone, so it answers "was `--exclude` given there?"
-    // using the real option grammar rather than a second-guessing rescan.
-    if matches!(&preliminary.command, Command::Run(invocation) if invocation.exclude.is_some()) {
-        config.args.retain(|arg| !arg.starts_with("--exclude="));
-    }
-    if matches!(&preliminary.command, Command::Run(invocation) if !invocation.context_paths.is_empty())
-    {
-        config.context_paths.clear();
-    }
-    let config_context_paths = config.context_paths;
-    let mut combined = Vec::with_capacity(1 + config.args.len() + args.len());
-    combined.push(
-        args.first()
+
+    // Both sources now produce typed option layers. TOML is materialized first
+    // with schema-defined baseline/specific phases; argv is then applied in its
+    // original order so command-line scalars win and legacy ordering semantics
+    // remain intact without manufacturing a second argv.
+    let mut format = FormatConfig::default();
+    config_arguments.layer.apply_config(&mut format);
+    preliminary.cli_layer.apply_cli(&mut format);
+    validate_format_config(&format)?;
+
+    let mut command = preliminary.command;
+    if let Command::Run(invocation) = &mut command {
+        // Query modes are CLI-only action state, not formatter configuration,
+        // so retain those two engine-facing compatibility bits when replacing
+        // the preliminary CLI-only FormatConfig with the merged one.
+        format.last_indent = invocation.config.last_indent;
+        format.last_usable = invocation.config.last_usable;
+        invocation.config = format;
+
+        invocation.no_submodules = preliminary
+            .cli_layer
+            .no_submodules
+            .or(config_arguments.layer.no_submodules)
+            .unwrap_or(false);
+        invocation.force_free_input = preliminary
+            .cli_layer
+            .force_free_input
+            .or(config_arguments.layer.force_free_input)
+            .unwrap_or(false);
+        invocation.exclude = preliminary
+            .cli_layer
+            .exclude
+            .clone()
+            .or(config_arguments.layer.exclude.clone());
+        invocation.extend_exclude = config_arguments
+            .layer
+            .extend_exclude
+            .iter()
+            .chain(&preliminary.cli_layer.extend_exclude)
             .cloned()
-            .unwrap_or_else(|| "forformat".to_string()),
-    );
-    combined.extend(config.args);
-    combined.extend(args.into_iter().skip(1));
-    let mut command = parse_inner(combined)?.command;
-    if !config_context_paths.is_empty() {
-        if let Command::Run(invocation) = &mut command {
-            if invocation.context_paths.is_empty()
-                && !invocation.isolated
-                && !invocation.query_format
-                && !invocation.show_files
-            {
-                invocation.context_paths = config_context_paths;
-            }
-        }
+            .collect();
+        invocation.context_paths = if let Some(paths) = &preliminary.cli_layer.context_paths {
+            paths.clone()
+        } else if !invocation.isolated && !invocation.query_format && !invocation.show_files {
+            config_arguments
+                .layer
+                .context_paths
+                .clone()
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
     }
     Ok(command)
 }
@@ -98,7 +116,7 @@ where
             continue;
         }
         if options_ended {
-            draft.paths.push(PathBuf::from(arg));
+            draft.push_path(PathBuf::from(arg))?;
             continue;
         }
         if arg == "-h" || arg == "--help" {
@@ -110,15 +128,15 @@ where
             continue;
         }
         if arg == "-lastindent" {
-            draft.config.last_indent = true;
+            draft.set_last_indent()?;
             continue;
         }
         if arg == "-lastusable" {
-            draft.config.last_usable = true;
+            draft.set_last_usable()?;
             continue;
         }
         if arg == "-ifree" || arg == "--input-format=free" {
-            draft.force_free_input = true;
+            draft.options.force_free_input = Some(true);
             continue;
         }
         if arg == "-ofree" || arg == "-osame" || arg == "--output-format=free" {
@@ -157,21 +175,37 @@ where
         if arg.starts_with('-') {
             return Err(FormatError::InvalidOption(arg));
         }
-        draft.paths.push(PathBuf::from(arg));
+        draft.push_path(PathBuf::from(arg))?;
     }
+
+    let cli_layer = draft.options.clone();
+    let mut format = FormatConfig::default();
+    cli_layer.apply_cli(&mut format);
+    validate_format_config(&format)?;
 
     // Keep validation before the help/version selection. Historically those
     // switches do not erase invalid combinations that were also supplied.
-    draft.validate()?;
     let command = if help {
+        draft.finish(format)?;
         Command::Help
     } else if version {
+        draft.finish(format)?;
         Command::Version
     } else {
-        Command::Run(Box::new(draft.finish()))
+        Command::Run(Box::new(draft.finish(format)?))
     };
     Ok(ParsedCommand {
         command,
         config_selection,
+        cli_layer,
     })
+}
+
+fn validate_format_config(config: &FormatConfig) -> Result<(), FormatError> {
+    if config.rewrap && !config.mode.wraps() {
+        return Err(FormatError::InvalidOption(
+            "--rewrap requires full mode: --indent-only, --normalize-only, --canonicalize-only, and --canonicalize-and-indent do not run the wrapper".into(),
+        ));
+    }
+    Ok(())
 }
