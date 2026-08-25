@@ -265,8 +265,7 @@ mod tests {
 
     #[test]
     fn skipped_conditional_code_keeps_its_own_continuation_fact() {
-        let buffer =
-            SourceBuffer::new(b"!$ s = 'abc &\n!$ world  \"     , &\n!$ 10)\n").unwrap();
+        let buffer = SourceBuffer::new(b"!$ s = 'abc &\n!$ world  \"     , &\n!$ 10)\n").unwrap();
         assert!(buffer.lines[0].continues);
         assert!(buffer.lines[1].continues);
         assert!(!buffer.lines[2].continues);
