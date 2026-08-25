@@ -18,7 +18,7 @@ fn keyword_spacing_is_per_statement_after_a_semicolon() {
 
 #[test]
 fn noncanonical_code_whitespace_canonicalizes_in_one_pass() {
-    for control in [b'\x0b', b'\x0c', b'\r'] {
+    for &control in b"\x0b\x0c\r" {
         let mut source = b"real a ".to_vec();
         source.push(control);
         source.extend_from_slice(b"  ! c\n");
