@@ -153,6 +153,24 @@ fn a_joined_end_keyword_carries_its_construct_name() {
     );
 }
 
+/// `(/ ... /)` and `[ ... ]` are one construct written two ways, and this pass
+/// rewrites the first into the second. Reading `(/` as a plain `(` opened a
+/// keyword-argument group where `[` opens none, so a `name=` on a continuation
+/// line stayed compact on the run that rewrote the bracket and was spaced on the
+/// run after.
+#[test]
+fn both_spellings_of_an_array_constructor_open_the_same_group() {
+    settles_to(b"(/&\n,n=\n", b"[ &\n   , n =\n");
+    settles_to(b"[&\n,n=\n", b"[ &\n   , n =\n");
+}
+
+/// The other side of it: a real keyword argument is still one, so the group a
+/// plain `(` opens has to keep opening it.
+#[test]
+fn a_continued_keyword_argument_is_still_compact() {
+    settles_to(b"call f(a, &\n n=1)\n", b"call f(a, &\n   n=1)\n");
+}
+
 /// A use site says a type exists; the definition says what it is called. When
 /// the use site was allowed to say both, one miscased `type(t_name)` made
 /// `t_Name` ambiguous for the whole file -- including at its own definition, so
