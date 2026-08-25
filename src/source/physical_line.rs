@@ -23,6 +23,14 @@ pub struct PhysicalLine {
     pub kind: PhysicalLineKind,
     pub code_span: Range<u32>,
     pub comment_span: Option<Range<u32>>,
+    /// Whether the semantic Fortran body ends in a continuation marker.
+    ///
+    /// This is the lexical answer computed while protected regions are known:
+    /// a final `&` in ordinary code or an open character literal continues the
+    /// statement, while an ampersand consumed by a Hollerith payload is data.
+    /// Consumers with a [`PhysicalLine`] should use this fact instead of
+    /// re-reading the final source byte.
+    pub continues: bool,
     /// Whether this is free-form conditional-compilation source introduced by
     /// a `!$` sentinel.
     ///
