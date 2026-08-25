@@ -150,12 +150,9 @@ impl Rules<'_> {
         if !self.style.array_brackets || is_format_statement(self.tokens) || self.continued_format {
             return;
         }
-        for pair in self.tokens.windows(2) {
-            if pair[0].kind == TokenKind::LParen
-                && pair[1].kind == TokenKind::Operator
-                && pair[1].text == b"/"
-                && self.gap(pair[0].span.end, pair[1].span.start)
-            {
+        for index in 0..self.tokens.len() {
+            if super::opens_array_constructor(self.line, self.tokens, index) {
+                let pair = &self.tokens[index..index + 2];
                 let mut end = pair[1].span.end;
                 if self.normalize_whitespace {
                     while end < self.line.len() && matches!(self.line[end], b' ' | b'\t') {

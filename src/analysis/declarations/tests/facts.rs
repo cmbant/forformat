@@ -99,10 +99,12 @@ fn declared_entities_are_protected_and_typed() {
     );
     assert_eq!(facts.cases.symbols.get(b"data"), Some(b"Data".as_slice()));
     assert_eq!(facts.cases.symbols.get(b"count"), Some(b"Count".as_slice()));
-    assert_eq!(
-        facts.cases.types.get(b"modelparams"),
-        Some(b"ModelParams".as_slice())
-    );
+    // `type(ModelParams)` refers to a type this file does not define. That is
+    // enough to make the name one the file uses -- which is what keeps
+    // intrinsic handling off it -- and not enough to say how it is spelled.
+    assert!(facts.cases.types.contains(b"modelparams"));
+    assert!(!facts.cases.types.declares(b"modelparams"));
+    assert_eq!(facts.cases.types.get(b"modelparams"), None);
     assert_eq!(
         facts
             .types

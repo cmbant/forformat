@@ -28,6 +28,32 @@ fn horizontal_gap(line: &[u8], start: usize, end: usize) -> bool {
             .all(|byte| matches!(byte, b' ' | b'\t'))
 }
 
+/// Whether the token at `index` is the `(` that opens a legacy `(/ ... /)`
+/// array constructor.
+///
+/// Shared with [`keyword_spacing::Rules::array_constructor_brackets`], which
+/// rewrites exactly these to `[`, so that nothing can read the two spellings of
+/// one construct differently -- least of all in the pass that turns one into the
+/// other. Reading `(/` as a plain `(` opened a keyword-argument group, and `[`
+/// does not, so `(/&` / `,n=` kept `n=` compact on the run that rewrote the
+/// bracket and spaced it on the run after.
+///
+/// `/=` lexes as one operator, so a comparison is not a candidate, and the only
+/// other thing a `/` can be directly after an open paren is a `FORMAT` record
+/// separator -- which is not a keyword-argument group either.
+pub(super) fn opens_array_constructor(
+    line: &[u8],
+    tokens: &[crate::source::Token<'_>],
+    index: usize,
+) -> bool {
+    tokens[index].kind == TokenKind::LParen
+        && tokens.get(index + 1).is_some_and(|next| {
+            next.kind == TokenKind::Operator
+                && next.text == b"/"
+                && horizontal_gap(line, tokens[index].span.end, next.span.start)
+        })
+}
+
 fn is_multiword_keyword_pair(first: &[u8], second: &[u8]) -> bool {
     vocab::MULTIWORD_KEYWORD_PAIRS.iter().any(|(left, right)| {
         first.eq_ignore_ascii_case(left.as_bytes()) && second.eq_ignore_ascii_case(right.as_bytes())
@@ -448,13 +474,18 @@ pub(super) fn is_continued_named_parameter(
 }
 
 pub(super) fn inside_paren_at(
+    line: &[u8],
     open_groups: &[bool],
     tokens: &[crate::source::Token<'_>],
 ) -> Vec<bool> {
     let mut open = open_groups.to_vec();
     let mut result = Vec::with_capacity(tokens.len());
-    for token in tokens {
+    for (index, token) in tokens.iter().enumerate() {
         match token.kind {
+            TokenKind::LParen if opens_array_constructor(line, tokens, index) => {
+                result.push(open.last().copied().unwrap_or(false));
+                open.push(false);
+            }
             TokenKind::LParen => {
                 result.push(open.last().copied().unwrap_or(false));
                 open.push(true);

@@ -355,11 +355,21 @@ fn entity_declaration(
         return;
     };
 
+    // The name inside `type(...)` refers to a type; it does not name one. It
+    // still has to be recorded, because a type the file only uses is a name the
+    // file uses, and that is what keeps intrinsic handling off it. But it must
+    // not vote on the spelling: letting it meant `type :: t_Name` and
+    // `type(t_name) :: v` disagreed, so the file's own definition went ambiguous
+    // and `end type t_NAME` -- which resolves through `cases.types` -- could not
+    // be corrected. The use site could, through `declared_types`, which holds
+    // definitions only; and once it had been, the disagreement was gone and the
+    // `end type` name moved on the pass after. Two tables of evidence about one
+    // entity, and a fixed point that took two passes to reach.
     let declared_type = (first.is(b"type") || first.is(b"class"))
         .then(|| type_spec_name(&tokens, first_index, separator))
         .flatten()
         .map(|name| {
-            facts.cases.types.insert(name);
+            facts.cases.types.insert_reference(name);
             name.to_ascii_lowercase()
         });
     let access = declaration_access(&tokens, first_index, separator);
@@ -533,9 +543,11 @@ fn old_style_declaration(
     {
         return;
     }
+    // A reference, not a declared spelling -- the same reason as in
+    // `declaration` above, for the old-style `type(t) v` spelling of it.
     let declared_type = if first.is(b"type") || first.is(b"class") {
         old_style_type_name(tokens, first_index).map(|token| {
-            facts.cases.types.insert(token);
+            facts.cases.types.insert_reference(token);
             token.to_ascii_lowercase()
         })
     } else {
