@@ -96,10 +96,10 @@ jobs:
   # PR did not introduce. A clean campaign is a property of the corpus and the
   # seed, not of the formatter.
   #
-  # 60s per target is chosen to keep CI fast, which means each run is a sample,
-  # not a verdict. Treat a red run here as a bug report worth reducing, not as a
-  # gate; a real campaign is `FUZZ_TIME=<large> ./tools/check_fuzz_regression.sh`
-  # run locally.
+  # 60s total across all targets is chosen to keep CI fast, which means each run
+  # is a sample, not a verdict. Treat a red run here as a bug report worth
+  # reducing, not as a gate; a real campaign is
+  # `FUZZ_TIME=<large> ./tools/check_fuzz_regression.sh` run locally.
   fuzz:
     name: fuzz (mutating, non-blocking)
     needs: fast-checks
@@ -110,7 +110,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-      # 60s per target across ten targets, plus the instrumented build.
+      # 60s total across all targets, plus the instrumented build.
       - run: FUZZ_TIME=60 ./tools/check_fuzz_regression.sh
       - name: Upload crashing inputs
         if: failure()

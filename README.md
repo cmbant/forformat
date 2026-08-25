@@ -212,7 +212,8 @@ otherwise unrelated pull request.
 For changes to full-mode normalization, wrapping, or layout, also run
 `./tools/check_fuzz_regression.sh` and the relevant focused properties. That script sweeps the
 fixture corpus through every libFuzzer target; `FUZZ_TIME=60 ./tools/check_fuzz_regression.sh`
-turns it into a mutating campaign, writing any crashing input to `fuzz/artifacts/`. See
+turns it into a mutating campaign with a shared 60-second budget, writing any crashing input to
+`fuzz/artifacts/`. See
 [`AGENTS.md`](AGENTS.md) for the full repository verification bar.
 
 ## Relationship to findent

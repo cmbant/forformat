@@ -37,6 +37,7 @@ fuzz_target_dir=${FUZZ_TARGET_DIR:-${TMPDIR:-/tmp}/forformat-fuzz-target}
 # run. That reproducibility is what makes it safe as a required check.
 #
 # Setting FUZZ_TIME (seconds) or FUZZ_RUNS instead turns the mutation loop on.
+# FUZZ_TIME is a shared budget for all targets, not a budget per target.
 # Which inputs it reaches varies run to run, so it can pass on one run and fail
 # on the next -- but a failure is never a false alarm, and the crashing input is
 # written to $FUZZ_ARTIFACTS, which reproduces it exactly. Treat a red mutating
@@ -84,6 +85,19 @@ corpus_root=$(mktemp -d)
 trap 'rm -rf "$corpus_root"' EXIT
 mkdir "$corpus_root/seed"
 cp tests/fixtures/*.f90 "$corpus_root/seed/"
+# Keep this count in sync with the target list below. It lets a short shared
+# budget give every target a chance to mutate.
+targets_left=10
+# The libFuzzer time limit applies to one process. Keep the user-facing
+# FUZZ_TIME budget across the whole target loop so adding targets cannot turn a
+# short CI campaign into a much longer one. Share the remaining budget across
+# the targets so an early target cannot consume the entire campaign. Start the
+# clock after the instrumented build so build time does not consume fuzz time.
+if test "$max_total_time" -gt 0; then
+    fuzz_deadline=$(($(date +%s) + max_total_time))
+else
+    fuzz_deadline=0
+fi
 for target in scanner assembler classifier engine format regions declarations project wrapper properties; do
     target_corpus="$corpus_root/$target"
     mkdir "$target_corpus"
@@ -93,13 +107,23 @@ for target in scanner assembler classifier engine format regions declarations pr
         # Document/SourceBuffer physical-line mismatch after semicolon removal.
         printf '\n;' > "$target_corpus/separator-only"
     fi
+    target_time=$max_total_time
+    if test "$fuzz_deadline" -gt 0; then
+        remaining_time=$((fuzz_deadline - $(date +%s)))
+        target_time=$((remaining_time / targets_left))
+        if test "$target_time" -le 0; then
+            echo "fuzz time budget exhausted"
+            break
+        fi
+    fi
     if test "$runs" -eq 0 && test "$max_total_time" -eq 0; then
         echo "corpus sweep: $target"
     else
-        echo "fuzzing $target (runs=$runs, max_total_time=${max_total_time}s)"
+        echo "fuzzing $target (runs=$runs, max_total_time=${target_time}s)"
     fi
     "$fuzz_target_dir/$host/debug/$target" \
-        -seed=1 -runs="$runs" -max_total_time="$max_total_time" \
+        -seed=1 -runs="$runs" -max_total_time="$target_time" \
         -max_len=4096 -print_final_stats=1 \
         -artifact_prefix="$artifacts/" "$target_corpus"
+    targets_left=$((targets_left - 1))
 done
