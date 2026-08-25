@@ -52,7 +52,7 @@ pub enum WorkflowError {
     /// A formatting failure with the input it came from already rendered.
     ///
     /// `FormatError` is about a source buffer, so it cannot name a file — the
-    /// same division [`report`] describes for declined wraps. A bulk run
+    /// same division `report` describes for declined wraps. A bulk run
     /// formats every target before it writes anything, so an unnamed failure
     /// there reports that nothing was written without saying which of the
     /// selected files caused it.
@@ -120,7 +120,7 @@ impl From<FormatError> for WorkflowError {
 ///
 /// The formatter is handed a source buffer and cannot name a file, so every
 /// route that formats a named input adds the name here — the same division
-/// [`report`] describes for declined wraps.
+/// `report` describes for declined wraps.
 fn in_input<T, E: Into<WorkflowError>>(
     result: Result<T, E>,
     path: Option<&Path>,

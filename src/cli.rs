@@ -3,8 +3,9 @@ use std::path::PathBuf;
 
 mod draft;
 mod help;
-mod options;
+pub(crate) mod options;
 mod parse;
+pub(crate) mod settings;
 
 pub use help::usage;
 pub use parse::parse;

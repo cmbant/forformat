@@ -16,21 +16,13 @@ die() {
 }
 
 # Keep long options advertised by terminal help represented in the normal-usage reference.
-# This is intentionally not an exhaustive parser or compatibility-alias inventory.
+# The exhaustive option/config/default inventory lives in the Rust option schema test, so this
+# runtime check only needs to verify the help surface emitted by the built binary.
 help_options=$($binary --help | grep -oE -- '--[a-z][a-z0-9-]*' | sort -u)
 while IFS= read -r option; do
     test -z "$option" && continue
     grep -Fq -- "$option" docs/options.md || die "docs/options.md does not mention $option"
 done <<<"$help_options"
-
-# These normal long forms are summarized rather than individually expanded in --help.
-for option in \
-    --indent-associate --indent-block --indent-case --indent-contains --indent-do \
-    --indent-entry --indent-enum --indent-forall --indent-if --indent-interface \
-    --indent-module --indent-procedure --indent-select --indent-type --indent-where \
-    --indent-critical --indent-changeteam; do
-    grep -Fq -- "$option" docs/options.md || die "docs/options.md does not mention $option"
-done
 
 # Scan only tracked Markdown: untracked docs/*.md files (scratch notes, generated
 # output) aren't part of the shipped documentation and shouldn't gate this check.
