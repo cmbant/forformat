@@ -57,21 +57,6 @@ impl LogicalGroup {
         self.source_of(statement.offset + offset)
     }
 
-    /// Which logical statement owns one byte of physical source.
-    ///
-    /// Separators themselves deliberately have no owner. Statement content is
-    /// mapped through the existing joined-text provenance rather than through a
-    /// second index, so semicolon splitting and continuation joining keep one
-    /// source of truth.
-    pub fn statement_index_at_source(&self, line: usize, byte: u32) -> Option<usize> {
-        let piece = self.piece_on_line(line)?;
-        if !piece.bytes.contains(&byte) {
-            return None;
-        }
-        let joined = piece.text.start + (byte - piece.bytes.start) as usize;
-        self.statement_index_at_joined_offset(joined)
-    }
-
     /// First statement with source content on one physical line.
     pub fn first_statement_index_on_line(&self, line: usize) -> Option<usize> {
         let piece = self.piece_on_line(line)?;
@@ -101,15 +86,6 @@ impl LogicalGroup {
             .binary_search_by_key(&line, |piece| piece.line)
             .ok()?;
         self.pieces.get(index)
-    }
-
-    fn statement_index_at_joined_offset(&self, joined: usize) -> Option<usize> {
-        let index = self
-            .statements
-            .partition_point(|statement| statement.offset + statement.text.len() <= joined);
-        let statement = self.statements.get(index)?;
-        (statement.offset <= joined && joined < statement.offset + statement.text.len())
-            .then_some(index)
     }
 }
 
@@ -358,22 +334,6 @@ x = 1
         assert_eq!(group.last_statement_index_on_line(0), Some(1));
         assert_eq!(group.first_statement_index_on_line(1), Some(1));
         assert_eq!(group.last_statement_index_on_line(1), Some(1));
-
-        let line = &buffer.lines[0];
-        let code = buffer.code_bytes(line);
-        let call = code
-            .windows(4)
-            .position(|window| window.eq_ignore_ascii_case(b"call"))
-            .unwrap();
-        assert_eq!(
-            group.statement_index_at_source(0, line.code_span.start + call as u32),
-            Some(1)
-        );
-        let semicolon = code.iter().position(|byte| *byte == b';').unwrap();
-        assert_eq!(
-            group.statement_index_at_source(0, line.code_span.start + semicolon as u32),
-            None
-        );
     }
 
     #[test]

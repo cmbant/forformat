@@ -20,10 +20,10 @@ Two rules I1 keeps re-teaching:
 - Wrapping runs before layout, so every budget decision measures text as it will be emitted.
   Normalization widens lines, the engine moves them, and declaration-separator alignment is the
   only post-layout pass that can make a line longer. Measure via `engine::format`.
-- Physical lines are not statement boundaries. `Analysis::StatementFacts` caches stable facts per
-  logical statement, and source provenance selects the first owner for current-line context and the
-  last owner for continuation carry. Dynamic line-rule state resets at real semicolons instead of
-  leaking state from an earlier statement on the same physical line.
+- Physical lines are not statement boundaries. `transform::document::StatementFacts` values are
+  cached by `Analysis` per logical statement, and source provenance selects the first owner for
+  current-line context and the last owner for continuation carry. Dynamic line-rule state resets at
+  real semicolons instead of leaking state from an earlier statement on the same physical line.
 
 ## Verification
 
