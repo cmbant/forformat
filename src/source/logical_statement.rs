@@ -64,42 +64,52 @@ impl LogicalGroup {
     /// second index, so semicolon splitting and continuation joining keep one
     /// source of truth.
     pub fn statement_index_at_source(&self, line: usize, byte: u32) -> Option<usize> {
-        let piece = self
-            .pieces
-            .iter()
-            .find(|piece| piece.line == line && piece.bytes.contains(&byte))?;
+        let piece = self.piece_on_line(line)?;
+        if !piece.bytes.contains(&byte) {
+            return None;
+        }
         let joined = piece.text.start + (byte - piece.bytes.start) as usize;
-        self.statements.iter().position(|statement| {
-            (statement.offset..statement.offset + statement.text.len()).contains(&joined)
-        })
+        self.statement_index_at_joined_offset(joined)
     }
 
     /// First statement with source content on one physical line.
     pub fn first_statement_index_on_line(&self, line: usize) -> Option<usize> {
+        let piece = self.piece_on_line(line)?;
+        let index = self
+            .statements
+            .partition_point(|statement| statement.offset + statement.text.len() <= piece.text.start);
         self.statements
-            .iter()
-            .enumerate()
-            .find(|(_, statement)| self.statement_has_source_on_line(statement, line))
-            .map(|(index, _)| index)
+            .get(index)
+            .filter(|statement| statement.offset < piece.text.end)
+            .map(|_| index)
     }
 
     /// Last statement with source content on one physical line.
     pub fn last_statement_index_on_line(&self, line: usize) -> Option<usize> {
-        self.statements
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(_, statement)| self.statement_has_source_on_line(statement, line))
-            .map(|(index, _)| index)
+        let piece = self.piece_on_line(line)?;
+        let after = self
+            .statements
+            .partition_point(|statement| statement.offset < piece.text.end);
+        let index = after.checked_sub(1)?;
+        let statement = &self.statements[index];
+        (piece.text.start < statement.offset + statement.text.len()).then_some(index)
     }
 
-    fn statement_has_source_on_line(&self, statement: &LogicalStatement, line: usize) -> bool {
-        let statement = statement.offset..statement.offset + statement.text.len();
-        self.pieces.iter().any(|piece| {
-            piece.line == line
-                && piece.text.start < statement.end
-                && statement.start < piece.text.end
-        })
+    fn piece_on_line(&self, line: usize) -> Option<&SourcePiece> {
+        let index = self
+            .pieces
+            .binary_search_by_key(&line, |piece| piece.line)
+            .ok()?;
+        self.pieces.get(index)
+    }
+
+    fn statement_index_at_joined_offset(&self, joined: usize) -> Option<usize> {
+        let index = self
+            .statements
+            .partition_point(|statement| statement.offset + statement.text.len() <= joined);
+        let statement = self.statements.get(index)?;
+        (statement.offset <= joined && joined < statement.offset + statement.text.len())
+            .then_some(index)
     }
 }
 
@@ -358,6 +368,11 @@ x = 1
         assert_eq!(
             group.statement_index_at_source(0, line.code_span.start + call as u32),
             Some(1)
+        );
+        let semicolon = code.iter().position(|byte| *byte == b';').unwrap();
+        assert_eq!(
+            group.statement_index_at_source(0, line.code_span.start + semicolon as u32),
+            None
         );
     }
 
