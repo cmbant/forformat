@@ -190,6 +190,7 @@ impl OptionLayer {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.format.is_empty()
             && self.no_submodules.is_none()
