@@ -6,19 +6,14 @@ use super::{
 use crate::{config::FormatConfig, error::FormatError};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 enum InputSelection {
+    #[default]
     Implicit,
     Stdin { project_context: Option<PathBuf> },
     ExplicitPaths { paths: Vec<PathBuf>, isolated: bool },
     All { directory: Option<PathBuf> },
     AllFiles { directory: Option<PathBuf> },
-}
-
-impl Default for InputSelection {
-    fn default() -> Self {
-        Self::Implicit
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,16 +356,15 @@ impl DraftInvocation {
             }
         }
 
-        if stdout {
-            if !matches!(
+        if stdout
+            && (!matches!(
                 &self.selection,
                 InputSelection::ExplicitPaths { ref paths, .. } if paths.len() == 1
             ) || check
                 || diff
-                || show_files
-            {
-                return Err(stdout_conflict());
-            }
+                || show_files)
+        {
+            return Err(stdout_conflict());
         }
 
         if matches!(
