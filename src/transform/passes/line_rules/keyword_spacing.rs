@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::source::Token;
+use crate::source::{regions::map_code, syntax::line_start_syntax, Token};
 
 /// What this stage knows about the statement a line belongs to, which the line
 /// on its own does not show.
@@ -34,6 +34,39 @@ pub fn normalize_keyword_spacing(
     )
 }
 
+/// Canonicalize lexical whitespace that full-mode spacing owns but the source
+/// may spell with a control byte rather than a space or tab.
+///
+/// The lexer deliberately accepts vertical tab, form feed and carriage return
+/// as whitespace, while the presentation rules below are written in terms of
+/// horizontal gaps. Converting those three code bytes to an ordinary space
+/// before the rules run gives both sides one answer in the same pass. Protected
+/// regions are copied byte-for-byte by [`map_code`].
+///
+/// Leading control whitespace is different: replacing it can expose syntax
+/// that is only active at the start of a physical line (`&`, `#`, `??` or a
+/// directive sentinel). If the candidate changes [`line_start_syntax`], keep
+/// the authored leading whitespace and canonicalize only later code gaps.
+fn canonicalize_code_whitespace(line: &[u8], incoming: LexState) -> Vec<u8> {
+    let mut state = incoming;
+    let mut output = map_code(line, &mut state, |code, out| {
+        out.extend(code.iter().map(|byte| match *byte {
+            b'\x0b' | b'\x0c' | b'\r' => b' ',
+            byte => byte,
+        }));
+    });
+    if output == line || line_start_syntax(&output) == line_start_syntax(line) {
+        return output;
+    }
+
+    let leading = line
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(line.len());
+    output[..leading].copy_from_slice(&line[..leading]);
+    output
+}
+
 pub(crate) fn normalize_keyword_spacing_with_state(
     line: &[u8],
     declared_names: &DeclaredNameIndex,
@@ -43,33 +76,37 @@ pub(crate) fn normalize_keyword_spacing_with_state(
     style: &StyleConfig,
 ) -> Vec<u8> {
     let normalize_whitespace = statement.normalize_whitespace;
+    let canonical = (normalize_whitespace
+        && line
+            .iter()
+            .any(|byte| matches!(*byte, b'\x0b' | b'\x0c' | b'\r')))
+    .then(|| canonicalize_code_whitespace(line, incoming));
+    let line = canonical.as_deref().unwrap_or(line);
     let tokens = tokenize(line, &mut incoming.clone());
-    let rules = Rules {
-        line,
-        tokens: &tokens,
-        declared_names,
-        line_index,
-        style,
-        normalize_whitespace,
-        continued_format: statement.continued_format,
-    };
     let mut edits = EditBuffer::new(line);
 
-    // The order is the rule order and is load-bearing: a later rule replaces a
-    // range the earlier one has already rewritten.
-    if normalize_whitespace {
-        rules.common_block(&mut edits);
+    // The stage owns statement-level rules, so give every rule one statement
+    // even when several share a physical line. `Semicolon` tokens come from the
+    // real tokenizer, which means semicolons in literals and Hollerith payloads
+    // never become boundaries here. Only the first non-empty slice can continue
+    // a FORMAT statement from an earlier physical line.
+    let mut first_statement = true;
+    for statement_tokens in tokens.split(|token| token.kind == TokenKind::Semicolon) {
+        if statement_tokens.is_empty() {
+            continue;
+        }
+        let rules = Rules {
+            line,
+            tokens: statement_tokens,
+            declared_names,
+            line_index,
+            style,
+            normalize_whitespace,
+            continued_format: statement.continued_format && first_statement,
+        };
+        rules.apply(&mut edits);
+        first_statement = false;
     }
-    rules.array_constructor_brackets(&mut edits);
-    rules.join_goto(&mut edits);
-    rules.multiword_keywords(&mut edits);
-    rules.split_compound_keywords(&mut edits);
-    rules.token_local(&mut edits);
-    if normalize_whitespace {
-        rules.delimiter_adjacency(&mut edits);
-        rules.if_condition_gap(&mut edits);
-    }
-    rules.strip_empty_args(&mut edits);
 
     let mut output = edits.finish();
     let start = output
@@ -87,7 +124,8 @@ pub(crate) fn normalize_keyword_spacing_with_state(
     output
 }
 
-/// One physical line's tokens, plus the settings every rule below consults.
+/// One statement's tokens, plus the physical line and settings every rule below
+/// consults.
 ///
 /// The rules divide in two, and which half a rule is in is the answer to
 /// "does canonicalize-only run it?".
@@ -122,6 +160,26 @@ struct SplitWord<'a> {
 }
 
 impl Rules<'_> {
+    /// Apply this stage's rules to one semicolon-delimited statement.
+    ///
+    /// The order is load-bearing: a later rule may replace a range an earlier
+    /// one has already rewritten.
+    fn apply(&self, edits: &mut EditBuffer) {
+        if self.normalize_whitespace {
+            self.common_block(edits);
+        }
+        self.array_constructor_brackets(edits);
+        self.join_goto(edits);
+        self.multiword_keywords(edits);
+        self.split_compound_keywords(edits);
+        self.token_local(edits);
+        if self.normalize_whitespace {
+            self.delimiter_adjacency(edits);
+            self.if_condition_gap(edits);
+        }
+        self.strip_empty_args(edits);
+    }
+
     /// Is there authored horizontal whitespace between these two offsets?
     fn gap(&self, end: usize, start: usize) -> bool {
         horizontal_gap(self.line, end, start)
