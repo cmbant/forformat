@@ -34,9 +34,10 @@ pub enum FormatMode {
 /// This is an output-generation policy, not a validator or downgrader: source
 /// that already uses newer syntax is left to the ordinary formatter rules. The
 /// default is Fortran 2003 so existing full-mode output remains unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FortranStandard {
     F95,
+    #[default]
     F2003,
     F2008,
     F2018,
@@ -48,12 +49,6 @@ impl FortranStandard {
     /// array-constructor syntax introduced in Fortran 2003.
     pub const fn allows_square_array_constructors(self) -> bool {
         !matches!(self, FortranStandard::F95)
-    }
-}
-
-impl Default for FortranStandard {
-    fn default() -> Self {
-        Self::F2003
     }
 }
 
