@@ -131,3 +131,28 @@ fn implicit_function_result_keeps_base_semantic_evidence() {
     assert!(output.contains("ResultCase = x"), "{output}");
     assert!(output.contains("end function ResultCase"), "{output}");
 }
+
+#[test]
+fn imported_public_saved_object_uses_its_declared_case() {
+    let file_utils = b"module FileUtils\nprivate\ntype TFile\ncontains\nprocedure :: IsFullPath\nend type TFile\ntype(TFile), public, save :: File\ncontains\nlogical function IsFullPath(name)\ncharacter(len=*), intent(in) :: name\nIsFullPath = .true.\nend function IsFullPath\nend module FileUtils\n";
+    let target = b"module User\nuse FileUtils\nimplicit none\ncontains\nsubroutine check_name\nlogical :: ok\nok = file%IsFullPath('x')\nend subroutine check_name\nend module User\n";
+    let output = normalize(
+        target,
+        [
+            (Path::new("file_utils.f90"), file_utils.as_slice()),
+            (Path::new("user.f90"), target.as_slice()),
+        ],
+    );
+
+    assert!(output.contains("ok = File%IsFullPath('x')"), "{output}");
+}
+
+#[test]
+fn same_file_imported_public_saved_object_uses_its_declared_case() {
+    // CAMB forutils reduction: `file` is both an identifier and an I/O
+    // specifier, and both modules can live in one physical source file.
+    let source = include_bytes!("project_fixtures/corpus_camb_file_case.f90");
+    let output = normalize(source, [(Path::new("same_file.f90"), source.as_slice())]);
+
+    assert!(output.contains("ok = File%IsFullPath('x')"), "{output}");
+}
