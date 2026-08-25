@@ -179,7 +179,6 @@ impl StatementState {
         code: &[u8],
         continues: bool,
         incoming: LexState,
-        conditional: bool,
         cx: &PassContext,
         line_index: usize,
     ) {
@@ -192,6 +191,11 @@ impl StatementState {
         // it, so one stray quote put every statement after it inside a literal.
         // See `regions::advance_stream_line` for why the wrapper's disagreement
         // with that cost a pass of settling.
+        //
+        // Which gate that helper applies depends on the stream, and the buffer is
+        // the one place that decides which stream a line belongs to. Ask it,
+        // rather than having the caller restate a fact it read from there.
+        let conditional = cx.analysis.buffer.stream(line_index).is_conditional();
         self.lex = incoming;
         crate::source::regions::advance_stream_line(&mut self.lex, code, conditional);
         self.continued_statement = continues;
@@ -271,12 +275,16 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 cx,
             );
             let incoming_lex = stream.lex;
+            // The chain reads the incoming state but must not write the carried
+            // one: `advance` owns what survives the line. Same rule as the
+            // ordinary stream below, where it is spelled out.
+            let mut scan_state = incoming_lex;
             let body = apply_rules(
                 &document.lines[index][body_start..],
                 cx,
                 &declared_names,
                 index,
-                &mut stream.lex,
+                &mut scan_state,
                 RuleMode::Physical(context),
             );
             let mut rebuilt = document.lines[index][..body_start].to_vec();
@@ -291,7 +299,6 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                         cx.analysis.buffer.code_bytes(physical),
                         physical.continues,
                         incoming_lex,
-                        true,
                         cx,
                         index,
                     );
@@ -318,25 +325,32 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             index,
             cx,
         );
-        // A comment or blank line is stepped over too. It is still normalized
-        // on its own terms, but through a scratch state: reading the group's
-        // state would make the `!` of a comment inside an open literal look
-        // like literal text, and writing it back would let the apostrophe in
-        // prose like `! don't` close the literal, so the `!` in `&def!ghi'` on
-        // the resumed line would be rewritten as a comment marker.
+        // The rule chain scans a line to find the protected bytes *in* it, and
+        // leaves its own scan behind in the state it was given. What survives
+        // the line is a different question, and `advance` is the only answer to
+        // it -- re-derived from `incoming_lex` exactly as `SourceBuffer` does.
+        // So the chain always gets a scratch copy: giving it the carried state
+        // to write back is what let one stray quote leak a literal into every
+        // statement after it.
+        //
+        // A comment or blank line is stepped over entirely. It is still
+        // normalized on its own terms, but from a *clean* state: reading the
+        // group's state would make the `!` of a comment inside an open literal
+        // look like literal text, so the `!` in `&def!ghi'` on the resumed line
+        // would be rewritten as a comment marker.
         let incoming_lex = stream.lex;
-        let mut scratch = LexState::default();
-        let lex = if matches!(kind, PhysicalLineKind::Comment | PhysicalLineKind::Blank) {
-            &mut scratch
+        let mut scan_state = if matches!(kind, PhysicalLineKind::Comment | PhysicalLineKind::Blank)
+        {
+            LexState::default()
         } else {
-            &mut stream.lex
+            incoming_lex
         };
         let line = apply_rules(
             &document.lines[index],
             cx,
             &declared_names,
             index,
-            lex,
+            &mut scan_state,
             RuleMode::Physical(context),
         );
 
@@ -349,7 +363,6 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                     cx.analysis.buffer.code_bytes(physical),
                     physical.continues,
                     incoming_lex,
-                    false,
                     cx,
                     index,
                 );
