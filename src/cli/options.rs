@@ -116,12 +116,17 @@ pub(crate) enum ValueKind {
     OutputFormat,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Repeatability {
-    LastWins,
-    Once,
-    Append,
-    ReplaceLayer,
+impl ValueKind {
+    pub(crate) const fn cli_arity(self) -> CliArity {
+        match self {
+            Self::Flag => CliArity::None,
+            Self::OptionalBoolean
+            | Self::OptionalNonNegative
+            | Self::WhitespaceReduction
+            | Self::RefactorEnd => CliArity::Optional,
+            _ => CliArity::Required,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,31 +155,22 @@ pub(crate) struct OptionSpec {
     pub(crate) long: &'static str,
     pub(crate) aliases: &'static [&'static str],
     pub(crate) value_kind: ValueKind,
-    pub(crate) cli_arity: CliArity,
     pub(crate) config: ConfigMapping,
-    pub(crate) default: Option<&'static str>,
-    pub(crate) repeatability: Repeatability,
+    pub(crate) default_text: Option<&'static str>,
     pub(crate) config_phase: ConfigPhase,
     pub(crate) help: Option<HelpLine>,
     pub(crate) suggest_single_dash: bool,
 }
 
 impl OptionSpec {
-    const fn new(
-        id: OptionId,
-        long: &'static str,
-        value_kind: ValueKind,
-        cli_arity: CliArity,
-    ) -> Self {
+    const fn new(id: OptionId, long: &'static str, value_kind: ValueKind) -> Self {
         Self {
             id,
             long,
             aliases: &[],
             value_kind,
-            cli_arity,
             config: ConfigMapping::None,
-            default: None,
-            repeatability: Repeatability::LastWins,
+            default_text: None,
             config_phase: ConfigPhase::Specific,
             help: None,
             suggest_single_dash: true,
@@ -191,13 +187,8 @@ impl OptionSpec {
         self
     }
 
-    const fn default(mut self, default: &'static str) -> Self {
-        self.default = Some(default);
-        self
-    }
-
-    const fn repeatability(mut self, repeatability: Repeatability) -> Self {
-        self.repeatability = repeatability;
+    const fn default_text(mut self, default_text: &'static str) -> Self {
+        self.default_text = Some(default_text);
         self
     }
 
@@ -220,224 +211,175 @@ impl OptionSpec {
     }
 }
 
-/// Shared option identity, grammar, configuration mapping, declared defaults,
-/// repeatability, and user-facing terminal help.
+/// Shared option identity, value grammar, configuration mapping, documented
+/// defaults, config ordering, and user-facing terminal help.
 ///
 /// CLI and TOML parsing both resolve through this table before creating typed
-/// [`FormatSetting`] values. Runtime defaults remain embodied by
-/// `FormatConfig::default()`, and ordered layer application implements the
-/// declared repeat/merge behavior. The invariance tests below keep those runtime
-/// semantics in lockstep with this metadata instead of duplicating defaults in a
-/// second executable configuration object. TOML settings use [`ConfigPhase`] so
-/// semantic baselines such as `indent` are applied before their more-specific
-/// overrides without depending on map order.
+/// [`FormatSetting`] values. CLI arity is derived from [`ValueKind`]. Runtime
+/// defaults remain embodied by `FormatConfig::default()`, while typed layer
+/// fields and their merge code own repeat/replace semantics. The invariance test
+/// below keeps documented default text aligned with the runtime defaults. TOML
+/// settings use [`ConfigPhase`] so semantic baselines such as `indent` are
+/// applied before their more-specific overrides without depending on map order.
 pub(crate) static OPTIONS: &[OptionSpec] = &[
-    OptionSpec::new(
-        OptionId::Indent,
-        "indent",
-        ValueKind::Indent,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .default("3")
-    .config_phase(ConfigPhase::Baseline)
-    .help(
-        "-i<n>, -i-, --indent=<n|none>",
-        "global indentation (default 3)",
-    ),
-    OptionSpec::new(
-        OptionId::StartIndent,
-        "start-indent",
-        ValueKind::StartIndent,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .default("0")
-    .help("-I<n|a>, --start-indent=<n|a>", "starting indentation"),
+    OptionSpec::new(OptionId::Indent, "indent", ValueKind::Indent)
+        .config(ConfigMapping::Same)
+        .default_text("3")
+        .config_phase(ConfigPhase::Baseline)
+        .help(
+            "-i<n>, -i-, --indent=<n|none>",
+            "global indentation (default 3)",
+        ),
+    OptionSpec::new(OptionId::StartIndent, "start-indent", ValueKind::StartIndent)
+        .config(ConfigMapping::Same)
+        .default_text("0")
+        .help("-I<n|a>, --start-indent=<n|a>", "starting indentation"),
     OptionSpec::new(
         OptionId::IndentContains,
         "indent-contains",
         ValueKind::ContainsIndent,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("3"),
+    .default_text("3"),
     OptionSpec::new(
         OptionId::IndentConstruct(Construct::Associate),
         "indent-associate",
         ValueKind::NonNegative,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("3"),
+    .default_text("3"),
     OptionSpec::new(
         OptionId::IndentConstruct(Construct::Block),
         "indent-block",
         ValueKind::NonNegative,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("3"),
+    .default_text("3"),
     OptionSpec::new(
         OptionId::IndentConstruct(Construct::Case),
         "indent-case",
         ValueKind::NonNegative,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("2"),
+    .default_text("2"),
     OptionSpec::new(
         OptionId::IndentConstruct(Construct::Changeteam),
         "indent-changeteam",
         ValueKind::NonNegative,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("3"),
+    .default_text("3"),
     OptionSpec::new(
         OptionId::IndentConstruct(Construct::Critical),
         "indent-critical",
         ValueKind::NonNegative,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("3"),
+    .default_text("3"),
     OptionSpec::new(
         OptionId::IndentConstruct(Construct::Do),
         "indent-do",
         ValueKind::NonNegative,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("3"),
+    .default_text("3"),
     OptionSpec::new(
         OptionId::IndentConstruct(Construct::Entry),
         "indent-entry",
         ValueKind::NonNegative,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("2"),
+    .default_text("2"),
     OptionSpec::new(
         OptionId::IndentConstruct(Construct::Enum),
         "indent-enum",
         ValueKind::NonNegative,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("3"),
+    .default_text("3"),
     OptionSpec::new(
         OptionId::IndentConstruct(Construct::Forall),
         "indent-forall",
         ValueKind::NonNegative,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("3"),
+    .default_text("3"),
     OptionSpec::new(
         OptionId::IndentConstruct(Construct::If),
         "indent-if",
         ValueKind::NonNegative,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("3"),
+    .default_text("3"),
     OptionSpec::new(
         OptionId::IndentConstruct(Construct::Interface),
         "indent-interface",
         ValueKind::NonNegative,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("3"),
+    .default_text("3"),
     OptionSpec::new(
         OptionId::IndentConstruct(Construct::Module),
         "indent-module",
         ValueKind::NonNegative,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("3"),
+    .default_text("3"),
     OptionSpec::new(
         OptionId::IndentConstruct(Construct::Procedure),
         "indent-procedure",
         ValueKind::NonNegative,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("3"),
+    .default_text("3"),
     OptionSpec::new(
         OptionId::IndentConstruct(Construct::Select),
         "indent-select",
         ValueKind::NonNegative,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("3"),
+    .default_text("3"),
     OptionSpec::new(
         OptionId::IndentConstruct(Construct::Type),
         "indent-type",
         ValueKind::NonNegative,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("3"),
+    .default_text("3"),
     OptionSpec::new(
         OptionId::IndentConstruct(Construct::Where),
         "indent-where",
         ValueKind::NonNegative,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("3"),
-    OptionSpec::new(
-        OptionId::IncludeLeft,
-        "include-left",
-        ValueKind::Boolean,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .default("false")
-    .help(
-        "--include-left=<BOOL>",
-        "put INCLUDE at the starting indent",
-    ),
-    OptionSpec::new(
-        OptionId::LabelLeft,
-        "label-left",
-        ValueKind::Boolean,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .default("true"),
-    OptionSpec::new(
-        OptionId::MaxIndent,
-        "max-indent",
-        ValueKind::NonNegative,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .default("100")
-    .help(
-        "-M<n>, --max-indent=<n>",
-        "maximum indentation (0 = unlimited)",
-    ),
-    OptionSpec::new(
-        OptionId::Openmp,
-        "openmp",
-        ValueKind::Boolean,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .default("true"),
+    .default_text("3"),
+    OptionSpec::new(OptionId::IncludeLeft, "include-left", ValueKind::Boolean)
+        .config(ConfigMapping::Same)
+        .default_text("false")
+        .help(
+            "--include-left=<BOOL>",
+            "put INCLUDE at the starting indent",
+        ),
+    OptionSpec::new(OptionId::LabelLeft, "label-left", ValueKind::Boolean)
+        .config(ConfigMapping::Same)
+        .default_text("true"),
+    OptionSpec::new(OptionId::MaxIndent, "max-indent", ValueKind::NonNegative)
+        .config(ConfigMapping::Same)
+        .default_text("100")
+        .help(
+            "-M<n>, --max-indent=<n>",
+            "maximum indentation (0 = unlimited)",
+        ),
+    OptionSpec::new(OptionId::Openmp, "openmp", ValueKind::Boolean)
+        .config(ConfigMapping::Same)
+        .default_text("true"),
     OptionSpec::new(
         OptionId::IndentAmpersand,
         "indent-ampersand",
         ValueKind::OptionalBoolean,
-        CliArity::Optional,
     )
     .config(ConfigMapping::Same)
-    .default("false")
+    .default_text("false")
     .help(
         "-K, --indent-ampersand[=<BOOL>]",
         "indent leading continuation ampersands",
@@ -446,10 +388,9 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         OptionId::IndentContinuation,
         "indent-continuation",
         ValueKind::ContinuationIndent,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("3")
+    .default_text("3")
     .help(
         "-k<n>, --indent-continuation=<n>",
         "continuation indentation",
@@ -458,10 +399,9 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         OptionId::AlignParen,
         "align-paren",
         ValueKind::OptionalNonNegative,
-        CliArity::Optional,
     )
     .config(ConfigMapping::Same)
-    .default("0")
+    .default_text("0")
     .help(
         "--align-paren[=<n|BOOL>]",
         "align continuation lines at parentheses",
@@ -470,67 +410,42 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         OptionId::WsRemred,
         "reduce-whitespace",
         ValueKind::WhitespaceReduction,
-        CliArity::Optional,
     )
     .aliases(&["ws-remred"])
     .config(ConfigMapping::Same)
-    .default("0")
+    .default_text("0")
     .help("--reduce-whitespace[=<n>]", "reduce redundant whitespace"),
     OptionSpec::new(
         OptionId::AlignDeclarations,
         "align-declarations",
         ValueKind::Boolean,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("true")
+    .default_text("true")
     .help(
         "--align-declarations=<BOOL>",
         "shrink space to align `::` blocks (default 1)",
     ),
-    OptionSpec::new(
-        OptionId::AlignComments,
-        "align-comments",
-        ValueKind::Boolean,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .default("false")
-    .help(
-        "--align-comments=<BOOL>",
-        "shrink space to align trailing comment blocks (default 0)",
-    ),
-    OptionSpec::new(
-        OptionId::LastIndent,
-        "last-indent",
-        ValueKind::Flag,
-        CliArity::None,
-    )
-    .help(
+    OptionSpec::new(OptionId::AlignComments, "align-comments", ValueKind::Boolean)
+        .config(ConfigMapping::Same)
+        .default_text("false")
+        .help(
+            "--align-comments=<BOOL>",
+            "shrink space to align trailing comment blocks (default 0)",
+        ),
+    OptionSpec::new(OptionId::LastIndent, "last-indent", ValueKind::Flag).help(
         "--last-indent, -lastindent",
         "print final indentation instead of source",
     ),
-    OptionSpec::new(
-        OptionId::LastUsable,
-        "last-usable",
-        ValueKind::Flag,
-        CliArity::None,
-    )
-    .help(
+    OptionSpec::new(OptionId::LastUsable, "last-usable", ValueKind::Flag).help(
         "--last-usable, -lastusable",
         "print final usable indentation instead of source",
     ),
-    OptionSpec::new(OptionId::All, "all", ValueKind::Flag, CliArity::None).help(
+    OptionSpec::new(OptionId::All, "all", ValueKind::Flag).help(
         "<paths>, --all [directory]",
         "format explicit files or all tracked sources recursively",
     ),
-    OptionSpec::new(
-        OptionId::AllFiles,
-        "all-files",
-        ValueKind::Flag,
-        CliArity::None,
-    )
-    .help(
+    OptionSpec::new(OptionId::AllFiles, "all-files", ValueKind::Flag).help(
         "--all-files [directory]",
         "format this checkout's tracked sources; submodules are context only",
     ),
@@ -538,123 +453,70 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         OptionId::NoSubmodules,
         "no-submodules",
         ValueKind::OptionalBoolean,
-        CliArity::Optional,
     )
     .config(ConfigMapping::Same)
-    .default("false")
+    .default_text("false")
     .help(
         "--no-submodules[=<BOOL>]",
         "omit submodule sources from targets and project context",
     ),
-    OptionSpec::new(
-        OptionId::ContextPath,
-        "context-path",
-        ValueKind::Path,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Keys(&["context-paths"]))
-    .repeatability(Repeatability::ReplaceLayer)
-    .help(
-        "--context-path=<directory>",
-        "limit project context to sources beneath DIRECTORY; repeatable",
-    ),
-    OptionSpec::new(
-        OptionId::ProjectContext,
-        "project-context",
-        ValueKind::Path,
-        CliArity::Required,
-    )
-    .repeatability(Repeatability::Once)
-    .help(
+    OptionSpec::new(OptionId::ContextPath, "context-path", ValueKind::Path)
+        .config(ConfigMapping::Keys(&["context-paths"]))
+        .help(
+            "--context-path=<directory>",
+            "limit project context to sources beneath DIRECTORY; repeatable",
+        ),
+    OptionSpec::new(OptionId::ProjectContext, "project-context", ValueKind::Path).help(
         "--project-context=<path>",
         "treat stdin as belonging to the Git project containing PATH",
     ),
-    OptionSpec::new(OptionId::Stdin, "stdin", ValueKind::Flag, CliArity::None)
+    OptionSpec::new(OptionId::Stdin, "stdin", ValueKind::Flag)
         .help("--stdin", "read source from stdin (default without paths)"),
-    OptionSpec::new(OptionId::Stdout, "stdout", ValueKind::Flag, CliArity::None)
+    OptionSpec::new(OptionId::Stdout, "stdout", ValueKind::Flag)
         .help("--stdout", "write one file's result to stdout"),
-    OptionSpec::new(
-        OptionId::Isolated,
-        "isolated",
-        ValueKind::Flag,
-        CliArity::None,
-    )
-    .help(
+    OptionSpec::new(OptionId::Isolated, "isolated", ValueKind::Flag).help(
         "--isolated",
         "do not scan repository sources for case resolution",
     ),
-    OptionSpec::new(OptionId::Check, "check", ValueKind::Flag, CliArity::None)
+    OptionSpec::new(OptionId::Check, "check", ValueKind::Flag)
         .help("--check", "exit 1 if selected files would change"),
-    OptionSpec::new(OptionId::Diff, "diff", ValueKind::Flag, CliArity::None)
+    OptionSpec::new(OptionId::Diff, "diff", ValueKind::Flag)
         .help("--diff", "print unified diffs and exit 1 if changed"),
-    OptionSpec::new(
-        OptionId::ShowFiles,
-        "show-files",
-        ValueKind::Flag,
-        CliArity::None,
-    )
-    .help("--show-files", "print selected files without formatting"),
-    OptionSpec::new(
-        OptionId::QueryFormat,
-        "query-format",
-        ValueKind::Flag,
-        CliArity::None,
-    )
-    .help("--query-format", "print free/fixed for each input and exit"),
-    OptionSpec::new(
-        OptionId::Exclude,
-        "exclude",
-        ValueKind::Text,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .repeatability(Repeatability::ReplaceLayer)
-    .help(
-        "--exclude=<glob>",
-        "exclude tracked sources from selection and project scanning (repeatable)",
-    ),
-    OptionSpec::new(
-        OptionId::ExtendExclude,
-        "extend-exclude",
-        ValueKind::Text,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .repeatability(Repeatability::Append)
-    .help(
-        "--extend-exclude=<glob>",
-        "add to the exclusions instead of replacing them (repeatable)",
-    ),
-    OptionSpec::new(
-        OptionId::IndentOnly,
-        "indent-only",
-        ValueKind::Flag,
-        CliArity::None,
-    )
-    .config(ConfigMapping::Mode("indent-only"))
-    .help("--indent-only", "findent-compatible indentation only"),
-    OptionSpec::new(OptionId::Full, "full", ValueKind::Flag, CliArity::None)
+    OptionSpec::new(OptionId::ShowFiles, "show-files", ValueKind::Flag)
+        .help("--show-files", "print selected files without formatting"),
+    OptionSpec::new(OptionId::QueryFormat, "query-format", ValueKind::Flag)
+        .help("--query-format", "print free/fixed for each input and exit"),
+    OptionSpec::new(OptionId::Exclude, "exclude", ValueKind::Text)
+        .config(ConfigMapping::Same)
+        .help(
+            "--exclude=<glob>",
+            "exclude tracked sources from selection and project scanning (repeatable)",
+        ),
+    OptionSpec::new(OptionId::ExtendExclude, "extend-exclude", ValueKind::Text)
+        .config(ConfigMapping::Same)
+        .help(
+            "--extend-exclude=<glob>",
+            "add to the exclusions instead of replacing them (repeatable)",
+        ),
+    OptionSpec::new(OptionId::IndentOnly, "indent-only", ValueKind::Flag)
+        .config(ConfigMapping::Mode("indent-only"))
+        .help("--indent-only", "findent-compatible indentation only"),
+    OptionSpec::new(OptionId::Full, "full", ValueKind::Flag)
         .config(ConfigMapping::Mode("full"))
         .help(
             "--full",
             "full formatting: normalization and wrapping (default)",
         ),
-    OptionSpec::new(
-        OptionId::NormalizeOnly,
-        "normalize-only",
-        ValueKind::Flag,
-        CliArity::None,
-    )
-    .config(ConfigMapping::Mode("normalize-only"))
-    .help(
-        "--normalize-only",
-        "normalization without structural layout",
-    ),
+    OptionSpec::new(OptionId::NormalizeOnly, "normalize-only", ValueKind::Flag)
+        .config(ConfigMapping::Mode("normalize-only"))
+        .help(
+            "--normalize-only",
+            "normalization without structural layout",
+        ),
     OptionSpec::new(
         OptionId::CanonicalizeOnly,
         "canonicalize-only",
         ValueKind::Flag,
-        CliArity::None,
     )
     .config(ConfigMapping::Mode("canonicalize-only"))
     .help(
@@ -665,62 +527,40 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         OptionId::CanonicalizeAndIndent,
         "canonicalize-and-indent",
         ValueKind::Flag,
-        CliArity::None,
     )
     .config(ConfigMapping::Mode("canonicalize-and-indent"))
     .help(
         "--canonicalize-and-indent",
         "canonical spelling followed by findent-compatible indentation",
     ),
-    OptionSpec::new(
-        OptionId::Wrap,
-        "wrap",
-        ValueKind::OptionalBoolean,
-        CliArity::Optional,
-    )
-    .config(ConfigMapping::Same)
-    .default("true")
-    .help(
-        "--wrap[=<BOOL>], --no-wrap[=<BOOL>]",
-        "reflow over-long statements (full mode)",
-    ),
-    OptionSpec::new(
-        OptionId::NoWrap,
-        "no-wrap",
-        ValueKind::OptionalBoolean,
-        CliArity::Optional,
-    )
-    .config(ConfigMapping::Same)
-    .default("false"),
-    OptionSpec::new(
-        OptionId::Rewrap,
-        "rewrap",
-        ValueKind::OptionalBoolean,
-        CliArity::Optional,
-    )
-    .config(ConfigMapping::Same)
-    .default("false")
-    .help(
-        "--rewrap[=<BOOL>]",
-        "repack eligible authored continuations (full mode)",
-    ),
-    OptionSpec::new(
-        OptionId::LineLength,
-        "line-length",
-        ValueKind::NonNegative,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .default("120")
-    .help("--line-length=<n>", "wrapping budget (default 120)"),
+    OptionSpec::new(OptionId::Wrap, "wrap", ValueKind::OptionalBoolean)
+        .config(ConfigMapping::Same)
+        .default_text("true")
+        .help(
+            "--wrap[=<BOOL>], --no-wrap[=<BOOL>]",
+            "reflow over-long statements (full mode)",
+        ),
+    OptionSpec::new(OptionId::NoWrap, "no-wrap", ValueKind::OptionalBoolean)
+        .config(ConfigMapping::Same)
+        .default_text("false"),
+    OptionSpec::new(OptionId::Rewrap, "rewrap", ValueKind::OptionalBoolean)
+        .config(ConfigMapping::Same)
+        .default_text("false")
+        .help(
+            "--rewrap[=<BOOL>]",
+            "repack eligible authored continuations (full mode)",
+        ),
+    OptionSpec::new(OptionId::LineLength, "line-length", ValueKind::NonNegative)
+        .config(ConfigMapping::Same)
+        .default_text("120")
+        .help("--line-length=<n>", "wrapping budget (default 120)"),
     OptionSpec::new(
         OptionId::TargetStandard,
         "target-standard",
         ValueKind::FortranStandard,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("f2003")
+    .default_text("f2003")
     .help(
         "--target-standard=<f95|f2003|f2008|f2018|f2023>",
         "cap syntax introduced by formatting (default f2003)",
@@ -729,130 +569,94 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         OptionId::UppercaseSingleL,
         "uppercase-single-l",
         ValueKind::OptionalBoolean,
-        CliArity::Optional,
     )
     .config(ConfigMapping::Same)
-    .default("false")
+    .default_text("false")
     .help(
         "--uppercase-single-l[=<BOOL>]",
         "uppercase a lone `l` used as a name",
     ),
-    OptionSpec::new(
-        OptionId::Define,
-        "define",
-        ValueKind::Text,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Keys(&["define", "defines"]))
-    .repeatability(Repeatability::Append)
-    .help(
-        "-D NAME[=VALUE], --define=...",
-        "define a macro name (repeatable)",
-    ),
-    OptionSpec::new(
-        OptionId::KeywordCase,
-        "keyword-case",
-        ValueKind::KeywordCase,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .default("lower")
-    .help(
-        "--keyword-case=<lower|upper|preserve>",
-        "recognized keyword case (default lower)",
-    ),
-    OptionSpec::new(
-        OptionId::OpenmpCase,
-        "openmp-case",
-        ValueKind::Boolean,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .default("true")
-    .help(
-        "--openmp-case=<BOOL>",
-        "uppercase reserved OpenMP directives (default true)",
-    ),
+    OptionSpec::new(OptionId::Define, "define", ValueKind::Text)
+        .config(ConfigMapping::Keys(&["define", "defines"]))
+        .help(
+            "-D NAME[=VALUE], --define=...",
+            "define a macro name (repeatable)",
+        ),
+    OptionSpec::new(OptionId::KeywordCase, "keyword-case", ValueKind::KeywordCase)
+        .config(ConfigMapping::Same)
+        .default_text("lower")
+        .help(
+            "--keyword-case=<lower|upper|preserve>",
+            "recognized keyword case (default lower)",
+        ),
+    OptionSpec::new(OptionId::OpenmpCase, "openmp-case", ValueKind::Boolean)
+        .config(ConfigMapping::Same)
+        .default_text("true")
+        .help(
+            "--openmp-case=<BOOL>",
+            "uppercase reserved OpenMP directives (default true)",
+        ),
     OptionSpec::new(
         OptionId::RelationalSymbols,
         "relational-symbols",
         ValueKind::Boolean,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("true")
+    .default_text("true")
     .help(
         "--relational-symbols=<BOOL>",
         "rewrite `.eq.` and friends as `==` (default true)",
     ),
-    OptionSpec::new(
-        OptionId::ArrayBrackets,
-        "array-brackets",
-        ValueKind::Boolean,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .default("true")
-    .help(
-        "--array-brackets=<BOOL>",
-        "rewrite `(/ ... /)` as `[ ... ]` (default true)",
-    ),
+    OptionSpec::new(OptionId::ArrayBrackets, "array-brackets", ValueKind::Boolean)
+        .config(ConfigMapping::Same)
+        .default_text("true")
+        .help(
+            "--array-brackets=<BOOL>",
+            "rewrite `(/ ... /)` as `[ ... ]` (default true)",
+        ),
     OptionSpec::new(
         OptionId::CompactMultiplicative,
         "compact-multiplicative",
         ValueKind::Boolean,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("true")
+    .default_text("true")
     .help(
         "--compact-multiplicative=<BOOL>",
         "no spaces around binary `*`, `/`, `**` (default true)",
     ),
-    OptionSpec::new(
-        OptionId::JoinGoto,
-        "join-goto",
-        ValueKind::Boolean,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .default("true")
-    .help(
-        "--join-goto=<BOOL>",
-        "write `go to` as `goto` (default true)",
-    ),
+    OptionSpec::new(OptionId::JoinGoto, "join-goto", ValueKind::Boolean)
+        .config(ConfigMapping::Same)
+        .default_text("true")
+        .help(
+            "--join-goto=<BOOL>",
+            "write `go to` as `goto` (default true)",
+        ),
     OptionSpec::new(
         OptionId::SplitCompoundKeywords,
         "split-compound-keywords",
         ValueKind::Boolean,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("true")
+    .default_text("true")
     .help(
         "--split-compound-keywords=<BOOL>",
         "write `endif` as `end if` (default true)",
     ),
-    OptionSpec::new(
-        OptionId::StripEmptyArgs,
-        "strip-empty-args",
-        ValueKind::Boolean,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .default("true")
-    .help(
-        "--strip-empty-args=<BOOL>",
-        "strip empty SUBROUTINE definition arg lists (default true)",
-    ),
+    OptionSpec::new(OptionId::StripEmptyArgs, "strip-empty-args", ValueKind::Boolean)
+        .config(ConfigMapping::Same)
+        .default_text("true")
+        .help(
+            "--strip-empty-args=<BOOL>",
+            "strip empty SUBROUTINE definition arg lists (default true)",
+        ),
     OptionSpec::new(
         OptionId::RemoveRedundantParens,
         "remove-redundant-parens",
         ValueKind::Boolean,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("true")
+    .default_text("true")
     .help(
         "--remove-redundant-parens=<BOOL>",
         "remove redundant parentheses (default true)",
@@ -861,10 +665,9 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         OptionId::NormalizeSemicolons,
         "normalize-semicolons",
         ValueKind::Boolean,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("true")
+    .default_text("true")
     .help(
         "--normalize-semicolons=<BOOL>",
         "drop redundant statement separators (default true)",
@@ -873,10 +676,9 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         OptionId::RemoveTerminalReturn,
         "remove-terminal-return",
         ValueKind::Boolean,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("true")
+    .default_text("true")
     .help(
         "--remove-terminal-return=<BOOL>",
         "remove terminal procedure RETURN (default true)",
@@ -885,10 +687,9 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         OptionId::ProgramUnitSpacing,
         "program-unit-spacing",
         ValueKind::Boolean,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("true")
+    .default_text("true")
     .help(
         "--program-unit-spacing=<BOOL>",
         "canonical blank lines around program units (default true)",
@@ -897,10 +698,9 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         OptionId::MaxBlankLines,
         "max-blank-lines",
         ValueKind::MaxBlankLines,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("2")
+    .default_text("2")
     .help(
         "--max-blank-lines=<n|preserve>",
         "blank-line cap (default 2)",
@@ -909,94 +709,55 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         OptionId::DelimiterSpacing,
         "delimiter-spacing",
         ValueKind::Boolean,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("true")
+    .default_text("true")
     .help(
         "--delimiter-spacing=<BOOL>",
         "normalize spaces after delimiters (default true)",
     ),
-    OptionSpec::new(
-        OptionId::CommentSpacing,
-        "comment-spacing",
-        ValueKind::Boolean,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .default("true")
-    .help(
-        "--comment-spacing=<BOOL>",
-        "normalize the gap before a trailing `!` (default true)",
-    ),
+    OptionSpec::new(OptionId::CommentSpacing, "comment-spacing", ValueKind::Boolean)
+        .config(ConfigMapping::Same)
+        .default_text("true")
+        .help(
+            "--comment-spacing=<BOOL>",
+            "normalize the gap before a trailing `!` (default true)",
+        ),
     OptionSpec::new(
         OptionId::ContinuationMarkers,
         "continuation-markers",
         ValueKind::Boolean,
-        CliArity::Required,
     )
     .config(ConfigMapping::Same)
-    .default("true")
+    .default_text("true")
     .help(
         "--continuation-markers=<BOOL>",
         "normalize continuation markers and OpenMP sentinels (default true)",
     ),
-    OptionSpec::new(
-        OptionId::RefactorEnd,
-        "refactor-end",
-        ValueKind::RefactorEnd,
-        CliArity::Optional,
-    )
-    .aliases(&["refactor-procedures"])
-    .config(ConfigMapping::Same)
-    .help(
-        "-Rr, -RR, --refactor-end[=<BOOL>|upcase]",
-        "complete END definition statements",
-    ),
-    OptionSpec::new(
-        OptionId::InputFormat,
-        "input-format",
-        ValueKind::InputFormat,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same)
-    .default("auto"),
-    OptionSpec::new(
-        OptionId::OutputFormat,
-        "output-format",
-        ValueKind::OutputFormat,
-        CliArity::Required,
-    )
-    .config(ConfigMapping::Same),
-    OptionSpec::new(
-        OptionId::Config,
-        "config",
-        ValueKind::Path,
-        CliArity::Required,
-    )
-    .repeatability(Repeatability::Once)
-    .help(
+    OptionSpec::new(OptionId::RefactorEnd, "refactor-end", ValueKind::RefactorEnd)
+        .aliases(&["refactor-procedures"])
+        .config(ConfigMapping::Same)
+        .help(
+            "-Rr, -RR, --refactor-end[=<BOOL>|upcase]",
+            "complete END definition statements",
+        ),
+    OptionSpec::new(OptionId::InputFormat, "input-format", ValueKind::InputFormat)
+        .config(ConfigMapping::Same)
+        .default_text("auto"),
+    OptionSpec::new(OptionId::OutputFormat, "output-format", ValueKind::OutputFormat)
+        .config(ConfigMapping::Same),
+    OptionSpec::new(OptionId::Config, "config", ValueKind::Path).help(
         "--config=<path>",
         "use a project TOML configuration explicitly",
     ),
-    OptionSpec::new(
-        OptionId::NoConfig,
-        "no-config",
-        ValueKind::Flag,
-        CliArity::None,
-    )
-    .help("--no-config", "ignore project TOML configuration"),
-    OptionSpec::new(OptionId::Help, "help", ValueKind::Flag, CliArity::None)
+    OptionSpec::new(OptionId::NoConfig, "no-config", ValueKind::Flag)
+        .help("--no-config", "ignore project TOML configuration"),
+    OptionSpec::new(OptionId::Help, "help", ValueKind::Flag)
         .help("-h, --help", "show this help")
         .no_single_dash_suggestion(),
-    OptionSpec::new(
-        OptionId::Version,
-        "version",
-        ValueKind::Flag,
-        CliArity::None,
-    )
-    .help("-v, --version", "show version")
-    .no_single_dash_suggestion(),
+    OptionSpec::new(OptionId::Version, "version", ValueKind::Flag)
+        .help("-v, --version", "show version")
+        .no_single_dash_suggestion(),
 ];
 
 pub(crate) fn normalize_long(name: &str) -> String {
@@ -1062,13 +823,13 @@ pub(crate) fn single_dash_long_option_suggestion(arg: &str) -> Option<String> {
 mod tests {
     use super::{
         lookup_config, normalize_long, primary_config_key, CliArity, ConfigMapping, OptionId,
-        Repeatability, OPTIONS,
+        OPTIONS,
     };
     use crate::{
         cli::{parse, Command},
         config::FormatConfig,
     };
-    use std::collections::{BTreeSet, HashSet};
+    use std::collections::HashSet;
 
     #[test]
     fn option_schema_names_and_aliases_are_unique() {
@@ -1109,31 +870,65 @@ mod tests {
         })
     }
 
+    fn default_cell_for_option<'a>(text: &'a str, option: &str) -> Option<&'a str> {
+        let mut default_column = None;
+        for line in text.lines() {
+            let line = line.trim();
+            if !line.starts_with('|') || !line.ends_with('|') {
+                default_column = None;
+                continue;
+            }
+            let cells = line[1..line.len() - 1]
+                .split('|')
+                .map(str::trim)
+                .collect::<Vec<_>>();
+            if let Some(index) = cells.iter().position(|cell| *cell == "Default") {
+                default_column = Some(index);
+                continue;
+            }
+            if cells.iter().all(|cell| {
+                cell.chars()
+                    .all(|ch| ch == '-' || ch == ':' || ch.is_ascii_whitespace())
+            }) {
+                continue;
+            }
+            if contains_name(line, option) {
+                return default_column.and_then(|index| cells.get(index).copied());
+            }
+        }
+        None
+    }
+
     #[test]
-    fn schema_defaults_match_runtime_defaults() {
+    fn schema_default_text_matches_runtime_defaults() {
         let expected = FormatConfig::default();
 
         for spec in OPTIONS {
-            let Some(default) = spec.default else {
+            let Some(default_text) = spec.default_text else {
                 continue;
             };
-            let option = match spec.cli_arity {
+            let option = match spec.value_kind.cli_arity() {
                 CliArity::None => format!("--{}", spec.long),
                 CliArity::Required | CliArity::Optional => {
-                    format!("--{}={default}", spec.long)
+                    format!("--{}={default_text}", spec.long)
                 }
             };
             let Command::Run(invocation) =
                 parse(["forformat".to_string(), "--no-config".to_string(), option]).unwrap_or_else(
-                    |error| panic!("schema default for --{} is invalid: {error}", spec.long),
+                    |error| {
+                        panic!(
+                            "schema default text for --{} is invalid: {error}",
+                            spec.long
+                        )
+                    },
                 )
             else {
-                panic!("schema default for --{} did not produce a run", spec.long)
+                panic!("schema default text for --{} did not produce a run", spec.long)
             };
 
             assert_eq!(
                 invocation.config, expected,
-                "schema default `{default}` for --{} differs from FormatConfig::default()",
+                "schema default text `{default_text}` for --{} differs from FormatConfig::default()",
                 spec.long
             );
             match spec.id {
@@ -1145,32 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn non_default_repeatability_categories_are_exhaustive() {
-        let names = |repeatability| {
-            OPTIONS
-                .iter()
-                .filter(|spec| spec.repeatability == repeatability)
-                .map(|spec| spec.long)
-                .collect::<BTreeSet<_>>()
-        };
-        let expected = |values: &[&'static str]| values.iter().copied().collect::<BTreeSet<_>>();
-
-        assert_eq!(
-            names(Repeatability::Once),
-            expected(&["config", "project-context"])
-        );
-        assert_eq!(
-            names(Repeatability::Append),
-            expected(&["define", "extend-exclude"])
-        );
-        assert_eq!(
-            names(Repeatability::ReplaceLayer),
-            expected(&["context-path", "exclude"])
-        );
-    }
-
-    #[test]
-    fn docs_cover_schema_names_config_keys_and_defaults() {
+    fn docs_cover_schema_names_config_keys_and_default_columns() {
         let docs = include_str!("../../docs/options.md");
         let normalized_docs = docs.replace('`', "").replace('_', "-");
 
@@ -1193,16 +963,13 @@ mod tests {
                 );
             }
 
-            let Some(default) = spec.default else {
+            let Some(default_text) = spec.default_text else {
                 continue;
             };
-            if let Some(line) = normalized_docs
-                .lines()
-                .find(|line| line.trim_start().starts_with('|') && contains_name(line, &option))
-            {
-                assert!(
-                    line.contains(default),
-                    "docs/options.md does not show default `{default}` on the --{} row",
+            if let Some(documented_default) = default_cell_for_option(&normalized_docs, &option) {
+                assert_eq!(
+                    documented_default, default_text,
+                    "docs/options.md has the wrong Default column for --{}",
                     spec.long
                 );
             }
