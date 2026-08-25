@@ -37,7 +37,7 @@ use crate::{
         PhysicalLineKind,
     },
     transform::{
-        document::Document,
+        document::{Document, StatementFacts},
         edit::EditBuffer,
         pipeline::{Changed, PassContext},
     },
@@ -72,6 +72,52 @@ fn canonicalize_presentation_whitespace(line: &[u8], incoming: LexState) -> Vec<
         .unwrap_or(line.len());
     output[..leading].copy_from_slice(&line[..leading]);
     output
+}
+
+/// Stable facts for the statement that owns one end of a physical source line.
+///
+/// A semicolon line can start in one statement and end in another. Current-line
+/// context follows the first statement with source on the line, while state
+/// carried through a trailing continuation marker follows the last. If a line
+/// has no mapped source piece, preserve the previous group-first fallback.
+fn statement_facts_on_line(cx: &PassContext<'_>, line: usize, last: bool) -> StatementFacts {
+    let owned = cx
+        .analysis
+        .line_group
+        .get(line)
+        .and_then(|group_index| {
+            let group = cx.analysis.groups.get(*group_index)?;
+            let statement_index = if last {
+                group.last_statement_index_on_line(line)
+            } else {
+                group.first_statement_index_on_line(line)
+            }?;
+            cx.analysis.facts.get(*group_index)?.get(statement_index)
+        })
+        .copied();
+    owned
+        .or_else(|| cx.analysis.facts_of_line(line).copied())
+        .unwrap_or_default()
+}
+
+/// The suffix whose dynamic state may carry to the next physical line.
+///
+/// A real semicolon ends every statement-scoped cursor just as it changes the
+/// cached-fact owner. Tokenize with the incoming lexical state so semicolons in
+/// strings or Hollerith payloads are never mistaken for boundaries. After a
+/// real separator the lexical state is ordinary code, so the trailing statement
+/// can be scanned independently from a default state.
+fn statement_carry_slice(line: &[u8], incoming: LexState) -> (&[u8], LexState, bool) {
+    let mut state = incoming;
+    let tokens = tokenize(line, &mut state);
+    let Some(separator) = tokens
+        .iter()
+        .rev()
+        .find(|token| token.kind == TokenKind::Semicolon)
+    else {
+        return (line, incoming, false);
+    };
+    (&line[separator.span.end..], LexState::default(), true)
 }
 
 /// Immutable facts about the line currently passing through the rule chain.
@@ -135,11 +181,7 @@ impl StatementState {
     ) -> LineContext<'a> {
         let preserve_comment_after =
             common::comment_spacing::preserve_full_comment_spacing(document, index, cx);
-        let facts = cx
-            .analysis
-            .facts_of_line(index)
-            .copied()
-            .unwrap_or_default();
+        let facts = statement_facts_on_line(cx, index, false);
         let continued_declaration = self.continued_statement && facts.declaration;
         let continued_format = self.continued_statement && facts.format;
         let statement_separator = facts.top_level_separator;
@@ -182,42 +224,45 @@ impl StatementState {
         cx: &PassContext,
         line_index: usize,
     ) {
-        // Re-derive the outgoing lexical state from the incoming one the way
-        // `SourceBuffer` does, rather than keeping whatever the rule chain's own
-        // scan of the rewritten body left behind. The rules scan to find the
-        // protected bytes *in* a line; only this decides what survives it, and
-        // the two answers are not the same on malformed input -- a raw scan
-        // keeps an unterminated literal open across a line that never continued
-        // it, so one stray quote put every statement after it inside a literal.
-        // See `regions::advance_stream_line` for why the wrapper's disagreement
-        // with that cost a pass of settling.
+        // Re-derive the outgoing lexical state from the incoming one exactly as
+        // `SourceBuffer` does. The buffer is the authority for which source
+        // stream this line belongs to; the rule chain only scans scratch state.
         //
-        // Which gate that helper applies depends on the stream, and the buffer is
-        // the one place that decides which stream a line belongs to. Ask it,
-        // rather than having the caller restate a fact it read from there.
+        // A conditional line can be transparent to a carried literal. Such a
+        // line still owns its own semicolon and structural carry, so read those
+        // bytes from a clean state rather than from the literal it did not
+        // resume.
         let conditional = cx.analysis.buffer.stream(line_index).is_conditional();
         self.lex = incoming;
-        crate::source::regions::advance_stream_line(&mut self.lex, code, conditional);
+        let structural_incoming =
+            match crate::source::regions::advance_stream_line(&mut self.lex, code, conditional) {
+                crate::source::regions::StreamLine::Lexed(_) => incoming,
+                crate::source::regions::StreamLine::Transparent { .. } => LexState::default(),
+            };
+        let (carry_code, carry_incoming, statement_boundary) =
+            statement_carry_slice(code, structural_incoming);
+        if statement_boundary {
+            self.open_groups.clear();
+            self.multiple_subscript_depths.clear();
+            self.entity_list = EntityListCursor::default();
+        }
+
         self.continued_statement = continues;
-        self.continued_infix = continues && trailing_continuation_operand(code);
-        let facts = cx
-            .analysis
-            .facts_of_line(line_index)
-            .copied()
-            .unwrap_or_default();
+        self.continued_infix = continues && trailing_continuation_operand(carry_code);
+        let facts = statement_facts_on_line(cx, line_index, true);
         self.continued_named_parameter = self.continued_statement && facts.call_context;
         self.continued_bind_parameter = self.continued_statement && facts.bind_context;
         self.continued_component =
-            self.continued_statement && common::trailing_component_selector(code);
+            self.continued_statement && common::trailing_component_selector(carry_code);
         common::delimiter_spacing::advance_multiple_subscript_depths(
-            code,
-            incoming,
+            carry_code,
+            carry_incoming,
             self.open_groups.len(),
             &mut self.multiple_subscript_depths,
         );
         self.entity_list
-            .advance(code, self.open_groups.len(), incoming);
-        fold_open_groups(code, &mut self.open_groups, incoming);
+            .advance(carry_code, self.open_groups.len(), carry_incoming);
+        fold_open_groups(carry_code, &mut self.open_groups, carry_incoming);
         if !self.continued_statement {
             self.open_groups.clear();
             self.multiple_subscript_depths.clear();
@@ -275,9 +320,8 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 cx,
             );
             let incoming_lex = stream.lex;
-            // The chain reads the incoming state but must not write the carried
-            // one: `advance` owns what survives the line. Same rule as the
-            // ordinary stream below, where it is spelled out.
+            // Rules inspect this line through a scratch copy. `advance` alone
+            // decides what lexical state survives to the next physical line.
             let mut scan_state = incoming_lex;
             let body = apply_rules(
                 &document.lines[index][body_start..],
@@ -325,19 +369,11 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             index,
             cx,
         );
-        // The rule chain scans a line to find the protected bytes *in* it, and
-        // leaves its own scan behind in the state it was given. What survives
-        // the line is a different question, and `advance` is the only answer to
-        // it -- re-derived from `incoming_lex` exactly as `SourceBuffer` does.
-        // So the chain always gets a scratch copy: giving it the carried state
-        // to write back is what let one stray quote leak a literal into every
-        // statement after it.
-        //
-        // A comment or blank line is stepped over entirely. It is still
-        // normalized on its own terms, but from a *clean* state: reading the
-        // group's state would make the `!` of a comment inside an open literal
-        // look like literal text, so the `!` in `&def!ghi'` on the resumed line
-        // would be rewritten as a comment marker.
+        // The rule chain scans a line to find protected bytes *in* it, but
+        // `advance` is the sole authority for what lexical state survives the
+        // line. Give the rules a scratch copy so a malformed quote cannot leak
+        // through this alternate path. Comments and blanks are stepped over by
+        // the source stream, so normalize them from a clean state.
         let incoming_lex = stream.lex;
         let mut scan_state = if matches!(kind, PhysicalLineKind::Comment | PhysicalLineKind::Blank)
         {
@@ -376,26 +412,6 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
     }
 
     Ok(changed)
-}
-
-/// The full chain for one physical line, carrying literal state across
-/// continuations.
-pub fn apply(
-    line: &[u8],
-    cx: &PassContext,
-    declared_names: &DeclaredNameIndex,
-    line_index: usize,
-    state: &mut LexState,
-) -> Vec<u8> {
-    let context = LineContext::default();
-    apply_rules(
-        line,
-        cx,
-        declared_names,
-        line_index,
-        state,
-        RuleMode::Physical(context),
-    )
 }
 
 /// The one definition of the line-rule sequence.
@@ -660,7 +676,9 @@ mod rejoined_tests {
     use crate::{
         analysis::{analyze_file, scoped_declared_names, ProjectContext, ScopeTree},
         config::FormatConfig,
+        format_source,
         transform::{document::Document, pipeline::PassContext},
+        FormatMode,
     };
 
     #[test]
@@ -686,5 +704,23 @@ mod rejoined_tests {
             super::respace_joined(b"X=State%Data", &context, &declared_names, 0),
             b"X = State%Data"
         );
+    }
+
+    #[test]
+    fn trailing_semicolon_statement_owns_full_continuation_state() {
+        let source =
+            b"integer :: x; print *, &\n  & SIN(1.0)\ndata x/1/; call p(&\n  & named = SIN(1.0))\n";
+        let config = FormatConfig {
+            mode: FormatMode::Full,
+            apply_indent: false,
+            ..FormatConfig::default()
+        };
+        let once = format_source(source, &config).unwrap().bytes;
+        assert_eq!(
+            once.as_slice(),
+            b"integer :: x; print *, &\n  sin(1.0)\ndata x/1/; call p( &\n  named=sin(1.0))\n"
+        );
+        let twice = format_source(&once, &config).unwrap().bytes;
+        assert_eq!(twice, once);
     }
 }
