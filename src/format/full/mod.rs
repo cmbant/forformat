@@ -25,6 +25,8 @@ pub fn format_with_context(
     project: &ProjectContext,
     config: &FormatConfig,
 ) -> Result<FormatResult, FormatError> {
+    let target_override = config.target_standard_override();
+    let config = target_override.as_ref().unwrap_or(config);
     if config.mode != FormatMode::CanonicalizeAndIndent {
         return driver::format_with_context(source, project, config);
     }
@@ -38,6 +40,8 @@ pub(crate) fn format_with_context_and_local(
     local: &FileFacts,
     config: &FormatConfig,
 ) -> Result<FormatResult, FormatError> {
+    let target_override = config.target_standard_override();
+    let config = target_override.as_ref().unwrap_or(config);
     if config.mode != FormatMode::CanonicalizeAndIndent {
         return driver::format_with_context_and_local(source, project, local, config);
     }
@@ -50,6 +54,8 @@ pub(crate) fn format_to_with_context<W: std::io::Write>(
     config: &FormatConfig,
     out: &mut W,
 ) -> Result<FormatMeta, FormatError> {
+    let target_override = config.target_standard_override();
+    let config = target_override.as_ref().unwrap_or(config);
     if config.mode != FormatMode::CanonicalizeAndIndent {
         return driver::format_to_with_context(source, project, config, out);
     }

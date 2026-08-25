@@ -36,6 +36,15 @@ done
 # output) aren't part of the shipped documentation and shouldn't gate this check.
 mapfile -t md_files < <(git ls-files -- README.md README_PYPI.md 'docs/*.md')
 
+# Keep the published pre-commit examples pinned to the package release. This
+# intentionally makes a Cargo version bump update both shipped READMEs too.
+version=${FORFORMAT_VERSION:-$(cargo pkgid | sed 's/.*[#@]//')}
+test -n "$version" || die "could not determine package version"
+for readme in README.md README_PYPI.md; do
+    grep -Fq "rev: v$version" "$readme" ||
+        die "$readme pre-commit revision does not match Cargo.toml version $version"
+done
+
 # Reject the stale fixed/free wording that previously appeared in user-facing docs.
 if grep -Fqi 'automatic format detection are not supported' "${md_files[@]}"; then
     die "stale automatic-format-detection wording"
@@ -127,6 +136,7 @@ grep -Fxq 'src/module.f90' excluded.out
 # Configuration example and underscore/hyphen key equivalence.
 cat > .forformat.toml <<'TOML'
 mode = "full"
+target_standard = "f2003"
 indent = 4
 indent_module = 0
 indent-procedure = 0

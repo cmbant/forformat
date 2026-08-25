@@ -40,6 +40,7 @@ pub(super) enum OptionId {
     NoWrap,
     Rewrap,
     LineLength,
+    TargetStandard,
     UppercaseSingleL,
     Define,
     KeywordCase,
@@ -175,7 +176,7 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
     spec!(
         AlignParen,
         "align-paren",
-        "--align-paren[=<n>]",
+        "--align-paren[=<n|BOOL>]",
         "align continuation lines at parentheses"
     ),
     spec!(
@@ -200,10 +201,15 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
     spec!(
         LastIndent,
         "last-indent",
-        "-lastindent, -lastusable",
-        "print query result instead of source"
+        "--last-indent, -lastindent",
+        "print final indentation instead of source"
     ),
-    spec!(LastUsable, "last-usable"),
+    spec!(
+        LastUsable,
+        "last-usable",
+        "--last-usable, -lastusable",
+        "print final usable indentation instead of source"
+    ),
     spec!(
         All,
         "all",
@@ -336,6 +342,12 @@ pub(super) static OPTIONS: &[OptionSpec] = &[
         "line-length",
         "--line-length=<n>",
         "wrapping budget (default 120)"
+    ),
+    spec!(
+        TargetStandard,
+        "target-standard",
+        "--target-standard=<f95|f2003|f2008|f2018|f2023>",
+        "cap syntax introduced by formatting (default f2003)"
     ),
     spec!(
         UppercaseSingleL,

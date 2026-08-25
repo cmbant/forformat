@@ -36,6 +36,10 @@ expect_diagnostic 2 'forformat: invalid option: --input-format=unknown' --input-
 expect_diagnostic 2 'forformat: invalid option: expected non-negative integer, got -1' --align_paren=-1
 expect_diagnostic 2 'forformat: unsupported: fixed-form input/output is not supported' -ifixed
 
+isolated_error='forformat: invalid option: --isolated requires one or more explicit paths and cannot be combined with --all or --all-files'
+expect_diagnostic 2 "$isolated_error" --isolated --all
+expect_diagnostic 2 "$isolated_error" --isolated --all-files
+
 # Automatic fixed/free input detection is the default, so the legacy spellings
 # that ask for it are accepted rather than rejected.
 expect_status 0 -iauto
@@ -44,13 +48,38 @@ expect_status 0 --input-format=auto
 alias_source=$'program p\nx = 1\nend program\n'
 test "$(printf '%s' "$alias_source" | "$binary" --input_format=free)" = "$(printf '%s' "$alias_source" | "$binary" --input-format=free)"
 
+# Numeric compatibility options also accept explicit booleans where their
+# configuration representation is boolean/numeric.
+expect_status 0 --no-config --align-paren=true
+expect_status 0 --no-config --align-paren=false
+
+for standard in f95 f2003 f2008 f2018 f2023; do
+    expect_status 0 --no-config --target-standard="$standard"
+done
+
+# The F95 target is a formatter-output ceiling: it keeps the legacy constructor
+# even when array-bracket modernization is explicitly enabled. F2003 retains
+# the existing default modernization.
+target_source=$'program p\ninteger :: x(2)\nx = (/1, 2/)\nend program\n'
+printf '%s' "$target_source" | "$binary" --no-config --input-format=free \
+    --target-standard=f95 --array-brackets=true >"$contract_tmp/f95.out"
+grep -F '(/' "$contract_tmp/f95.out" >/dev/null
+! grep -F '[' "$contract_tmp/f95.out" >/dev/null
+printf '%s' "$target_source" | "$binary" --no-config --input-format=free \
+    --target-standard=f2003 >"$contract_tmp/f2003.out"
+grep -F '[' "$contract_tmp/f2003.out" >/dev/null
+
 # The expected version comes from cargo, not from a literal, so bumping
 # Cargo.toml is the only edit a release needs. `cargo pkgid` prints
 # `…#forformat@<version>`.
 version=${FORFORMAT_VERSION:-$(cargo pkgid | sed 's/.*[#@]//')}
 test -n "$version"
 test "$("$binary" --version)" = "forformat $version"
-"$binary" --help | grep -F 'Usage: forformat [OPTIONS]' >/dev/null
+help=$("$binary" --help)
+printf '%s\n' "$help" | grep -F 'Usage: forformat [OPTIONS]' >/dev/null
+printf '%s\n' "$help" | grep -F -- '--last-indent, -lastindent' >/dev/null
+printf '%s\n' "$help" | grep -F -- '--last-usable, -lastusable' >/dev/null
+printf '%s\n' "$help" | grep -F -- '--target-standard=' >/dev/null
 test "$(printf '' | "$binary" --last-indent)" = 0
 test "$(printf 'program p\n' | "$binary" --last-usable)" = 1
 

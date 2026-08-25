@@ -69,6 +69,12 @@ form is skipped unchanged. Use `-ifree` or `--input-format=free` to force free-f
 - `--canonicalize-only` — canonical transformations without whitespace or layout normalization.
 - `--canonicalize-and-indent` — canonical transformations followed by findent-compatible indentation, without wrapping or full-mode post-layout alignment.
 
+Normalizing modes target Fortran 2003 output by default, preserving the existing behavior that can
+modernize `(/ ... /)` array constructors to `[ ... ]`. Use `--target-standard=f95` (or
+`target_standard = "f95"` in configuration) to prevent the formatter from introducing syntax newer
+than Fortran 95. The target constrains formatter-generated syntax; it does not validate or downgrade
+syntax already present in the input.
+
 For example:
 
 ```sh
@@ -115,6 +121,7 @@ Project settings can live in `.forformat.toml`, the compatibility spelling `.fin
 ```toml
 [tool.forformat]
 mode = "full"
+target_standard = "f2003"
 indent = 4
 line_length = 100
 keyword_case = "lower"
