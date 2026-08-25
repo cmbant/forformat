@@ -220,13 +220,17 @@ impl OptionSpec {
     }
 }
 
-/// Canonical option identity, grammar, configuration mapping, merge behavior,
-/// defaults, and user-facing terminal help.
+/// Shared option identity, grammar, configuration mapping, declared defaults,
+/// repeatability, and user-facing terminal help.
 ///
 /// CLI and TOML parsing both resolve through this table before creating typed
-/// [`FormatSetting`] values. Command-line settings retain argv order; TOML
-/// settings use [`ConfigPhase`] so semantic baselines such as `indent` are
-/// applied before their more-specific overrides without depending on map order.
+/// [`FormatSetting`] values. Runtime defaults remain embodied by
+/// [`FormatConfig::default`], and ordered layer application implements the
+/// declared repeat/merge behavior. The invariance tests below keep those runtime
+/// semantics in lockstep with this metadata instead of duplicating defaults in a
+/// second executable configuration object. TOML settings use [`ConfigPhase`] so
+/// semantic baselines such as `indent` are applied before their more-specific
+/// overrides without depending on map order.
 pub(crate) static OPTIONS: &[OptionSpec] = &[
     OptionSpec::new(
         OptionId::Indent,
@@ -548,7 +552,7 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         ValueKind::Path,
         CliArity::Required,
     )
-    .config(ConfigMapping::Keys(&["context-paths", "context-path"]))
+    .config(ConfigMapping::Keys(&["context-paths"]))
     .repeatability(Repeatability::ReplaceLayer)
     .help(
         "--context-path=<directory>",
@@ -589,7 +593,7 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         ValueKind::Flag,
         CliArity::None,
     )
-    .help("--show-files", "print selected files without formatting"),
+    .help("--show-files", "print selected target paths without reading or formatting them"),
     OptionSpec::new(
         OptionId::QueryFormat,
         "query-format",
@@ -1057,9 +1061,14 @@ pub(crate) fn single_dash_long_option_suggestion(arg: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        lookup_config, normalize_long, primary_config_key, ConfigMapping, OptionId, OPTIONS,
+        lookup_config, normalize_long, primary_config_key, CliArity, ConfigMapping, OptionId,
+        Repeatability, OPTIONS,
     };
-    use std::collections::HashSet;
+    use crate::{
+        cli::{parse, Command},
+        config::FormatConfig,
+    };
+    use std::collections::{BTreeSet, HashSet};
 
     #[test]
     fn option_schema_names_and_aliases_are_unique() {
@@ -1098,6 +1107,68 @@ mod tests {
             let is_name_char = |ch: char| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_');
             before.is_none_or(|ch| !is_name_char(ch)) && after.is_none_or(|ch| !is_name_char(ch))
         })
+    }
+
+    #[test]
+    fn schema_defaults_match_runtime_defaults() {
+        let expected = FormatConfig::default();
+
+        for spec in OPTIONS {
+            let Some(default) = spec.default else {
+                continue;
+            };
+            let option = match spec.cli_arity {
+                CliArity::None => format!("--{}", spec.long),
+                CliArity::Required | CliArity::Optional => {
+                    format!("--{}={default}", spec.long)
+                }
+            };
+            let Command::Run(invocation) = parse([
+                "forformat".to_string(),
+                "--no-config".to_string(),
+                option,
+            ])
+            .unwrap_or_else(|error| panic!("schema default for --{} is invalid: {error}", spec.long))
+            else {
+                panic!("schema default for --{} did not produce a run", spec.long)
+            };
+
+            assert_eq!(
+                invocation.config, expected,
+                "schema default `{default}` for --{} differs from FormatConfig::default()",
+                spec.long
+            );
+            match spec.id {
+                OptionId::NoSubmodules => assert!(!invocation.no_submodules),
+                OptionId::InputFormat => assert!(!invocation.force_free_input),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn non_default_repeatability_categories_are_exhaustive() {
+        let names = |repeatability| {
+            OPTIONS
+                .iter()
+                .filter(|spec| spec.repeatability == repeatability)
+                .map(|spec| spec.long)
+                .collect::<BTreeSet<_>>()
+        };
+        let expected = |values: &[&'static str]| values.iter().copied().collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            names(Repeatability::Once),
+            expected(&["config", "project-context"])
+        );
+        assert_eq!(
+            names(Repeatability::Append),
+            expected(&["define", "extend-exclude"])
+        );
+        assert_eq!(
+            names(Repeatability::ReplaceLayer),
+            expected(&["context-path", "exclude"])
+        );
     }
 
     #[test]
