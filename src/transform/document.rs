@@ -14,10 +14,67 @@ use std::io::{BufWriter, Write};
 use crate::{
     classify::{classify, StatementInfo},
     error::FormatError,
-    source::{LogicalGroup, Newline, SourceBuffer},
+    source::{
+        syntax::{
+            io_statement_head, is_data_statement, is_declaration_statement, is_format_statement,
+            is_named_parameter_token, top_level_separator,
+        },
+        tokens::tokens,
+        LogicalGroup, Newline, SourceBuffer, TokenKind,
+    },
 };
 
 const WRITE_BUFFER_LIMIT: usize = 64 * 1024;
+
+/// Stable rewrite-oriented facts about one logical statement in an analysis snapshot.
+///
+/// These are owned scalars rather than borrowed tokens, so [`Analysis`] can cache them
+/// beside [`StatementInfo`] without becoming self-referential. Physical-line rules may
+/// combine them with evolving continuation state, but should not re-tokenize the
+/// statement to rediscover the same answer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct StatementFacts {
+    pub(crate) declaration: bool,
+    pub(crate) format: bool,
+    pub(crate) top_level_separator: bool,
+    pub(crate) io_statement: bool,
+    pub(crate) data_statement: bool,
+    pub(crate) call_context: bool,
+    pub(crate) bind_context: bool,
+}
+
+impl StatementFacts {
+    fn from_text(text: &[u8]) -> Self {
+        let tokens = tokens(text);
+        let declaration = is_declaration_statement(&tokens);
+        let format = is_format_statement(&tokens);
+        let top_level_separator = top_level_separator(&tokens).is_some();
+        let io_statement = io_statement_head(&tokens).is_some();
+        let data_statement = is_data_statement(&tokens);
+        let call_context = tokens
+            .iter()
+            .find(|token| token.kind == TokenKind::Name)
+            .is_some_and(|token| token.is_name(b"call"))
+            || tokens.iter().enumerate().any(|(index, token)| {
+                token.text == b"=" && is_named_parameter_token(&tokens, index)
+            });
+        let bind_context = tokens.iter().enumerate().any(|(index, token)| {
+            token.is_name(b"bind")
+                && tokens
+                    .get(index + 1)
+                    .is_some_and(|next| next.kind == TokenKind::LParen)
+        });
+        Self {
+            declaration,
+            format,
+            top_level_separator,
+            io_statement,
+            data_statement,
+            call_context,
+            bind_context,
+        }
+    }
+}
 
 /// A document as a list of lines without terminators, plus the terminator
 /// policy to restore on output.
@@ -241,6 +298,9 @@ pub struct Analysis {
     /// Classification of every statement of every group, parallel to
     /// `groups[i].statements`.
     pub infos: Vec<Vec<StatementInfo>>,
+    /// Rewrite-oriented facts for every statement, parallel to `infos` and
+    /// `groups[i].statements`.
+    pub(crate) facts: Vec<Vec<StatementFacts>>,
     /// For each physical line, the index of the group that owns it.
     pub line_group: Vec<usize>,
 }
@@ -250,6 +310,7 @@ impl Analysis {
         let buffer = SourceBuffer::from_vec(bytes)?;
         let groups = LogicalGroup::assemble(&buffer);
         let mut infos = Vec::with_capacity(groups.len());
+        let mut facts = Vec::with_capacity(groups.len());
         let mut line_group = vec![0usize; buffer.lines.len()];
         for (index, group) in groups.iter().enumerate() {
             infos.push(
@@ -257,6 +318,13 @@ impl Analysis {
                     .statements
                     .iter()
                     .map(|statement| classify(&statement.text))
+                    .collect(),
+            );
+            facts.push(
+                group
+                    .statements
+                    .iter()
+                    .map(|statement| StatementFacts::from_text(&statement.text))
                     .collect(),
             );
             for line in group.lines.clone() {
@@ -269,6 +337,7 @@ impl Analysis {
             buffer,
             groups,
             infos,
+            facts,
             line_group,
         })
     }
@@ -282,11 +351,19 @@ impl Analysis {
     pub fn info_of_line(&self, line: usize) -> Option<&StatementInfo> {
         self.infos.get(*self.line_group.get(line)?)?.first()
     }
+
+    /// Stable facts for the first statement of the group owning a physical line.
+    ///
+    /// This intentionally mirrors [`info_of_line`](Self::info_of_line) until
+    /// statement ownership on semicolon lines is represented explicitly.
+    pub(crate) fn facts_of_line(&self, line: usize) -> Option<&StatementFacts> {
+        self.facts.get(*self.line_group.get(line)?)?.first()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Document, WRITE_BUFFER_LIMIT};
+    use super::{Document, StatementFacts, WRITE_BUFFER_LIMIT};
     use crate::source::Newline;
     use std::io::{self, Write};
 
@@ -378,6 +455,32 @@ mod tests {
         let mut written = Vec::new();
         document.write_to(&mut written).unwrap();
         assert_eq!(written, b"a\r\nB\nc\r\nlast");
+    }
+
+    #[test]
+    fn statement_facts_capture_stable_line_rule_context() {
+        let declaration = StatementFacts::from_text(b"integer, optional :: x");
+        assert!(declaration.declaration);
+        assert!(declaration.top_level_separator);
+
+        assert!(StatementFacts::from_text(b"10 format(i0)").format);
+        assert!(StatementFacts::from_text(b"if (ready) write(*,*) x").io_statement);
+        assert!(StatementFacts::from_text(b"data x/1/").data_statement);
+        assert!(!StatementFacts::from_text(b"data = a/b").data_statement);
+        assert!(StatementFacts::from_text(b"call p(a=1)").call_context);
+        assert!(StatementFacts::from_text(b"subroutine s() bind(c)").bind_context);
+    }
+
+    #[test]
+    fn analysis_caches_facts_for_every_semicolon_statement() {
+        let document = Document::from_bytes(b"call p(a=1); data x/1/\n");
+        let analysis = document.analyze().unwrap();
+        assert_eq!(analysis.facts.len(), 1);
+        assert_eq!(analysis.facts[0].len(), 2);
+        assert!(analysis.facts[0][0].call_context);
+        assert!(!analysis.facts[0][0].data_statement);
+        assert!(analysis.facts[0][1].data_statement);
+        assert_eq!(analysis.facts_of_line(0), analysis.facts[0].first());
     }
 
     #[test]

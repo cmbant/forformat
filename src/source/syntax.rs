@@ -265,6 +265,148 @@ pub(crate) fn declaration_type_head_len(tokens: &[Token<'_>], first: usize) -> O
     .then_some(1)
 }
 
+/// Index of the first non-label token in a statement token stream.
+pub(crate) fn first_statement_index(tokens: &[Token<'_>]) -> usize {
+    usize::from(
+        tokens
+            .first()
+            .is_some_and(|token| token.kind == TokenKind::Number),
+    )
+}
+
+/// Matching closing delimiter for the opening parenthesis or bracket at `open`.
+pub(crate) fn matching_close(tokens: &[Token<'_>], open: usize) -> Option<usize> {
+    let opening = tokens.get(open)?;
+    let close_kind = match opening.kind {
+        TokenKind::LParen => TokenKind::RParen,
+        TokenKind::LBracket => TokenKind::RBracket,
+        _ => return None,
+    };
+    tokens
+        .iter()
+        .enumerate()
+        .skip(open + 1)
+        .find(|(_, token)| token.kind == close_kind && token.depth == opening.depth)
+        .map(|(index, _)| index)
+}
+
+/// Closing parenthesis of an opening `IF (...)` condition, when present.
+pub(crate) fn if_condition_close(tokens: &[Token<'_>]) -> Option<usize> {
+    let mut index = first_statement_index(tokens);
+    if tokens
+        .get(index)
+        .is_some_and(|token| token.is_name(b"else"))
+    {
+        index += 1;
+    }
+    if !tokens.get(index).is_some_and(|token| token.is_name(b"if")) {
+        return None;
+    }
+    let open = index + 1;
+    tokens
+        .get(open)
+        .filter(|token| token.kind == TokenKind::LParen)?;
+    matching_close(tokens, open)
+}
+
+/// Whether this token stream starts with a `FORMAT(...)` statement.
+pub(crate) fn is_format_statement(tokens: &[Token<'_>]) -> bool {
+    let index = first_statement_index(tokens);
+    tokens
+        .get(index)
+        .is_some_and(|token| token.is_name(b"format"))
+        && tokens
+            .get(index + 1)
+            .is_some_and(|token| token.kind == TokenKind::LParen)
+}
+
+/// Position of a `::` outside every bracket, when one exists.
+pub(crate) fn top_level_separator(tokens: &[Token<'_>]) -> Option<usize> {
+    tokens.iter().position(|token| {
+        token.kind == TokenKind::Operator && token.text == b"::" && token.depth == 0
+    })
+}
+
+/// Whether the statement has a declaration head understood by the formatter.
+pub(crate) fn is_declaration_statement(tokens: &[Token<'_>]) -> bool {
+    let index = first_statement_index(tokens);
+    let Some(first) = tokens.get(index) else {
+        return false;
+    };
+    if first.kind != TokenKind::Name {
+        return false;
+    }
+    if declaration_type_head_len(tokens, index).is_some() {
+        return true;
+    }
+    matches!(
+        first.text.to_ascii_lowercase().as_slice(),
+        b"procedure"
+            | b"dimension"
+            | b"allocatable"
+            | b"pointer"
+            | b"target"
+            | b"optional"
+            | b"parameter"
+            | b"save"
+            | b"value"
+            | b"volatile"
+            | b"asynchronous"
+            | b"contiguous"
+            | b"codimension"
+    )
+}
+
+/// Whether the token at `index` is the `=` in a `name=value` argument pair.
+pub(crate) fn is_named_parameter_token(tokens: &[Token<'_>], index: usize) -> bool {
+    index >= 2
+        && tokens[index - 1].kind == TokenKind::Name
+        && (tokens[index - 2].kind == TokenKind::LParen
+            || (tokens[index - 2].kind == TokenKind::Comma && tokens[index - 2].depth > 0))
+}
+
+/// Whether `token` is the depth-zero `=` or `=>` of an assignment.
+fn is_top_level_assignment(token: &Token<'_>) -> bool {
+    token.depth == 0
+        && token.kind == TokenKind::Operator
+        && (token.text == b"=" || token.text == b"=>")
+}
+
+/// A `DATA` statement's slashes delimit its value lists — `DATA EIGHT/8.0D0/`
+/// — and a data-stmt-constant is a literal, not an expression, so no top-level
+/// slash in one is a division.
+///
+/// Fortran keywords are not reserved, so the leading spelling is not enough:
+/// `data = a/b` and `data(i) = a/b` are assignments to a variable that happens
+/// to be called `data`. A depth-zero `=` or `=>` therefore distinguishes those
+/// assignments from a `DATA` statement.
+pub(crate) fn is_data_statement(tokens: &[Token<'_>]) -> bool {
+    let first = first_statement_index(tokens);
+    if !tokens
+        .get(first)
+        .is_some_and(|token| token.is_name(b"data"))
+    {
+        return false;
+    }
+    !tokens.iter().skip(first + 1).any(is_top_level_assignment)
+}
+
+/// The statement's I/O keyword, when it opens the statement or follows `IF (...)`.
+pub(crate) fn io_statement_head(tokens: &[Token<'_>]) -> Option<usize> {
+    tokens.iter().enumerate().find_map(|(io, candidate)| {
+        if !(candidate.is_name(b"print")
+            || candidate.is_name(b"read")
+            || candidate.is_name(b"write"))
+        {
+            return None;
+        }
+        let first = first_statement_index(tokens);
+        let is_head =
+            io == first || if_condition_close(tokens).is_some_and(|close| io == close + 1);
+        is_head.then_some(io)
+    })
+}
+
 /// Whether `tokens[index]` is the leading `END` of a block-end statement.
 pub(crate) fn is_end_construct_keyword(tokens: &[Token<'_>], index: usize) -> bool {
     if !tokens[index].is_name(b"end") {
@@ -328,8 +470,10 @@ pub(crate) fn is_directive_comment(comment: &[u8]) -> bool {
 mod tests {
     use super::{
         conditional_compilation_body_start, conditional_compilation_prefix,
-        declaration_type_head_len, is_directive_comment, is_end_construct_keyword,
-        openmp_directive_prefix, ConditionalPrefix, ConditionalPrefixKind, OpenMpDirectivePrefix,
+        declaration_type_head_len, first_statement_index, io_statement_head, is_data_statement,
+        is_declaration_statement, is_directive_comment, is_end_construct_keyword,
+        is_format_statement, is_named_parameter_token, matching_close, openmp_directive_prefix,
+        top_level_separator, ConditionalPrefix, ConditionalPrefixKind, OpenMpDirectivePrefix,
         OpenMpDirectiveSentinel,
     };
     use crate::source::tokens::tokens;
@@ -452,6 +596,30 @@ mod tests {
         // plausible identifier; keep the shape recognizer conservative.
         let byte_assignment = tokens(b"BYTE = value");
         assert_eq!(declaration_type_head_len(&byte_assignment, 0), None);
+    }
+
+    #[test]
+    fn statement_shape_recognizers_share_one_source_of_truth() {
+        let declaration = tokens(b"integer, optional :: x");
+        assert!(is_declaration_statement(&declaration));
+        assert!(top_level_separator(&declaration).is_some());
+
+        let format = tokens(b"10 format(i0)");
+        assert_eq!(first_statement_index(&format), 1);
+        assert!(is_format_statement(&format));
+
+        let io = tokens(b"if (ready) write(*,*) x");
+        assert!(io_statement_head(&io).is_some());
+
+        assert!(is_data_statement(&tokens(b"data x/1/")));
+        assert!(!is_data_statement(&tokens(b"data = a/b")));
+
+        let call = tokens(b"call p(a=1)");
+        let equals = call.iter().position(|token| token.text == b"=").unwrap();
+        assert!(is_named_parameter_token(&call, equals));
+
+        let brackets = tokens(b"[x]");
+        assert_eq!(matching_close(&brackets, 0), Some(2));
     }
 
     #[test]
