@@ -132,6 +132,12 @@ fn config_spec(key: &str) -> Result<&'static OptionSpec, crate::error::FormatErr
     if let Some(spec) = options::lookup_config(key, None) {
         return Ok(spec);
     }
+    if key == "context-path" {
+        return Err(crate::error::FormatError::InvalidOption(
+            "configuration key `context-path` is not supported; use `context-paths = [\"...\"]`"
+                .into(),
+        ));
+    }
     if let Some(spec) = options::lookup_any_long(key) {
         if matches!(spec.config, ConfigMapping::None)
             && !matches!(spec.id, OptionId::Help | OptionId::Version)
@@ -250,28 +256,6 @@ fn parse_context_paths(
     path: &Path,
     layer: &mut OptionLayer,
 ) -> Result<(), crate::error::FormatError> {
-    if key == "context-path" {
-        // Preserve the previously accepted singular compatibility shape. The
-        // documented plural key below is preferred because it keeps the config
-        // file's directory as the path origin.
-        let value = config_scalar(
-            value,
-            key,
-            path,
-            options::lookup_config(key, None).expect("schema contains context-path"),
-        )?;
-        if value.is_empty() {
-            return Err(crate::error::FormatError::InvalidOption(
-                "--context-path requires a path".into(),
-            ));
-        }
-        layer.push_context_path(ContextPath {
-            path: PathBuf::from(value),
-            base: None,
-        });
-        return Ok(());
-    }
-
     let paths = value.as_array().ok_or_else(|| {
         crate::error::FormatError::InvalidOption(format!(
             "configuration key `{key}` in {} must be an array of strings",
