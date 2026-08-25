@@ -230,10 +230,14 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
             "-i<n>, -i-, --indent=<n|none>",
             "global indentation (default 3)",
         ),
-    OptionSpec::new(OptionId::StartIndent, "start-indent", ValueKind::StartIndent)
-        .config(ConfigMapping::Same)
-        .default_text("0")
-        .help("-I<n|a>, --start-indent=<n|a>", "starting indentation"),
+    OptionSpec::new(
+        OptionId::StartIndent,
+        "start-indent",
+        ValueKind::StartIndent,
+    )
+    .config(ConfigMapping::Same)
+    .default_text("0")
+    .help("-I<n|a>, --start-indent=<n|a>", "starting indentation"),
     OptionSpec::new(
         OptionId::IndentContains,
         "indent-contains",
@@ -426,13 +430,17 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         "--align-declarations=<BOOL>",
         "shrink space to align `::` blocks (default 1)",
     ),
-    OptionSpec::new(OptionId::AlignComments, "align-comments", ValueKind::Boolean)
-        .config(ConfigMapping::Same)
-        .default_text("false")
-        .help(
-            "--align-comments=<BOOL>",
-            "shrink space to align trailing comment blocks (default 0)",
-        ),
+    OptionSpec::new(
+        OptionId::AlignComments,
+        "align-comments",
+        ValueKind::Boolean,
+    )
+    .config(ConfigMapping::Same)
+    .default_text("false")
+    .help(
+        "--align-comments=<BOOL>",
+        "shrink space to align trailing comment blocks (default 0)",
+    ),
     OptionSpec::new(OptionId::LastIndent, "last-indent", ValueKind::Flag).help(
         "--last-indent, -lastindent",
         "print final indentation instead of source",
@@ -582,13 +590,17 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
             "-D NAME[=VALUE], --define=...",
             "define a macro name (repeatable)",
         ),
-    OptionSpec::new(OptionId::KeywordCase, "keyword-case", ValueKind::KeywordCase)
-        .config(ConfigMapping::Same)
-        .default_text("lower")
-        .help(
-            "--keyword-case=<lower|upper|preserve>",
-            "recognized keyword case (default lower)",
-        ),
+    OptionSpec::new(
+        OptionId::KeywordCase,
+        "keyword-case",
+        ValueKind::KeywordCase,
+    )
+    .config(ConfigMapping::Same)
+    .default_text("lower")
+    .help(
+        "--keyword-case=<lower|upper|preserve>",
+        "recognized keyword case (default lower)",
+    ),
     OptionSpec::new(OptionId::OpenmpCase, "openmp-case", ValueKind::Boolean)
         .config(ConfigMapping::Same)
         .default_text("true")
@@ -607,13 +619,17 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         "--relational-symbols=<BOOL>",
         "rewrite `.eq.` and friends as `==` (default true)",
     ),
-    OptionSpec::new(OptionId::ArrayBrackets, "array-brackets", ValueKind::Boolean)
-        .config(ConfigMapping::Same)
-        .default_text("true")
-        .help(
-            "--array-brackets=<BOOL>",
-            "rewrite `(/ ... /)` as `[ ... ]` (default true)",
-        ),
+    OptionSpec::new(
+        OptionId::ArrayBrackets,
+        "array-brackets",
+        ValueKind::Boolean,
+    )
+    .config(ConfigMapping::Same)
+    .default_text("true")
+    .help(
+        "--array-brackets=<BOOL>",
+        "rewrite `(/ ... /)` as `[ ... ]` (default true)",
+    ),
     OptionSpec::new(
         OptionId::CompactMultiplicative,
         "compact-multiplicative",
@@ -643,13 +659,17 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         "--split-compound-keywords=<BOOL>",
         "write `endif` as `end if` (default true)",
     ),
-    OptionSpec::new(OptionId::StripEmptyArgs, "strip-empty-args", ValueKind::Boolean)
-        .config(ConfigMapping::Same)
-        .default_text("true")
-        .help(
-            "--strip-empty-args=<BOOL>",
-            "strip empty SUBROUTINE definition arg lists (default true)",
-        ),
+    OptionSpec::new(
+        OptionId::StripEmptyArgs,
+        "strip-empty-args",
+        ValueKind::Boolean,
+    )
+    .config(ConfigMapping::Same)
+    .default_text("true")
+    .help(
+        "--strip-empty-args=<BOOL>",
+        "strip empty SUBROUTINE definition arg lists (default true)",
+    ),
     OptionSpec::new(
         OptionId::RemoveRedundantParens,
         "remove-redundant-parens",
@@ -716,13 +736,17 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         "--delimiter-spacing=<BOOL>",
         "normalize spaces after delimiters (default true)",
     ),
-    OptionSpec::new(OptionId::CommentSpacing, "comment-spacing", ValueKind::Boolean)
-        .config(ConfigMapping::Same)
-        .default_text("true")
-        .help(
-            "--comment-spacing=<BOOL>",
-            "normalize the gap before a trailing `!` (default true)",
-        ),
+    OptionSpec::new(
+        OptionId::CommentSpacing,
+        "comment-spacing",
+        ValueKind::Boolean,
+    )
+    .config(ConfigMapping::Same)
+    .default_text("true")
+    .help(
+        "--comment-spacing=<BOOL>",
+        "normalize the gap before a trailing `!` (default true)",
+    ),
     OptionSpec::new(
         OptionId::ContinuationMarkers,
         "continuation-markers",
@@ -734,18 +758,30 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         "--continuation-markers=<BOOL>",
         "normalize continuation markers and OpenMP sentinels (default true)",
     ),
-    OptionSpec::new(OptionId::RefactorEnd, "refactor-end", ValueKind::RefactorEnd)
-        .aliases(&["refactor-procedures"])
-        .config(ConfigMapping::Same)
-        .help(
-            "-Rr, -RR, --refactor-end[=<BOOL>|upcase]",
-            "complete END definition statements",
-        ),
-    OptionSpec::new(OptionId::InputFormat, "input-format", ValueKind::InputFormat)
-        .config(ConfigMapping::Same)
-        .default_text("auto"),
-    OptionSpec::new(OptionId::OutputFormat, "output-format", ValueKind::OutputFormat)
-        .config(ConfigMapping::Same),
+    OptionSpec::new(
+        OptionId::RefactorEnd,
+        "refactor-end",
+        ValueKind::RefactorEnd,
+    )
+    .aliases(&["refactor-procedures"])
+    .config(ConfigMapping::Same)
+    .help(
+        "-Rr, -RR, --refactor-end[=<BOOL>|upcase]",
+        "complete END definition statements",
+    ),
+    OptionSpec::new(
+        OptionId::InputFormat,
+        "input-format",
+        ValueKind::InputFormat,
+    )
+    .config(ConfigMapping::Same)
+    .default_text("auto"),
+    OptionSpec::new(
+        OptionId::OutputFormat,
+        "output-format",
+        ValueKind::OutputFormat,
+    )
+    .config(ConfigMapping::Same),
     OptionSpec::new(OptionId::Config, "config", ValueKind::Path).help(
         "--config=<path>",
         "use a project TOML configuration explicitly",
@@ -923,7 +959,10 @@ mod tests {
                     },
                 )
             else {
-                panic!("schema default text for --{} did not produce a run", spec.long)
+                panic!(
+                    "schema default text for --{} did not produce a run",
+                    spec.long
+                )
             };
 
             assert_eq!(
