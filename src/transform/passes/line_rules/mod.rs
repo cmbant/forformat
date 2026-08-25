@@ -135,23 +135,16 @@ impl StatementState {
     ) -> LineContext<'a> {
         let preserve_comment_after =
             common::comment_spacing::preserve_full_comment_spacing(document, index, cx);
-        let first_statement_tokens = || {
-            cx.analysis
-                .group_of_line(index)
-                .and_then(|group| group.statements.first())
-                .map(|statement| crate::source::tokens::tokens(&statement.text))
-        };
-        let continued_declaration = self.continued_statement
-            && first_statement_tokens()
-                .is_some_and(|tokens| common::is_declaration_statement(&tokens));
-        let continued_format = self.continued_statement
-            && first_statement_tokens().is_some_and(|tokens| common::is_format_statement(&tokens));
-        let statement_separator =
-            first_statement_tokens().is_some_and(|tokens| common::has_top_level_separator(&tokens));
-        let io_statement = first_statement_tokens()
-            .is_some_and(|tokens| common::io_statement_head(&tokens).is_some());
-        let data_statement =
-            first_statement_tokens().is_some_and(|tokens| common::is_data_statement(&tokens));
+        let facts = cx
+            .analysis
+            .facts_of_line(index)
+            .copied()
+            .unwrap_or_default();
+        let continued_declaration = self.continued_statement && facts.declaration;
+        let continued_format = self.continued_statement && facts.format;
+        let statement_separator = facts.top_level_separator;
+        let io_statement = facts.io_statement;
+        let data_statement = facts.data_statement;
 
         LineContext {
             preserve_comment_after,
@@ -191,8 +184,13 @@ impl StatementState {
     ) {
         self.continued_statement = continues;
         self.continued_infix = continues && trailing_continuation_operand(code);
-        self.continued_named_parameter = self.continued_statement && is_call_group(cx, line_index);
-        self.continued_bind_parameter = self.continued_statement && is_bind_group(cx, line_index);
+        let facts = cx
+            .analysis
+            .facts_of_line(line_index)
+            .copied()
+            .unwrap_or_default();
+        self.continued_named_parameter = self.continued_statement && facts.call_context;
+        self.continued_bind_parameter = self.continued_statement && facts.bind_context;
         self.continued_component =
             self.continued_statement && common::trailing_component_selector(code);
         common::delimiter_spacing::advance_multiple_subscript_depths(
@@ -351,41 +349,6 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
     }
 
     Ok(changed)
-}
-
-fn is_call_group(cx: &PassContext, line_index: usize) -> bool {
-    let Some(statement) = cx
-        .analysis
-        .group_of_line(line_index)
-        .and_then(|group| group.statements.first())
-    else {
-        return false;
-    };
-    let tokens = crate::source::tokens::tokens(&statement.text);
-    tokens
-        .iter()
-        .find(|token| token.kind == TokenKind::Name)
-        .is_some_and(|token| token.is_name(b"call"))
-        || tokens.iter().enumerate().any(|(index, token)| {
-            token.text == b"=" && common::is_named_parameter_token(&tokens, index)
-        })
-}
-
-fn is_bind_group(cx: &PassContext, line_index: usize) -> bool {
-    let Some(statement) = cx
-        .analysis
-        .group_of_line(line_index)
-        .and_then(|group| group.statements.first())
-    else {
-        return false;
-    };
-    let tokens = crate::source::tokens::tokens(&statement.text);
-    tokens.iter().enumerate().any(|(index, token)| {
-        token.is_name(b"bind")
-            && tokens
-                .get(index + 1)
-                .is_some_and(|next| next.kind == TokenKind::LParen)
-    })
 }
 
 /// The full chain for one physical line, carrying literal state across
