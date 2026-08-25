@@ -191,7 +191,7 @@ submodule behaviour, symlinks, and write semantics.
 | `-k-`, `--indent-continuation=none` | `indent_continuation = "none"` | disable continuation indentation | off |
 | `--indent-continuation=default` | `indent_continuation = "default"` | use the normal continuation policy | on |
 | `-K`, `--indent-ampersand[=BOOL]` | `indent_ampersand = BOOL` | boolean | false |
-| `--align-paren[=N|BOOL]` | `align_paren = N/BOOL` | bare/`true` means `1`; `false`/`0` disables; positive integers retain the numeric level | `0` |
+| `--align-paren[=N\|BOOL]` | `align_paren = N/BOOL` | bare/`true` means `1`; `false`/`0` disables; positive integers retain the numeric level | `0` |
 | `--label-left=BOOL` | `label_left = BOOL` | boolean | true |
 | `--include-left=BOOL` | `include_left = BOOL` | boolean | false |
 | `--openmp=BOOL` | `openmp = BOOL` | boolean | true |

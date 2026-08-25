@@ -39,9 +39,7 @@ impl DeclineReporter {
         path: Option<&Path>,
         root: Option<&Path>,
     ) {
-        let input = path
-            .map(|path| display_path(path, root).display().to_string())
-            .unwrap_or_else(|| "<stdin>".to_owned());
+        let input = input_name(path, root);
         for (line, reason) in &meta.declines {
             if self.reported < DECLINE_DIAGNOSTIC_LIMIT {
                 eprintln!("{}", decline_message(&input, *line, *reason));
@@ -80,6 +78,15 @@ impl DeclineReporter {
             )
         })
     }
+}
+
+/// How a diagnostic names one formatted input.
+///
+/// Every route that can report against an input uses this, so a failure names
+/// the file exactly the way a declined wrap on the same file would.
+pub(super) fn input_name(path: Option<&Path>, root: Option<&Path>) -> String {
+    path.map(|path| display_path(path, root).display().to_string())
+        .unwrap_or_else(|| "<stdin>".to_owned())
 }
 
 pub(super) fn decline_message(

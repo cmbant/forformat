@@ -113,6 +113,7 @@ pub(super) fn format_targets(
     facts: &[Option<FileFacts>],
     context: &ProjectContext,
     config: &crate::config::FormatConfig,
+    root: Option<&Path>,
 ) -> Result<Vec<FormattedTarget>, WorkflowError> {
     let workers = std::thread::available_parallelism()
         .map(NonZeroUsize::get)
@@ -149,9 +150,15 @@ pub(super) fn format_targets(
             slots[index] = Some(outcome);
         }
     });
+    // A bulk run writes nothing unless every target formats, so the failure that
+    // stops it has to say which file it was.
     slots
         .into_iter()
-        .map(|slot| slot.expect("format worker panicked"))
+        .enumerate()
+        .map(|(index, slot)| {
+            let path = &sources[target_indices[index]].path;
+            super::in_input(slot.expect("format worker panicked"), Some(path), root)
+        })
         .collect()
 }
 
