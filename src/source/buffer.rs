@@ -122,6 +122,7 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
         };
         let code_offset = conditional_start.unwrap_or(first);
         let mut comment = None;
+        let mut continues = false;
         if matches!(kind, PhysicalLineKind::Code | PhysicalLineKind::FindentFix) {
             let code = &content[code_offset..];
             let state = states.select_mut(stream);
@@ -146,6 +147,7 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
                 if let Some(i) = scan.comment_start {
                     comment = Some((span.start + code_offset + i) as u32..span.end as u32);
                 }
+                continues = scan.continued;
                 state.continued = scan.continued;
             }
         }
@@ -161,6 +163,7 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
             kind,
             code_span: code_start as u32..code_end as u32,
             comment_span: comment,
+            continues,
             omp: stream.is_conditional(),
         }
     }
@@ -240,6 +243,16 @@ mod tests {
     }
 
     #[test]
+    fn physical_lines_record_semantic_continuation() {
+        let buffer = SourceBuffer::new(b"x = a &\nx = 'ab &\n&cd'\nx = 1H&\ny = 2\n").unwrap();
+        assert!(buffer.lines[0].continues);
+        assert!(buffer.lines[1].continues);
+        assert!(!buffer.lines[2].continues);
+        assert!(!buffer.lines[3].continues);
+        assert!(!buffer.lines[4].continues);
+    }
+
+    #[test]
     fn conditional_compilation_accepts_initial_and_contextual_compact_sentinels() {
         let buffer =
             SourceBuffer::new(b"!$ x = 1\n!$\ty = 2 ! note\n!$ call f( &\n!$& arg = 1)\n").unwrap();
@@ -270,6 +283,7 @@ mod tests {
         )
         .unwrap();
         assert!(buffer.lines[0].is_conditional_compilation());
+        assert!(!buffer.lines[0].continues);
         assert_eq!(buffer.code_bytes(&buffer.lines[0]), b"x = 1H&");
         assert_eq!(buffer.lines[1].kind, PhysicalLineKind::Comment);
         assert!(!buffer.lines[1].is_conditional_compilation());

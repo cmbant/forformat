@@ -141,15 +141,16 @@ impl LogicalGroup {
                 push(i, first.span.start, line, 0..line.len(), false);
             } else {
                 let code = buf.code_bytes(first);
-                let (range, _) = normalized_fragment(code, false);
+                let (range, _) = normalized_fragment(code, false, first.continues);
                 push(i, first.code_span.start, code, range, false);
             }
-            let mut more = trailing_amp(buf.code_bytes(first));
+            let mut more = first.continues;
             while more && j < buf.lines.len() {
                 let l = &buf.lines[j];
                 // A comment, blank, or CPP directive within a continued
                 // statement is emitted as its own physical line but does not
-                // terminate the surrounding Fortran statement.
+                // terminate the surrounding Fortran statement. In particular,
+                // it must not overwrite `more` with its own `continues = false`.
                 if matches!(
                     l.kind,
                     PhysicalLineKind::Preprocessor
@@ -165,9 +166,9 @@ impl LogicalGroup {
                 // line; only a leading `&` licenses splicing a token in two.
                 // Losing that blank glues the last word of one line to the
                 // first word of the next into a single bogus token.
-                let (range, had_marker) = normalized_fragment(s, true);
+                let (range, had_marker) = normalized_fragment(s, true, l.continues);
                 push(j, l.code_span.start, s, range, !had_marker);
-                more = trailing_amp(s);
+                more = l.continues;
                 j += 1;
             }
             let mut statements = Vec::new();
@@ -203,14 +204,6 @@ impl LogicalGroup {
     }
 }
 
-fn trailing_amp(s: &[u8]) -> bool {
-    let mut t = s;
-    while t.last().is_some_and(|x| x.is_ascii_whitespace()) {
-        t = &t[..t.len() - 1];
-    }
-    t.last() == Some(&b'&')
-}
-
 fn trailing_directive(s: &[u8], continuation: u8) -> bool {
     let mut t = s;
     while t.last().is_some_and(|x| x.is_ascii_whitespace()) {
@@ -222,8 +215,13 @@ fn trailing_directive(s: &[u8], continuation: u8) -> bool {
 /// Produce the structural view of one continued physical line.  The original
 /// bytes remain in `SourceBuffer` for emission; this only removes syntax that
 /// joins physical lines so recognizers see the same statement a Fortran reader
-/// sees.
-fn normalized_fragment(s: &[u8], continuation_line: bool) -> (Range<usize>, bool) {
+/// sees. `trailing_marker` comes from `PhysicalLine::continues`, so a protected
+/// payload byte that happens to be `&` is never removed as syntax.
+fn normalized_fragment(
+    s: &[u8],
+    continuation_line: bool,
+    trailing_marker: bool,
+) -> (Range<usize>, bool) {
     let mut start = 0;
     while start < s.len() && (s[start] == b' ' || s[start] == b'\t') {
         start += 1;
@@ -237,7 +235,7 @@ fn normalized_fragment(s: &[u8], continuation_line: bool) -> (Range<usize>, bool
     while end > start && s[end - 1].is_ascii_whitespace() {
         end -= 1;
     }
-    if end > start && s[end - 1] == b'&' {
+    if trailing_marker && end > start && s[end - 1] == b'&' {
         end -= 1;
     }
     (start..end, had_marker)
@@ -293,6 +291,17 @@ x = 1
         assert_eq!(groups[0].lines, 0..6);
         assert_eq!(groups[0].statements.len(), 1);
         assert_eq!(groups[0].statements[0].text, b"x = a  b  c");
+    }
+
+    #[test]
+    fn a_hollerith_payload_ampersand_is_not_continuation_syntax() {
+        let buffer = SourceBuffer::new(b"x = 1H&\ny = 2\n").unwrap();
+        assert!(!buffer.lines[0].continues);
+        let groups = LogicalGroup::assemble(&buffer);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].lines, 0..1);
+        assert_eq!(groups[0].statements[0].text, b"x = 1H&");
+        assert_eq!(groups[1].statements[0].text, b"y = 2");
     }
 
     #[test]

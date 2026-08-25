@@ -186,7 +186,7 @@ impl Planner {
             body: PlanBody::Code {
                 first_indent,
                 directive_indent: self.stack.current(),
-                group_first_cont: super::continuation::trailing_ampersand(buf.code_bytes(line0)),
+                group_first_cont: line0.continues,
                 align: !hollerith && (config.align_paren || config.align_paren_value != 0),
                 replacement,
             },

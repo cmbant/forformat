@@ -2,6 +2,8 @@
 //!
 //! Normalization order, which must not be permuted:
 //!
+//! 0. presentation-whitespace canonicalization — FF/VT/bare-CR code
+//!    whitespace becomes an ordinary space before any rule inspects it;
 //! 1. `lowercase_line` — keyword case, operator modernization, real exponent
 //!    markers, project case application;
 //! 2. `normalize_keyword_spacing` — compound keywords, `keyword(`, `) then`;
@@ -29,7 +31,8 @@ use crate::{
     analysis::{scoped_declared_names, DeclaredNameIndex},
     error::FormatError,
     source::{
-        regions::LexState,
+        regions::{map_code, LexState},
+        syntax::line_start_syntax,
         tokens::{tokenize, TokenKind},
         PhysicalLineKind,
     },
@@ -39,6 +42,37 @@ use crate::{
         pipeline::{Changed, PassContext},
     },
 };
+
+/// Canonicalize presentation-only control whitespace before any numbered rule.
+///
+/// The lexer accepts vertical tab, form feed and bare carriage return as
+/// whitespace, while several presentation rules deliberately reason in terms
+/// of horizontal gaps. Giving every stage the same spelling avoids a later rule
+/// changing evidence that an earlier rule already inspected. Protected regions
+/// are copied byte-for-byte, and leading bytes are restored if replacing them
+/// would expose different line-start syntax.
+///
+/// `incoming` is copied into the scanner by the caller. This helper must never
+/// advance the mutable lexical state that Rule 1 will consume afterwards.
+fn canonicalize_presentation_whitespace(line: &[u8], incoming: LexState) -> Vec<u8> {
+    let mut state = incoming;
+    let mut output = map_code(line, &mut state, |code, out| {
+        out.extend(code.iter().map(|byte| match *byte {
+            b'\x0b' | b'\x0c' | b'\r' => b' ',
+            byte => byte,
+        }));
+    });
+    if output == line || line_start_syntax(&output) == line_start_syntax(line) {
+        return output;
+    }
+
+    let leading = line
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(line.len());
+    output[..leading].copy_from_slice(&line[..leading]);
+    output
+}
 
 /// Immutable facts about the line currently passing through the rule chain.
 ///
@@ -147,9 +181,16 @@ impl StatementState {
         self.lex = lex;
     }
 
-    fn advance(&mut self, code: &[u8], incoming: LexState, cx: &PassContext, line_index: usize) {
-        self.continued_statement = trailing_ampersand(code);
-        self.continued_infix = trailing_continuation_operand(code);
+    fn advance(
+        &mut self,
+        code: &[u8],
+        continues: bool,
+        incoming: LexState,
+        cx: &PassContext,
+        line_index: usize,
+    ) {
+        self.continued_statement = continues;
+        self.continued_infix = continues && trailing_continuation_operand(code);
         self.continued_named_parameter = self.continued_statement && is_call_group(cx, line_index);
         self.continued_bind_parameter = self.continued_statement && is_bind_group(cx, line_index);
         self.continued_component =
@@ -238,6 +279,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
                 if physical.kind == PhysicalLineKind::Code {
                     stream.advance(
                         cx.analysis.buffer.code_bytes(physical),
+                        physical.continues,
                         incoming_lex,
                         cx,
                         index,
@@ -294,6 +336,7 @@ pub fn run(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatE
             ) {
                 stream.advance(
                     cx.analysis.buffer.code_bytes(physical),
+                    physical.continues,
                     incoming_lex,
                     cx,
                     index,
@@ -368,8 +411,9 @@ pub fn apply(
 /// The one definition of the line-rule sequence.
 ///
 /// `RuleMode` controls which stages are enabled, but never their relative
-/// order. A physical line gets all five stages; a rejoined statement gets the
-/// deliberate 1/2/4 subset and then the joined named-argument cleanup.
+/// order. A physical line gets all five numbered stages; a rejoined statement
+/// gets the deliberate 1/2/4 subset and then the joined named-argument cleanup.
+/// Stage 0 precedes either path whenever the mode normalizes whitespace.
 fn apply_rules(
     line: &[u8],
     cx: &PassContext,
@@ -386,7 +430,17 @@ fn apply_rules(
     let physical = matches!(mode, RuleMode::Physical(_));
     let normalize_whitespace = cx.config.mode.normalizes_whitespace();
 
-    // The stage order is an architectural invariant. Do not permute it.
+    // Stage 0. Canonicalize presentation whitespace using a copy of the
+    // incoming lexical state. Rule 1 still owns advancing `state`, so the same
+    // physical line is never scanned into the carried state twice.
+    let canonical = (normalize_whitespace
+        && line
+            .iter()
+            .any(|byte| matches!(*byte, b'\x0b' | b'\x0c' | b'\r')))
+    .then(|| canonicalize_presentation_whitespace(line, incoming));
+    let line = canonical.as_deref().unwrap_or(line);
+
+    // The numbered stage order is an architectural invariant. Do not permute it.
     // 1. Case/operator normalization. The case rule itself distinguishes
     // token replacement from operator-spacing edits by style.
     let mut text = common::case::lowercase_line_with_context(
@@ -522,14 +576,6 @@ fn compact_continued_named_argument(line: &[u8], open_groups: &[bool]) -> Vec<u8
         edits.replace(previous.span.end..next.span.start, b"=");
     }
     edits.finish()
-}
-
-fn trailing_ampersand(line: &[u8]) -> bool {
-    let mut end = line.len();
-    while end > 0 && line[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    end > 0 && line[end - 1] == b'&'
 }
 
 fn trailing_continuation_operand(line: &[u8]) -> bool {
