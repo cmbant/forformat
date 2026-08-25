@@ -126,6 +126,31 @@ pub fn tokens(s: &[u8]) -> Vec<Token<'_>> {
     tokenize(s, &mut LexState::default())
 }
 
+/// Whether writing `right` immediately after `left` preserves the token
+/// boundary between them.
+///
+/// Asked with the lexer rather than a table of pairs, because the question is
+/// exactly what the next run of the formatter will see, and that is whatever
+/// the lexer says.
+///
+/// The question is boundary preservation, not token count. Counting is not
+/// enough: `=` and `==` written together spell `===`, which is still two
+/// tokens, but they are `==` and `=` -- a different pair. `*` and `**` are the
+/// same trap one operator longer.
+pub(crate) fn join_preserves_boundary(left: &[u8], right: &[u8]) -> bool {
+    if left.is_empty() || right.is_empty() {
+        return true;
+    }
+    let mut joined = Vec::with_capacity(left.len() + right.len());
+    joined.extend_from_slice(left);
+    joined.extend_from_slice(right);
+    let tokens = tokenize(&joined, &mut LexState::default());
+    tokens.len() == 2
+        && tokens[0].span.start == 0
+        && tokens[0].span.end == left.len()
+        && tokens[1].span.end == joined.len()
+}
+
 fn lex_code<'a>(s: &'a [u8], range: Range<usize>, depth: &mut usize, out: &mut Vec<Token<'a>>) {
     let mut i = range.start;
     let end = range.end;
@@ -279,7 +304,7 @@ fn exponent_at(s: &[u8], i: usize, end: usize) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
-    use super::{tokenize, tokens, TokenKind};
+    use super::{join_preserves_boundary, tokenize, tokens, TokenKind};
     use crate::source::regions::LexState;
 
     fn lexed(s: &[u8]) -> Vec<(TokenKind, String)> {
@@ -364,6 +389,16 @@ mod tests {
                 (TokenKind::Name, "j".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn joined_spellings_report_token_boundary_preservation() {
+        assert!(join_preserves_boundary(b"+", b"-"));
+        assert!(join_preserves_boundary(b"", b"="));
+        assert!(join_preserves_boundary(b"=", b""));
+        assert!(!join_preserves_boundary(b"/", b"/"));
+        assert!(!join_preserves_boundary(b"=", b"=="));
+        assert!(!join_preserves_boundary(b"*", b"**"));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use crate::{
     source::{
         regions::{LexState, RegionKind},
         syntax::declaration_type_head_len,
-        tokens::{tokenize, TokenKind},
+        tokens::{join_preserves_boundary, tokenize, TokenKind},
         PhysicalLineKind,
     },
     transform::{document::Document, edit::EditBuffer, pipeline::PassContext, vocab},
@@ -835,35 +835,8 @@ struct OperatorSpacing {
     previous_end: Option<usize>,
     previous_trailing_space: bool,
     previous_compact_named: bool,
-    /// What the last operator was written as, for [`joining_retokenizes`].
+    /// What the last operator was written as, for [`join_preserves_boundary`].
     previous_operator: Vec<u8>,
-}
-
-/// Whether writing `next` hard against `previous` changes where the boundary
-/// between them falls.
-///
-/// Asked with the lexer rather than a table of pairs, because the question is
-/// exactly what the *next* run of the formatter will see, and that is whatever
-/// the lexer says.
-///
-/// The question is boundary preservation, not token count. Counting was the
-/// first thing tried and it is not enough: `=` and `==` written together spell
-/// `===`, which is still two tokens, but they are `==` and `=` -- a different
-/// pair, which the next run spaces differently. `*` and `**` are the same trap
-/// one operator longer, and it cost `x * * ** 1` its fixed point. Both are
-/// caught by asking whether the two tokens come back out where they went in.
-fn joining_retokenizes(previous: &[u8], next: &[u8]) -> bool {
-    if previous.is_empty() || next.is_empty() {
-        return false;
-    }
-    let mut joined = Vec::with_capacity(previous.len() + next.len());
-    joined.extend_from_slice(previous);
-    joined.extend_from_slice(next);
-    let tokens = tokenize(&joined, &mut LexState::default());
-    !(tokens.len() == 2
-        && tokens[0].span.start == 0
-        && tokens[0].span.end == previous.len()
-        && tokens[1].span.end == joined.len())
 }
 
 fn add_operator_edit(
@@ -887,7 +860,7 @@ fn add_operator_edit(
     // The blank after a compact operator is this edit's to swallow, and
     // swallowing it must not spell a third token: `a/ /b` became `a//b`, which
     // the next run lexes as one `//` and spaces. Leave the blank alone.
-    if !spaced && joining_retokenizes(operator, next.unwrap_or_default()) {
+    if !spaced && !join_preserves_boundary(operator, next.unwrap_or_default()) {
         right = token.span.end;
     }
     let abuts_previous = spacing.previous_end == Some(left);
@@ -901,7 +874,7 @@ fn add_operator_edit(
     // the two tokens two tokens.
     let would_join = abuts_previous
         && !spacing.previous_trailing_space
-        && joining_retokenizes(&spacing.previous_operator, operator);
+        && !join_preserves_boundary(&spacing.previous_operator, operator);
     let mut replacement = Vec::new();
     if left == 0 {
         replacement.extend_from_slice(&line[..token.span.start]);
@@ -934,7 +907,7 @@ fn remove_operator_trailing_whitespace(
     }
     // As in `add_operator_edit`: the blank this would remove is the only thing
     // keeping two tokens from being read as one.
-    if joining_retokenizes(token.text, next.unwrap_or_default()) {
+    if !join_preserves_boundary(token.text, next.unwrap_or_default()) {
         end = token.span.end;
     }
     if end > token.span.end && !is_trailing_continuation_marker(line, token.span.end) {
