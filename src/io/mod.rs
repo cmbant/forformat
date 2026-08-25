@@ -21,7 +21,7 @@ mod write;
 use context::{analyze_sources, format_one, format_targets, isolated_context, project_context};
 use diff::unified_diff;
 use exclude::ExcludeMatcher;
-use report::{fixed_message, skips_fixed_form, DeclineReporter};
+use report::{fixed_message, input_name, skips_fixed_form, DeclineReporter};
 use select::{deduplicate_indices, select_paths, Loaded, Scope, Selection};
 use sources::{display_path, read_source, resolve_input, tracked_sources_without_submodules};
 use write::write_all_stdout;
@@ -39,7 +39,7 @@ use crate::{
 use std::{
     env, fs,
     io::{self, Read},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Instant,
 };
 
@@ -49,21 +49,44 @@ pub enum WorkflowError {
     Usage(String),
     Io(io::Error),
     Format(FormatError),
+    /// A formatting failure with the input it came from already rendered.
+    ///
+    /// `FormatError` is about a source buffer, so it cannot name a file — the
+    /// same division `report` describes for declined wraps. A bulk run
+    /// formats every target before it writes anything, so an unnamed failure
+    /// there reports that nothing was written without saying which of the
+    /// selected files caused it.
+    FormatIn {
+        input: String,
+        error: FormatError,
+    },
 }
 
 impl WorkflowError {
     pub fn status(&self) -> i32 {
         match self {
             Self::Usage(_) => 2,
-            Self::Io(_) | Self::Format(_) => 1,
+            Self::Io(_) | Self::Format(_) | Self::FormatIn { .. } => 1,
         }
     }
 
     pub fn is_broken_pipe(&self) -> bool {
         match self {
             Self::Io(error) => error.kind() == io::ErrorKind::BrokenPipe,
-            Self::Format(error) => error.is_broken_pipe(),
+            Self::Format(error) | Self::FormatIn { error, .. } => error.is_broken_pipe(),
             Self::Usage(_) => false,
+        }
+    }
+
+    /// Name the input a formatting failure came from.
+    ///
+    /// Only formatting failures are renamed: an I/O error already names the
+    /// path it failed on, and a usage error belongs to the invocation rather
+    /// than to any one input.
+    fn in_input(self, input: String) -> Self {
+        match self {
+            Self::Format(error) => Self::FormatIn { input, error },
+            other => other,
         }
     }
 }
@@ -74,6 +97,7 @@ impl std::fmt::Display for WorkflowError {
             Self::Usage(message) => f.write_str(message),
             Self::Io(error) => error.fmt(f),
             Self::Format(error) => error.fmt(f),
+            Self::FormatIn { input, error } => write!(f, "{input}: {error}"),
         }
     }
 }
@@ -90,6 +114,19 @@ impl From<FormatError> for WorkflowError {
     fn from(error: FormatError) -> Self {
         Self::Format(error)
     }
+}
+
+/// Name the input that a formatting call failed on.
+///
+/// The formatter is handed a source buffer and cannot name a file, so every
+/// route that formats a named input adds the name here — the same division
+/// `report` describes for declined wraps.
+fn in_input<T, E: Into<WorkflowError>>(
+    result: Result<T, E>,
+    path: Option<&Path>,
+    root: Option<&Path>,
+) -> Result<T, WorkflowError> {
+    result.map_err(|error| error.into().in_input(input_name(path, root)))
 }
 
 fn execute_query_format(invocation: Invocation) -> Result<i32, WorkflowError> {
@@ -352,7 +389,7 @@ fn format_bare_stdin(invocation: &Invocation) -> Result<i32, WorkflowError> {
         write_all_stdout(&source)?;
         return Ok(0);
     }
-    let result = format_source(&source, &invocation.config)?;
+    let result = in_input(format_source(&source, &invocation.config), None, None)?;
     let mut declines = DeclineReporter::default();
     declines.report(&result.meta, None, None);
     declines.finish();
@@ -381,7 +418,11 @@ fn stdin_shortcut(
         return Ok(Some(0));
     }
     if !invocation.config.mode.normalizes() {
-        let formatted = format_source(source, &invocation.config)?;
+        let formatted = in_input(
+            format_source(source, &invocation.config),
+            None,
+            scope.root.as_deref(),
+        )?;
         let mut declines = DeclineReporter::default();
         declines.report(&formatted.meta, None, scope.root.as_deref());
         declines.finish();
@@ -429,13 +470,21 @@ fn format_project_stdin(
     stdin_local: Option<&crate::analysis::FileFacts>,
 ) -> Result<i32, WorkflowError> {
     let formatted = if !invocation.config.mode.normalizes() {
-        format_source(source, &invocation.config)?
+        in_input(
+            format_source(source, &invocation.config),
+            None,
+            scope.root.as_deref(),
+        )?
     } else {
-        crate::format::full::format_with_context_and_local(
-            source,
-            context,
-            stdin_local.expect("full-mode stdin must have precomputed facts"),
-            &invocation.config,
+        in_input(
+            crate::format::full::format_with_context_and_local(
+                source,
+                context,
+                stdin_local.expect("full-mode stdin must have precomputed facts"),
+                &invocation.config,
+            ),
+            None,
+            scope.root.as_deref(),
         )?
     };
     let mut declines = DeclineReporter::default();
@@ -466,11 +515,15 @@ fn format_to_stdout(run: &PreparedRun<'_>) -> Result<i32, WorkflowError> {
         declines.report_fixed(path, run.scope.root.as_deref());
         write_all_stdout(&run.loaded.sources[source_index].bytes)?;
     } else {
-        let formatted = format_one(
-            &run.loaded.sources[source_index],
-            run.facts[source_index].as_ref(),
-            run.context,
-            &run.invocation.config,
+        let formatted = in_input(
+            format_one(
+                &run.loaded.sources[source_index],
+                run.facts[source_index].as_ref(),
+                run.context,
+                &run.invocation.config,
+            ),
+            Some(path),
+            run.scope.root.as_deref(),
         )?;
         declines.report(&formatted.meta, Some(path), run.scope.root.as_deref());
         write_all_stdout(&formatted.bytes)?;
@@ -496,6 +549,7 @@ fn format_files(
         run.facts,
         run.context,
         &run.invocation.config,
+        run.scope.root.as_deref(),
     )?;
     let mut changed = Vec::new();
     let mut declines = DeclineReporter::default();
@@ -545,4 +599,60 @@ fn format_files(
     Ok(i32::from(
         (run.invocation.check || run.invocation.diff) && !changed.is_empty(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{in_input, WorkflowError};
+    use crate::error::FormatError;
+    use std::path::Path;
+
+    /// A bulk run formats every target before it writes any of them, so the
+    /// failure that stops it is the only place the offending file is named.
+    #[test]
+    fn a_formatting_failure_names_the_file_it_came_from() {
+        let failure: Result<(), _> = Err(FormatError::Unsupported(
+            "wrapping entered a cycle".to_owned(),
+        ));
+        let named = in_input(
+            failure,
+            Some(Path::new("/checkout/src/module.f90")),
+            Some(Path::new("/checkout")),
+        )
+        .unwrap_err();
+        assert_eq!(
+            named.to_string(),
+            "src/module.f90: unsupported: wrapping entered a cycle"
+        );
+        assert_eq!(named.status(), 1);
+
+        let stdin: Result<(), _> = Err(FormatError::Unsupported("wrapping entered a cycle".into()));
+        assert_eq!(
+            in_input(stdin, None, None).unwrap_err().to_string(),
+            "<stdin>: unsupported: wrapping entered a cycle"
+        );
+    }
+
+    /// Naming the input must not reclassify the failure: a closed pipe still
+    /// has to exit 0 rather than report a formatting error.
+    #[test]
+    fn naming_the_input_preserves_the_failure_class() {
+        let broken: Result<(), _> = Err(FormatError::Write(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "closed",
+        )));
+        assert!(in_input(broken, Some(Path::new("a.f90")), None)
+            .unwrap_err()
+            .is_broken_pipe());
+
+        // A usage error belongs to the invocation and an I/O error already
+        // names its own path, so neither is renamed.
+        let usage: Result<(), _> = Err(WorkflowError::Usage("bad option".to_owned()));
+        assert_eq!(
+            in_input(usage, Some(Path::new("a.f90")), None)
+                .unwrap_err()
+                .to_string(),
+            "bad option"
+        );
+    }
 }
