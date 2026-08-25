@@ -29,7 +29,7 @@ where
         }
         return Err(FormatError::InvalidOption(format!("--{name}")));
     };
-    let value = consume_value(spec.cli_arity, name, value, cursor)?;
+    let value = consume_value(spec.value_kind.cli_arity(), name, value, cursor)?;
 
     match spec.id {
         OptionId::Config => {
