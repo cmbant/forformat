@@ -268,6 +268,20 @@ pub(in crate::transform::passes::line_rules) fn lowercase_line_with_context(
                     || vocab::contains(vocab::FORTRAN_SPECIFIERS, token.text)
                     || vocab::contains(vocab_2023::SPECIFIERS, token.text)
                 {
+                    // Project-aware declared casing already resolved ordinary
+                    // symbols through host and USE association. The line-local
+                    // declaration index does not contain those routes, so do not
+                    // reinterpret that spelling solely because it is also a
+                    // standard or intrinsic word. A `name=value` occurrence
+                    // remains syntax-owned and keeps the existing special case.
+                    if !specifier_argument
+                        && cx
+                            .project
+                            .visible_symbol_spelling(cx.local, line_index, token.text)
+                            .is_some()
+                    {
+                        continue;
+                    }
                     if token.is(b"precision")
                         && !is_followed_by_lparen(&tokens, index)
                         && !previous_name_is(&tokens, index, b"double")
