@@ -133,14 +133,25 @@ impl<B: AsRef<[u8]>> SourceBuffer<B> {
             // strict "a literal resumes on `&`" rule can apply to it.
             let scan = match stream {
                 SourceStream::Ordinary => Some(super::regions::line_scan(&mut state.lex, code)),
+                SourceStream::Conditional
+                    if super::regions::resumes_protected_region(&state.lex, code) =>
+                {
+                    let scan = state.lex.scan_line(code, |_| {});
+                    if !scan.continued {
+                        state.lex = LexState::default();
+                    }
+                    Some(scan)
+                }
                 SourceStream::Conditional => {
-                    super::regions::resumes_protected_region(&state.lex, code).then(|| {
-                        let scan = state.lex.scan_line(code, |_| {});
-                        if !scan.continued {
-                            state.lex = LexState::default();
-                        }
-                        scan
-                    })
+                    // A code-looking line that cannot resume the carried
+                    // literal is transparent to that protected state. It still
+                    // owns its *own* physical continuation syntax, though: the
+                    // malformed-string compatibility fixture has exactly such
+                    // a line ending in `&`. Classify only that fact from a
+                    // clean state, without consuming the carried literal or
+                    // changing its comment spans/stream-continuation state.
+                    continues = LexState::default().scan_line(code, |_| {}).continued;
+                    None
                 }
             };
             if let Some(scan) = scan {
@@ -253,6 +264,15 @@ mod tests {
     }
 
     #[test]
+    fn skipped_conditional_code_keeps_its_own_continuation_fact() {
+        let buffer =
+            SourceBuffer::new(b"!$ s = 'abc &\n!$ world  \"     , &\n!$ 10)\n").unwrap();
+        assert!(buffer.lines[0].continues);
+        assert!(buffer.lines[1].continues);
+        assert!(!buffer.lines[2].continues);
+    }
+
+    #[test]
     fn conditional_compilation_accepts_initial_and_contextual_compact_sentinels() {
         let buffer =
             SourceBuffer::new(b"!$ x = 1\n!$\ty = 2 ! note\n!$ call f( &\n!$& arg = 1)\n").unwrap();
@@ -304,6 +324,7 @@ mod tests {
     #[test]
     fn open_literal_steps_over_non_continuation_code_in_its_stream() {
         let buffer = SourceBuffer::new(b"!$ s = 'abc &\n!$ y = 2\n!$ &def!ghi'\n").unwrap();
+        assert!(!buffer.lines[1].continues);
         assert!(buffer.lines[2].comment_span.is_none());
         assert_eq!(buffer.code_bytes(&buffer.lines[2]), b"&def!ghi'");
     }
