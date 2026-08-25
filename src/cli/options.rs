@@ -225,7 +225,7 @@ impl OptionSpec {
 ///
 /// CLI and TOML parsing both resolve through this table before creating typed
 /// [`FormatSetting`] values. Runtime defaults remain embodied by
-/// [`FormatConfig::default`], and ordered layer application implements the
+/// `FormatConfig::default()`, and ordered layer application implements the
 /// declared repeat/merge behavior. The invariance tests below keep those runtime
 /// semantics in lockstep with this metadata instead of duplicating defaults in a
 /// second executable configuration object. TOML settings use [`ConfigPhase`] so
@@ -593,7 +593,7 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
         ValueKind::Flag,
         CliArity::None,
     )
-    .help("--show-files", "print selected target paths without reading or formatting them"),
+    .help("--show-files", "print selected files without formatting"),
     OptionSpec::new(
         OptionId::QueryFormat,
         "query-format",
@@ -1123,12 +1123,10 @@ mod tests {
                     format!("--{}={default}", spec.long)
                 }
             };
-            let Command::Run(invocation) = parse([
-                "forformat".to_string(),
-                "--no-config".to_string(),
-                option,
-            ])
-            .unwrap_or_else(|error| panic!("schema default for --{} is invalid: {error}", spec.long))
+            let Command::Run(invocation) =
+                parse(["forformat".to_string(), "--no-config".to_string(), option]).unwrap_or_else(
+                    |error| panic!("schema default for --{} is invalid: {error}", spec.long),
+                )
             else {
                 panic!("schema default for --{} did not produce a run", spec.long)
             };
