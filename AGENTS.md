@@ -8,7 +8,7 @@ long statements. The pipeline is:
 bytes -> normalization (steps 1-15) -> wrapping (16) -> findent layout engine -> post-layout (17-20)
 ```
 
-Read the module docs at the top of `src/format/full.rs` before changing it. Two invariants gate
+Read the module docs at the top of `src/format/full/mod.rs` before changing it. Two invariants gate
 the pipeline:
 
 - **I2** `indent_only(full(x)) == full(x)` — free, because the final bytes are the engine's output
@@ -20,9 +20,10 @@ Two rules I1 keeps re-teaching:
 - Wrapping runs before layout, so every budget decision measures text as it will be emitted.
   Normalization widens lines, the engine moves them, and declaration-separator alignment is the
   only post-layout pass that can make a line longer. Measure via `engine::format`.
-- Per-line normalization has no statement context. A continuation line carries no `format`, `::`,
-  or `call`; carry required facts in `LineState` and expose them through `LineContext` in
-  `src/transform/passes/line_rules/mod.rs`.
+- Physical lines are not statement boundaries. `Analysis::StatementFacts` caches stable facts per
+  logical statement, and source provenance selects the first owner for current-line context and the
+  last owner for continuation carry. Dynamic line-rule state resets at real semicolons instead of
+  leaking state from an earlier statement on the same physical line.
 
 ## Verification
 
@@ -95,18 +96,18 @@ fixed/free wording, and the quick-start formatter examples; it is not an exhaust
   and re-run first. Instrumenting a function and seeing *no* output from it is the giveaway.
 - Full-mode passes must preserve protected literal, Hollerith, preprocessor, and comment bytes
   except for the explicitly documented comment rule.
-- A continuation line has no statement context of its own. Thread facts into line rules rather
-  than inferring them from the continuation's first token.
+- A continuation line has no statement context of its own. Read stable facts from the owning
+  logical statement; on a semicolon line current context belongs to the first statement and carried
+  continuation state to the last. Never infer statement kind from the continuation's first token.
 - A new post-layout width change must be included in the wrapper's emitted-width measurement.
-- Never hand-roll a quote scanner. `src/source/regions.rs` owns the lexical state; take a byte scan
-  from `for_each_code_byte`/`for_each_code_span` and a rewrite from `map_code` or `tokenize`. Every
-  private copy so far has gone wrong the same two ways: closing `'a''b'` on the first byte of the
-  doubled pair, and forgetting to advance the cursor inside a literal.
-- A continued statement *steps over* blank, comment and directive lines: they are emitted verbatim
-  and never lexed. `line_comment_start`/`line_code_spans`/`line_regions` walk a group's physical
-  lines through them and carry one `LexState` across the whole group. A bare `LexState::regions` is
-  not the same thing: it keeps an unterminated literal open past a line that had no continuation
-  marker, so on malformed input it reports every later line as protected payload.
+- Never hand-roll a quote scanner. `src/source/regions.rs` owns lexical truth, and
+  `advance_stream_line` owns the carried state for both `SourceBuffer` and step 11. Line rules may
+  scan scratch copies to find protected bytes on the current line, but must not create another
+  carried-state path. Rewrites use `map_code` or `tokenize`.
+- A continued statement *steps over* blank, comment and directive lines. `advance_stream_line`
+  decides whether a stream lexes a code line or treats it as transparent, and resets an
+  unterminated literal when continuation syntax does not keep it open. A bare raw scan is not an
+  equivalent source-stream reader.
 - `cargo test --all-targets` does not run doctests. `cargo test --doc` is a separate step in
   `check_local.sh` and in CI.
 - `fuzz/` is its own Cargo workspace, so a repo-root `cargo fmt`/`cargo clippy` does not reach the
