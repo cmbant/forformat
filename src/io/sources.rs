@@ -41,7 +41,7 @@ pub fn validate_extension(path: &Path) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "expected a free-form Fortran source (suffix match is case-insensitive: .f, .f03, .f08, .f18, .f23, .f90, .f95): {}",
+            "expected a free-form Fortran source (suffix match is case-insensitive: .f, .f03, .f08, .f18, .f23, .f90, .f95, .fpp, .pf): {}",
             path.display()
         ))
     }

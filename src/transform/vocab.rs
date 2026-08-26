@@ -620,4 +620,6 @@ pub const MAX_LINE_LENGTH: usize = 120;
 pub const MINIMUM_BREAK_FILL: f64 = 0.25;
 
 /// Free-form source extensions, lowercase.  Uppercase spellings are accepted too.
-pub static SOURCE_EXTENSIONS: &[&str] = &[".f", ".f03", ".f08", ".f18", ".f23", ".f90", ".f95"];
+pub static SOURCE_EXTENSIONS: &[&str] = &[
+    ".f", ".f03", ".f08", ".f18", ".f23", ".f90", ".f95", ".fpp", ".pf",
+];

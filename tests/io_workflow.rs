@@ -100,15 +100,27 @@ fn run_with_bogus_git_env(path: &Path, args: &[&str]) -> Output {
 fn all_discovers_uppercase_extensions_and_ignores_hook_git_environment() {
     let repo = temp_repo();
     fs::write(repo.join("source.F90"), b"program p\nx=1\nend program p\n").unwrap();
+    fs::write(repo.join("source.fpp"), b"program p\nx=1\nend program p\n").unwrap();
+    fs::write(repo.join("source.pf"), b"program p\nx=1\nend program p\n").unwrap();
     fs::write(repo.join("ignored.txt"), b"x\n").unwrap();
     git_add(&repo);
     let output = run_with_bogus_git_env(&repo, &["--indent-only", "--all", "--check"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stdout).contains("source.F90"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("source.fpp"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("source.pf"));
     let output = run_with_bogus_git_env(&repo, &["--indent-only", "--all"]);
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         fs::read(repo.join("source.F90")).unwrap(),
+        b"program p\n   x=1\nend program p\n"
+    );
+    assert_eq!(
+        fs::read(repo.join("source.fpp")).unwrap(),
+        b"program p\n   x=1\nend program p\n"
+    );
+    assert_eq!(
+        fs::read(repo.join("source.pf")).unwrap(),
         b"program p\n   x=1\nend program p\n"
     );
     let _ = fs::remove_dir_all(repo);

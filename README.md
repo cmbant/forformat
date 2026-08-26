@@ -8,6 +8,10 @@ indentation with lexical normalization, project-aware identifier casing, and sta
 The formatter is implemented in Rust and designed for fast whole-project formatting. Python wheels
 bundle `forformat`, so normal installation does not require Rust or a Fortran compiler.
 
+<p align="center">
+  <img src="docs/assets/forformat-demo.gif" alt="A Fortran module before and after formatting with forformat" width="900">
+</p>
+
 Automatic fixed/free input detection is enabled by default. Sources detected as fixed form are left
 unchanged; use `-ifree` or `--input-format=free` to force free-form handling. Fixed-form output is
 not supported.

@@ -234,6 +234,9 @@ The style controls in this table affect `--full` and `--normalize-only`. Canonic
 canonicalization stage of canonicalize-and-indent apply controls that do not amount to
 presentation-only whitespace/layout changes; `--indent-only` deliberately ignores this table.
 
+Full mode does not enable `--refactor-end`; add it explicitly when bare `END` statements should be
+completed with their construct kind and matching name.
+
 | CLI / TOML key | Values | Default | Effect |
 | --- | --- | --- | --- |
 | `--keyword-case` / `keyword_case` | `lower`, `upper`, `preserve` | `lower` | recognized keyword/intrinsic spelling |
@@ -335,8 +338,8 @@ for `--reduce-whitespace`; the legacy `ws_remred` TOML key is accepted for the s
 
 `-Rr` and bare `--refactor-end` complete END definition statements. `-RR` or
 `--refactor-end=upcase` also uppercases the completed END spelling. Boolean values explicitly enable
-or disable the transformation. `--refactor-procedures` is an accepted compatibility alias; prefer
-`--refactor-end`. The configuration key is `refactor_end`.
+or disable the transformation; it is disabled by default, including in full mode. `--refactor-procedures`
+is an accepted compatibility alias; prefer `--refactor-end`. The configuration key is `refactor_end`.
 
 END completion is also available in canonicalize-only and canonicalize-and-indent modes. In those
 modes the scope-aware END text is replaced in place before any combined-mode indentation, while
