@@ -254,7 +254,9 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
         let Some(ancestors) = scopes_by_line.get(line) else {
             continue;
         };
-        let in_interface = scopes.in_interface(line);
+        let in_interface = ancestors
+            .iter()
+            .any(|index| scopes.scopes[*index].kind == ScopeKind::Interface);
         let file_owner = ancestors
             .iter()
             .copied()
