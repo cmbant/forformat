@@ -189,64 +189,9 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
         }
     }
 
-    // Module/program specification declarations are file declarations.
-    for group in &analysis.groups {
-        let line = group.lines.start;
-        let Some(owner_index) = scopes
-            .ancestors(scopes.index_of_line(line))
-            .into_iter()
-            .find(|scope| {
-                matches!(
-                    scopes.scopes[*scope].kind,
-                    ScopeKind::Module | ScopeKind::Program
-                )
-            })
-        else {
-            continue;
-        };
-        let owner = &scopes.scopes[owner_index];
-        if !owner.is_specification(line)
-            || scopes.in_interface(line)
-            || scopes
-                .ancestors(scopes.index_of_line(line))
-                .iter()
-                .any(|index| scopes.scopes[*index].kind == ScopeKind::DerivedType)
-        {
-            continue;
-        }
-        for statement in &group.statements {
-            for name in declared_variable_names(&statement.text) {
-                file_by_scope[owner_index].insert(&name);
-            }
-        }
-    }
-
-    // Type-bound names suppress keyword lowering on their declaration line,
-    // while their case remains in the type-procedure namespace.
-    for group in &analysis.groups {
-        let line = group.lines.start;
-        let Some(owner_index) = scopes
-            .ancestors(scopes.index_of_line(line))
-            .into_iter()
-            .find(|scope| scopes.scopes[*scope].kind == ScopeKind::DerivedType)
-        else {
-            continue;
-        };
-        if scopes.in_interface(line) {
-            continue;
-        }
-        for statement in &group.statements {
-            for name in declared_binding_names(&statement.text) {
-                file_by_scope[owner_index].insert(&name);
-            }
-        }
-    }
-
     let scopes_by_line: Vec<Vec<usize>> = (0..line_count)
         .map(|line| scopes.ancestors(scopes.index_of_line(line)))
         .collect();
-
-    let mut locals_by_scope = vec![CaseMap::default(); scopes.scopes.len()];
     let local_owners_by_line: Vec<Option<usize>> = scopes_by_line
         .iter()
         .map(|ancestors| {
@@ -256,65 +201,128 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
                 .find(|index| owns_locals(scopes.scopes[*index].kind))
         })
         .collect();
+    let mut locals_by_scope = vec![CaseMap::default(); scopes.scopes.len()];
+    let mut header_names_by_scope = vec![Vec::new(); scopes.scopes.len()];
+    let mut header_owners_by_line: HashMap<usize, Vec<usize>> = HashMap::new();
 
     for (index, scope) in scopes.scopes.iter().enumerate() {
-        if !owns_locals(scope.kind) {
+        if !is_procedure_scope(scope.kind) {
             continue;
         }
-        let mut header_names = Vec::new();
-        if is_procedure_scope(scope.kind) {
-            // A procedure's own name is a name in its own scope: for a
-            // function it is the result variable, and for either kind it is
-            // what a recursive reference spells. A procedure held by a module
-            // or a program already gets this from its parent's declarations,
-            // but an external one has no such parent, so a file-level
-            // `subroutine erf(x)` had only its header read as the intrinsic
-            // `erf` — the header uppercased while the body and the END kept
-            // the declared spelling, and the next pass propagated the header.
-            //
-            // An interface body is excluded for the same reason it is excluded
-            // from the enclosing-scope registration above: it describes a
-            // signature the project defines elsewhere, and its name has to stay
-            // resolvable against that definition.
-            //
-            // A main program is excluded because neither justification reaches
-            // it: it has no result variable and cannot be referenced, so its
-            // name is global rather than local. Registering it only suppressed
-            // casing that should have applied — under `program data`, the
-            // `DATA` keyword of a `data eight /8/` statement stayed lowercase.
-            if let Some(name) = scope
-                .name
-                .as_deref()
-                .filter(|_| scope.kind == ScopeKind::Procedure)
-                .filter(|_| !scopes.in_interface(scope.lines.start))
-            {
-                header_names.push(name.to_vec());
-            }
-            if let Some(group) = analysis
-                .groups
-                .iter()
-                .find(|group| group.lines.start == scope.lines.start)
-            {
-                for statement in &group.statements {
-                    header_names.extend(procedure_header_names(&statement.text));
+        header_owners_by_line
+            .entry(scope.lines.start)
+            .or_default()
+            .push(index);
+
+        // A procedure's own name is a name in its own scope: for a
+        // function it is the result variable, and for either kind it is
+        // what a recursive reference spells. A procedure held by a module
+        // or a program already gets this from its parent's declarations,
+        // but an external one has no such parent, so a file-level
+        // `subroutine erf(x)` had only its header read as the intrinsic
+        // `erf` — the header uppercased while the body and the END kept
+        // the declared spelling, and the next pass propagated the header.
+        //
+        // An interface body is excluded for the same reason it is excluded
+        // from the enclosing-scope registration above: it describes a
+        // signature the project defines elsewhere, and its name has to stay
+        // resolvable against that definition.
+        //
+        // A main program is excluded because neither justification reaches
+        // it: it has no result variable and cannot be referenced, so its
+        // name is global rather than local. Registering it only suppressed
+        // casing that should have applied — under `program data`, the
+        // `DATA` keyword of a `data eight /8/` statement stayed lowercase.
+        if let Some(name) = scope
+            .name
+            .as_deref()
+            .filter(|_| scope.kind == ScopeKind::Procedure)
+            .filter(|_| !scopes.in_interface(scope.lines.start))
+        {
+            header_names_by_scope[index].push(name.to_vec());
+        }
+    }
+
+    let mut implicit_statements = vec![Vec::new(); scopes.scopes.len()];
+
+    // Collect every statement-derived name set in one walk. In particular,
+    // local declarations used to rescan all groups once for every local-owning
+    // scope; indexing each group by its precomputed owners makes this linear in
+    // the number of groups instead.
+    for group in &analysis.groups {
+        let line = group.lines.start;
+        let Some(ancestors) = scopes_by_line.get(line) else {
+            continue;
+        };
+        let in_interface = scopes.in_interface(line);
+        let file_owner = ancestors
+            .iter()
+            .copied()
+            .find(|index| {
+                matches!(
+                    scopes.scopes[*index].kind,
+                    ScopeKind::Module | ScopeKind::Program
+                )
+            })
+            .filter(|index| scopes.scopes[*index].is_specification(line))
+            .filter(|_| !in_interface)
+            .filter(|_| {
+                !ancestors
+                    .iter()
+                    .any(|index| scopes.scopes[*index].kind == ScopeKind::DerivedType)
+            });
+        let type_owner = ancestors
+            .iter()
+            .copied()
+            .find(|index| scopes.scopes[*index].kind == ScopeKind::DerivedType)
+            .filter(|_| !in_interface);
+        let local_owner = local_owners_by_line
+            .get(line)
+            .copied()
+            .flatten()
+            .filter(|index| scopes.scopes[*index].is_specification(line));
+        let header_owners = header_owners_by_line.get(&line);
+        let implicit_owner = ancestors
+            .iter()
+            .copied()
+            .find(|index| owns_implicit_policy(scopes.scopes[*index].kind))
+            .unwrap_or(0);
+
+        for statement in &group.statements {
+            if file_owner.is_some() || local_owner.is_some() {
+                let names = declared_variable_names(&statement.text);
+                if let Some(index) = file_owner {
+                    for name in &names {
+                        file_by_scope[index].insert(name);
+                    }
+                }
+                if let Some(index) = local_owner {
+                    for name in &names {
+                        locals_by_scope[index].insert(name);
+                    }
                 }
             }
-        }
-        for group in &analysis.groups {
-            let line = group.lines.start;
-            if local_owners_by_line.get(line).copied().flatten() != Some(index)
-                || !scope.is_specification(line)
-            {
-                continue;
-            }
-            for statement in &group.statements {
-                for name in declared_variable_names(&statement.text) {
-                    locals_by_scope[index].insert(&name);
+            if let Some(index) = type_owner {
+                for name in declared_binding_names(&statement.text) {
+                    file_by_scope[index].insert(&name);
                 }
             }
+            if let Some((first, rest)) = header_owners.and_then(|owners| owners.split_first()) {
+                let names = procedure_header_names(&statement.text);
+                for index in rest {
+                    header_names_by_scope[*index].extend(names.iter().cloned());
+                }
+                header_names_by_scope[*first].extend(names);
+            }
+            if is_implicit_statement(&statement.text) {
+                implicit_statements[implicit_owner].push(statement.text.as_slice());
+            }
         }
-        // Explicit declarations determine spelling when a continued header
-        // uses a different case; header names still provide membership.
+    }
+
+    // Explicit declarations determine spelling when a continued header uses a
+    // different case; header names still provide membership.
+    for (index, header_names) in header_names_by_scope.into_iter().enumerate() {
         for name in header_names {
             if !locals_by_scope[index].contains(&name) {
                 locals_by_scope[index].insert(&name);
@@ -366,20 +374,6 @@ pub fn scoped_declared_names(analysis: &Analysis, scopes: &ScopeTree) -> Declare
                 .find(|index| is_procedure_scope(scopes.scopes[*index].kind))
         })
         .collect();
-
-    let mut implicit_statements = vec![Vec::new(); scopes.scopes.len()];
-    for group in &analysis.groups {
-        let owner = scopes
-            .ancestors(scopes.index_of_line(group.lines.start))
-            .into_iter()
-            .find(|index| owns_implicit_policy(scopes.scopes[*index].kind))
-            .unwrap_or(0);
-        for statement in &group.statements {
-            if is_implicit_statement(&statement.text) {
-                implicit_statements[owner].push(statement.text.as_slice());
-            }
-        }
-    }
 
     // Policies inherit down ScopeTree except interface bodies, which restart
     // from the language default.
