@@ -26,7 +26,7 @@ jobs:
           import textwrap
 
           # v2's only remaining fragile matches are indentation-only. Normalize
-          # those two snippets before reusing the already-reviewed transformation.
+          # those snippets before reusing the already-reviewed transformation.
           path = Path('src/io/report.rs')
           text = path.read_text()
           text = text.replace(
@@ -40,7 +40,7 @@ jobs:
           text = path.read_text()
           text = text.replace(
               '    if invocation.query_format {\n        return execute_query_format(invocation);\n    }\n',
-              '    if invocation.query_format {\n    return execute_query_format(invocation);\n    }\n',
+              '    if invocation.query_format {\n    return execute_query_format(invocation);\n}\n',
               1,
           )
           path.write_text(text)
