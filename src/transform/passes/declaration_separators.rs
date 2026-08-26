@@ -206,8 +206,7 @@ fn declaration_entity_index(tokens: &[Token<'_>]) -> Option<usize> {
 fn is_designator_continuation(token: &Token<'_>) -> bool {
     token.depth == 0
         && (matches!(token.kind, TokenKind::LParen | TokenKind::LBracket)
-            || (token.kind == TokenKind::Operator
-                && matches!(token.text, b"=" | b"=>" | b"%")))
+            || (token.kind == TokenKind::Operator && matches!(token.text, b"=" | b"=>" | b"%")))
 }
 
 fn after_star_selector(tokens: &[Token<'_>], star: usize) -> Option<usize> {
