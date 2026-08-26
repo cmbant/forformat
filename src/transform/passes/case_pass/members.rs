@@ -9,16 +9,16 @@ use crate::{
 use std::collections::HashSet;
 
 pub(super) fn exact_member_owner(
-    names: &[Vec<u8>],
+    names: &[&[u8]],
     line: usize,
     cx: &PassContext,
     associates: Option<&AssociateFrame>,
 ) -> Option<ResolvedType> {
-    let root = names.first()?;
+    let root = *names.first()?;
     let mut current = associates
-        .and_then(|frame| frame.resolved_types.get(root.as_slice()).cloned())
+        .and_then(|frame| frame.resolved_types.get(root).cloned())
         .or_else(|| cx.project.visible_variable_type(cx.local, line, root))?;
-    for link in &names[1..] {
+    for &link in &names[1..] {
         current = cx
             .project
             .visible_component_type(cx.local, line, &current, link)?;

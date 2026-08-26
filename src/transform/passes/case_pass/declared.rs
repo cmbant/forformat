@@ -74,6 +74,7 @@ pub(crate) enum CaseEvidence {
         module: Vec<u8>,
     },
     Member {
+        /// Textual owner chain, retained only when exact resolution failed.
         owner: Vec<Vec<u8>>,
         resolved_owner: Option<ResolvedType>,
     },
@@ -547,12 +548,16 @@ fn record_member_evidence(
     let Some(owner) = component_owner_names(tokens, index, true) else {
         return;
     };
-    let names = owner.into_iter().map(ToOwned::to_owned).collect::<Vec<_>>();
-    let resolved_owner = exact_member_owner(&names, line, cx, associates);
+    let resolved_owner = exact_member_owner(&owner, line, cx, associates);
+    let owner = if resolved_owner.is_some() {
+        Vec::new()
+    } else {
+        owner.into_iter().map(ToOwned::to_owned).collect()
+    };
     record_case_evidence(
         evidence,
         CaseEvidence::Member {
-            owner: names,
+            owner,
             resolved_owner,
         },
     );
