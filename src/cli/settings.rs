@@ -14,7 +14,7 @@ pub(crate) enum FormatSetting {
     StartIndentAuto,
     SetStartIndent(usize),
     RestartContains,
-    SetContainsIndent { value: usize, clear_restart: bool },
+    SetContainsIndent(usize),
     ConstructIndent(Construct, usize),
     IncludeLeft(bool),
     LabelLeft(bool),
@@ -58,21 +58,19 @@ impl FormatSetting {
     fn apply(&self, config: &mut FormatConfig) {
         match self {
             Self::DisableIndent => config.apply_indent = false,
-            Self::SetIndent(value) => config.set_indent(*value),
+            Self::SetIndent(value) => {
+                config.apply_indent = true;
+                config.set_indent(*value);
+            }
             Self::StartIndentAuto => config.auto_start_indent = true,
             Self::SetStartIndent(value) => {
                 config.start_indent = *value;
                 config.auto_start_indent = false;
             }
             Self::RestartContains => config.contains_restart = true,
-            Self::SetContainsIndent {
-                value,
-                clear_restart,
-            } => {
+            Self::SetContainsIndent(value) => {
                 config.contains_indent = *value;
-                if *clear_restart {
-                    config.contains_restart = false;
-                }
+                config.contains_restart = false;
             }
             Self::ConstructIndent(construct, value) => apply_construct(*construct, config, *value),
             Self::IncludeLeft(value) => config.include_left = *value,
@@ -82,7 +80,10 @@ impl FormatSetting {
             Self::IndentAmpersand(value) => config.indent_ampersand = *value,
             Self::DisableContinuationIndent => config.indent_continuation = false,
             Self::EnableDefaultContinuationIndent => config.indent_continuation = true,
-            Self::SetContinuationIndent(value) => config.continuation_indent = *value,
+            Self::SetContinuationIndent(value) => {
+                config.indent_continuation = true;
+                config.continuation_indent = *value;
+            }
             Self::AlignParen(value) => {
                 config.align_paren_value = *value;
                 config.align_paren = *value != 0;
@@ -220,10 +221,7 @@ pub(crate) fn parse_format_setting(
         }
         OptionId::IndentContains => match required(value)? {
             "restart" => FormatSetting::RestartContains,
-            value => FormatSetting::SetContainsIndent {
-                value: parse_num(value)?,
-                clear_restart: false,
-            },
+            value => FormatSetting::SetContainsIndent(parse_num(value)?),
         },
         OptionId::IndentConstruct(construct) => {
             FormatSetting::ConstructIndent(construct, parse_num(required(value)?)?)
@@ -372,7 +370,7 @@ pub(crate) fn parse_bool(value: &str) -> Result<bool, FormatError> {
         "0" | "false" | "no" => Ok(false),
         "1" | "true" | "yes" => Ok(true),
         _ => Err(FormatError::InvalidOption(format!(
-            "expected 0 or 1, got {value}"
+            "expected boolean (0/1, true/false, yes/no), got {value}"
         ))),
     }
 }
@@ -463,8 +461,22 @@ fn parse_whitespace_reduction(value: Option<&str>) -> Result<usize, FormatError>
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_format_setting, FormatSetting};
-    use crate::{cli::options::OptionId, config::FortranStandard};
+    use super::{parse_bool, parse_format_setting, FormatSetting};
+    use crate::{
+        cli::{options::OptionId, parse, Command},
+        config::FortranStandard,
+    };
+    use std::fs;
+
+    fn run(args: &[&str]) -> crate::config::FormatConfig {
+        let argv = std::iter::once("forformat")
+            .chain(args.iter().copied())
+            .map(str::to_owned);
+        let Command::Run(invocation) = parse(argv).unwrap() else {
+            panic!("expected a formatting command")
+        };
+        invocation.config
+    }
 
     #[test]
     fn shared_value_parser_covers_updated_main_grammar() {
@@ -479,6 +491,89 @@ mod tests {
         assert_eq!(
             parse_format_setting(OptionId::TargetStandard, Some("f95")).unwrap(),
             Some(FormatSetting::TargetStandard(FortranStandard::F95))
+        );
+    }
+
+    #[test]
+    fn later_numeric_indent_values_restore_their_modes() {
+        let config = run(&[
+            "--no-config",
+            "--indent=none",
+            "--indent=4",
+            "--indent-continuation=none",
+            "--indent-continuation=5",
+            "--indent-contains=restart",
+            "--indent-contains=6",
+        ]);
+        assert!(config.apply_indent);
+        assert_eq!(config.indent, 4);
+        assert!(config.indent_continuation);
+        assert_eq!(config.continuation_indent, 5);
+        assert!(!config.contains_restart);
+        assert_eq!(config.contains_indent, 6);
+
+        let config = run(&[
+            "--no-config",
+            "--indent=4",
+            "--indent=none",
+            "--indent-continuation=5",
+            "--indent-continuation=none",
+            "--indent-contains=6",
+            "--indent-contains=restart",
+        ]);
+        assert!(!config.apply_indent);
+        assert!(!config.indent_continuation);
+        assert!(config.contains_restart);
+    }
+
+    #[test]
+    fn long_and_short_contains_options_have_the_same_last_wins_semantics() {
+        let long = run(&[
+            "--no-config",
+            "--indent-contains=restart",
+            "--indent-contains=4",
+        ]);
+        let short = run(&["--no-config", "-C-", "-C4"]);
+        assert_eq!(long.contains_restart, short.contains_restart);
+        assert_eq!(long.contains_indent, short.contains_indent);
+        assert!(!long.contains_restart);
+        assert_eq!(long.contains_indent, 4);
+    }
+
+    #[test]
+    fn cli_numeric_indent_values_override_disabled_toml_modes() {
+        let path = std::env::temp_dir().join(format!(
+            "forformat-state-override-{}.toml",
+            std::process::id()
+        ));
+        fs::write(
+            &path,
+            "indent = 'none'\nindent_continuation = 'none'\nindent_contains = 'restart'\n",
+        )
+        .unwrap();
+        let config_arg = format!("--config={}", path.display());
+        let config = run(&[
+            &config_arg,
+            "--indent=4",
+            "--indent-continuation=5",
+            "--indent-contains=6",
+        ]);
+        let _ = fs::remove_file(&path);
+
+        assert!(config.apply_indent);
+        assert_eq!(config.indent, 4);
+        assert!(config.indent_continuation);
+        assert_eq!(config.continuation_indent, 5);
+        assert!(!config.contains_restart);
+        assert_eq!(config.contains_indent, 6);
+    }
+
+    #[test]
+    fn boolean_parse_error_lists_all_accepted_spellings() {
+        let error = parse_bool("maybe").unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid option: expected boolean (0/1, true/false, yes/no), got maybe"
         );
     }
 }

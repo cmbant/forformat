@@ -418,7 +418,10 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
     .aliases(&["ws-remred"])
     .config(ConfigMapping::Same)
     .default_text("0")
-    .help("--reduce-whitespace[=<n>]", "reduce redundant whitespace"),
+    .help(
+        "--reduce-whitespace[=<n|BOOL>]",
+        "reduce redundant whitespace",
+    ),
     OptionSpec::new(
         OptionId::AlignDeclarations,
         "align-declarations",

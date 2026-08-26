@@ -651,7 +651,7 @@ fn style_options_report_the_option_bad_value_and_allowed_values() {
     assert!(matches!(
         result,
         Err(crate::error::FormatError::InvalidOption(message))
-            if message == "expected 0 or 1, got maybe"
+            if message == "expected boolean (0/1, true/false, yes/no), got maybe"
     ));
     let result = parse([
         "forformat".to_string(),
