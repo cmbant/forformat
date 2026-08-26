@@ -651,7 +651,7 @@ fn style_options_report_the_option_bad_value_and_allowed_values() {
     assert!(matches!(
         result,
         Err(crate::error::FormatError::InvalidOption(message))
-            if message == "expected 0 or 1, got maybe"
+            if message == "expected boolean (0/1, true/false, yes/no), got maybe"
     ));
     let result = parse([
         "forformat".to_string(),
@@ -747,7 +747,7 @@ fn exclude_accepts_repeatable_separated_and_normalized_spellings() {
 #[test]
 fn extend_exclude_adds_to_the_set_exclude_selects() {
     let run = |args: &[&str]| {
-        let argv = std::iter::once("forformat")
+        let argv = std::iter::once("forformat".to_string())
             .chain(args.iter().copied())
             .map(str::to_owned);
         let Command::Run(invocation) = parse(argv).unwrap() else {
