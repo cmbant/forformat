@@ -14,7 +14,7 @@ pub(crate) enum FormatSetting {
     StartIndentAuto,
     SetStartIndent(usize),
     RestartContains,
-    SetContainsIndent { value: usize, clear_restart: bool },
+    SetContainsIndent(usize),
     ConstructIndent(Construct, usize),
     IncludeLeft(bool),
     LabelLeft(bool),
@@ -68,14 +68,9 @@ impl FormatSetting {
                 config.auto_start_indent = false;
             }
             Self::RestartContains => config.contains_restart = true,
-            Self::SetContainsIndent {
-                value,
-                clear_restart,
-            } => {
+            Self::SetContainsIndent(value) => {
                 config.contains_indent = *value;
-                if *clear_restart {
-                    config.contains_restart = false;
-                }
+                config.contains_restart = false;
             }
             Self::ConstructIndent(construct, value) => apply_construct(*construct, config, *value),
             Self::IncludeLeft(value) => config.include_left = *value,
@@ -226,10 +221,7 @@ pub(crate) fn parse_format_setting(
         }
         OptionId::IndentContains => match required(value)? {
             "restart" => FormatSetting::RestartContains,
-            value => FormatSetting::SetContainsIndent {
-                value: parse_num(value)?,
-                clear_restart: true,
-            },
+            value => FormatSetting::SetContainsIndent(parse_num(value)?),
         },
         OptionId::IndentConstruct(construct) => {
             FormatSetting::ConstructIndent(construct, parse_num(required(value)?)?)
@@ -471,7 +463,7 @@ fn parse_whitespace_reduction(value: Option<&str>) -> Result<usize, FormatError>
 mod tests {
     use super::{parse_bool, parse_format_setting, FormatSetting};
     use crate::{
-        cli::{parse, options::OptionId, Command},
+        cli::{options::OptionId, parse, Command},
         config::FortranStandard,
     };
     use std::fs;
