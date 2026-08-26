@@ -3,7 +3,7 @@ use super::{
     ContextPath,
 };
 use crate::{
-    config::{FormatConfig, FormatMode, FortranStandard, KeywordCase, MacroDefine},
+    config::{FeatureLevel, FormatConfig, FormatMode, FortranStandard, KeywordCase, MacroDefine},
     error::FormatError,
 };
 
@@ -84,14 +84,8 @@ impl FormatSetting {
                 config.indent_continuation = true;
                 config.continuation_indent = *value;
             }
-            Self::AlignParen(value) => {
-                config.align_paren_value = *value;
-                config.align_paren = *value != 0;
-            }
-            Self::WhitespaceReduction(value) => {
-                config.ws_remred_value = *value;
-                config.ws_remred = *value != 0;
-            }
+            Self::AlignParen(value) => config.align_paren = FeatureLevel::new(*value),
+            Self::WhitespaceReduction(value) => config.ws_remred = FeatureLevel::new(*value),
             Self::AlignDeclarations(value) => config.align_declarations = *value,
             Self::AlignComments(value) => config.align_comments = *value,
             Self::Mode(value) => config.mode = *value,

@@ -1495,3 +1495,28 @@ fn in_place_update_preserves_symlink_and_target_mode() {
     );
     let _ = fs::remove_dir_all(repo);
 }
+
+#[test]
+fn indentation_queries_emit_only_metadata_from_stdin() {
+    let repo = temp_repo();
+    let source = b"program p\nx=1\n";
+
+    let indent = run_stdin(&repo, &["-lastindent"], source);
+    assert_eq!(indent.status.code(), Some(0));
+    assert_eq!(indent.stdout, b"3\n");
+
+    let usable = run_stdin(&repo, &["--last-usable"], source);
+    assert_eq!(usable.status.code(), Some(0));
+    assert_eq!(usable.stdout, b"2\n");
+
+    let both = run_stdin(&repo, &["-lastindent", "-lastusable"], source);
+    assert_eq!(both.status.code(), Some(0));
+    assert_eq!(both.stdout, b"2\n");
+
+    let empty_indent = run_stdin(&repo, &["-lastindent"], b"");
+    assert_eq!(empty_indent.stdout, b"0\n");
+    let empty_usable = run_stdin(&repo, &["-lastusable"], b"");
+    assert_eq!(empty_usable.stdout, b"1\n");
+
+    let _ = fs::remove_dir_all(repo);
+}

@@ -31,7 +31,7 @@ pub use write::atomic_replace;
 
 use crate::{
     analysis::{analyze_file, analyze_file_at},
-    cli::Invocation,
+    cli::{IndentQuery, Invocation},
     error::FormatError,
     format_source,
     source::SourceForm,
@@ -206,6 +206,18 @@ fn execute_query_format(invocation: Invocation) -> Result<i32, WorkflowError> {
     Ok(0)
 }
 
+fn execute_indent_query(invocation: &Invocation, query: IndentQuery) -> Result<i32, WorkflowError> {
+    let mut source = Vec::new();
+    io::stdin().read_to_end(&mut source)?;
+    let meta = crate::format::engine::query(&source, &invocation.config)?;
+    let value = match query {
+        IndentQuery::LastIndent => meta.last_indent,
+        IndentQuery::LastUsable | IndentQuery::Both => meta.last_usable,
+    };
+    write_all_stdout(format!("{value}\n").as_bytes())?;
+    Ok(0)
+}
+
 fn source_form_name(form: SourceForm) -> &'static str {
     match form {
         SourceForm::Free => "free",
@@ -244,6 +256,9 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     let invocation = promote_directory_argument(invocation);
     if invocation.query_format {
         return execute_query_format(invocation);
+    }
+    if let Some(query) = invocation.indent_query {
+        return execute_indent_query(&invocation, query);
     }
     let all_selection = invocation.all || invocation.all_files;
     let stdin_mode = invocation.stdin || (invocation.paths.is_empty() && !all_selection);

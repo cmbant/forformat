@@ -915,7 +915,7 @@ end module m
 ";
     let config = FormatConfig {
         mode: FormatMode::Full,
-        align_paren: true,
+        align_paren: (true).into(),
         ..FormatConfig::default()
     };
     let once = format_source(source.as_bytes(), &config).unwrap().bytes;
@@ -974,10 +974,8 @@ end program p
         indent_continuation: true,
         continuation_indent: 6,
         indent_ampersand: true,
-        align_paren: true,
-        align_paren_value: 4,
-        ws_remred: true,
-        ws_remred_value: 1,
+        align_paren: (4).into(),
+        ws_remred: (1).into(),
         align_declarations: true,
         align_comments: true,
         contains_restart: true,
@@ -1322,7 +1320,7 @@ fn default_formatting_allows_only_label_padding_to_change() {
 fn whitespace_reduction_bypasses_hollerith_payloads() {
     let source = b"program p\nx = 4Ha  b ! comment\nend program p\n";
     let config = FormatConfig {
-        ws_remred: true,
+        ws_remred: (true).into(),
         mode: FormatMode::IndentOnly,
         ..FormatConfig::default()
     };
@@ -1777,8 +1775,7 @@ fn deep_wrapping_config() -> FormatConfig {
         construct_indents: forformat::ConstructIndents::with_indent(8),
         contains_indent: 8,
         continuation_indent: 8,
-        align_paren: true,
-        align_paren_value: 4,
+        align_paren: (4).into(),
         ..FormatConfig::default()
     }
 }
@@ -1873,10 +1870,8 @@ end module NoahmpIOVarInitMod
         indent_continuation: true,
         continuation_indent: 6,
         indent_ampersand: true,
-        align_paren: true,
-        align_paren_value: 4,
-        ws_remred: true,
-        ws_remred_value: 1,
+        align_paren: (4).into(),
+        ws_remred: (1).into(),
         align_declarations: true,
         align_comments: true,
         contains_restart: true,
@@ -2131,8 +2126,7 @@ fn a_binary_minus_stays_spaced_across_a_conditional_sentinel_continuation() {
         mode: FormatMode::Full,
         indent: 8,
         construct_indents: forformat::ConstructIndents::with_indent(8),
-        align_paren: true,
-        align_paren_value: 4,
+        align_paren: (4).into(),
         wrap: forformat::WrapConfig {
             enabled: true,
             line_length: 80,
@@ -2192,8 +2186,7 @@ fn an_io_format_star_stays_spaced_when_wrapping_moves_it_before_a_marker() {
         indent: 8,
         construct_indents: forformat::ConstructIndents::with_indent(8),
         continuation_indent: 6,
-        align_paren: true,
-        align_paren_value: 8,
+        align_paren: (8).into(),
         align_comments: true,
         wrap: forformat::WrapConfig {
             enabled: true,
@@ -2244,8 +2237,7 @@ fn an_io_format_star_is_recognized_whatever_case_the_keyword_is_written_in() {
         indent: 8,
         construct_indents: forformat::ConstructIndents::with_indent(8),
         continuation_indent: 6,
-        align_paren: true,
-        align_paren_value: 8,
+        align_paren: (8).into(),
         wrap: forformat::WrapConfig {
             enabled: true,
             line_length: 80,
@@ -2291,10 +2283,8 @@ fn a_bind_keyword_argument_stays_compact_when_its_call_head_wraps_away() {
         max_indent: 32,
         continuation_indent: 6,
         indent_ampersand: true,
-        align_paren: true,
-        align_paren_value: 4,
-        ws_remred: true,
-        ws_remred_value: 1,
+        align_paren: (4).into(),
+        ws_remred: (1).into(),
         align_comments: true,
         contains_restart: true,
         construct_indents: forformat::ConstructIndents::with_indent(8),
@@ -2535,8 +2525,7 @@ fn a_second_space_after_a_separator_is_not_measured_as_a_column() {
         indent: 8,
         construct_indents: forformat::ConstructIndents::with_indent(8),
         indent_continuation: false,
-        align_paren: true,
-        align_paren_value: 8,
+        align_paren: (8).into(),
         wrap: forformat::WrapConfig {
             enabled: true,
             line_length: 80,
@@ -2566,8 +2555,7 @@ fn one_wide_declaration_does_not_pad_its_block_out_of_the_budget() {
     let config = FormatConfig {
         mode: FormatMode::Full,
         apply_indent: false,
-        align_paren: true,
-        align_paren_value: 8,
+        align_paren: (8).into(),
         align_comments: true,
         wrap: forformat::WrapConfig {
             enabled: true,

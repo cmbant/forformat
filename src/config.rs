@@ -134,6 +134,40 @@ impl Default for WrapConfig {
     }
 }
 
+/// Numeric setting whose level also acts as its enable switch.
+///
+/// Zero disables the feature; positive values enable it while retaining the
+/// exact optional numeric CLI value. Keeping both facts in one value makes
+/// contradictory enabled/value states unrepresentable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FeatureLevel(usize);
+
+impl FeatureLevel {
+    pub const fn new(value: usize) -> Self {
+        Self(value)
+    }
+
+    pub const fn enabled(self) -> bool {
+        self.0 != 0
+    }
+
+    pub const fn value(self) -> usize {
+        self.0
+    }
+}
+
+impl From<usize> for FeatureLevel {
+    fn from(value: usize) -> Self {
+        Self::new(value)
+    }
+}
+
+impl From<bool> for FeatureLevel {
+    fn from(enabled: bool) -> Self {
+        Self::new(enabled as usize)
+    }
+}
+
 /// A `-D NAME[=VALUE]` definition.  Macro names outrank every other case rule
 /// (I4), so this list is part of the case configuration, not just of any CPP
 /// evaluation.
@@ -249,10 +283,8 @@ pub struct FormatConfig {
     pub indent_continuation: bool,
     pub continuation_indent: usize,
     pub indent_ampersand: bool,
-    /// Whether parenthesis alignment is enabled.  `align_paren_value` keeps
-    /// the optional numeric CLI value without breaking boolean API callers.
-    pub align_paren: bool,
-    pub align_paren_value: usize,
+    /// Parenthesis-alignment level; zero disables the feature.
+    pub align_paren: FeatureLevel,
     pub openmp: bool,
     pub contains_restart: bool,
     pub contains_indent: usize,
@@ -260,12 +292,8 @@ pub struct FormatConfig {
     pub entry_indent: usize,
     pub refactor_end: bool,
     pub uppercase_end: bool,
-    /// Whether redundant-whitespace reduction is enabled.  The numeric mode
-    /// is retained in `ws_remred_value` for the optional CLI contract.
-    pub ws_remred: bool,
-    pub ws_remred_value: usize,
-    pub last_indent: bool,
-    pub last_usable: bool,
+    /// Redundant-whitespace-reduction level; zero disables the feature.
+    pub ws_remred: FeatureLevel,
     pub construct_indents: ConstructIndents,
     /// Whether step 17 may shrink the whitespace before a declaration's `::`
     /// to fit a shared block column. Declarations are hand-aligned often
@@ -346,8 +374,7 @@ impl Default for FormatConfig {
             indent_continuation: true,
             continuation_indent: 3,
             indent_ampersand: false,
-            align_paren: false,
-            align_paren_value: 0,
+            align_paren: FeatureLevel::default(),
             openmp: true,
             contains_restart: false,
             contains_indent: 3,
@@ -355,10 +382,7 @@ impl Default for FormatConfig {
             entry_indent: 2,
             refactor_end: false,
             uppercase_end: false,
-            ws_remred: false,
-            ws_remred_value: 0,
-            last_indent: false,
-            last_usable: false,
+            ws_remred: FeatureLevel::default(),
             construct_indents: ConstructIndents::with_indent(3),
             align_declarations: true,
             align_comments: false,
