@@ -348,11 +348,22 @@ jobs:
 
           archives=(artifacts/*.tar.gz)
           archive_sidecars=(artifacts/*.tar.gz.sha256)
-          binary_sidecars=(artifacts/forformat-*.sha256)
 
           test "${#archives[@]}" -eq 2
           test "${#archive_sidecars[@]}" -eq 2
-          test "${#binary_sidecars[@]}" -eq 3
+
+          # Named rather than counted by glob: `forformat-*.sha256` also matches
+          # the two archive sidecars above, so no glob can isolate the loose
+          # binaries. Asserting each name also catches an upload that silently
+          # produced the wrong file name, which a bare count cannot.
+          for binary in \
+            forformat-x86_64-pc-windows-msvc.exe \
+            forformat-x86_64-apple-darwin \
+            forformat-aarch64-apple-darwin
+          do
+            test -f "artifacts/$binary"
+            test -f "artifacts/$binary.sha256"
+          done
 
           (
             cd artifacts
@@ -437,11 +448,22 @@ jobs:
 
           archives=(artifacts/*.tar.gz)
           archive_sidecars=(artifacts/*.tar.gz.sha256)
-          binary_sidecars=(artifacts/forformat-*.sha256)
 
           test "${#archives[@]}" -eq 2
           test "${#archive_sidecars[@]}" -eq 2
-          test "${#binary_sidecars[@]}" -eq 3
+
+          # Named rather than counted by glob: `forformat-*.sha256` also matches
+          # the two archive sidecars above, so no glob can isolate the loose
+          # binaries. Asserting each name also catches an upload that silently
+          # produced the wrong file name, which a bare count cannot.
+          for binary in \
+            forformat-x86_64-pc-windows-msvc.exe \
+            forformat-x86_64-apple-darwin \
+            forformat-aarch64-apple-darwin
+          do
+            test -f "artifacts/$binary"
+            test -f "artifacts/$binary.sha256"
+          done
 
           (
             cd artifacts

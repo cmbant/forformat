@@ -6,14 +6,13 @@ on:
 permissions:
   contents: read
 
+# Reached only through `workflow_call` from ci.yml, whose `publish-pypi` job
+# runs after artifact verification -- which transitively requires the `checks`
+# job, i.e. this same rust-checks.yml. Calling it again here would re-run the
+# whole correctness matrix, Windows and macOS tests included, for every tag.
 jobs:
-  rust-checks:
-    name: Rust correctness checks
-    uses: ./.github/workflows/rust-checks.yml
-
   verify-release:
     name: Verify release
-    needs: rust-checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -33,7 +32,7 @@ jobs:
 
   build-wheels:
     name: Build Python wheel (${{ matrix.platform }})
-    needs: [rust-checks, verify-release]
+    needs: verify-release
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -122,7 +121,7 @@ jobs:
 
   verify-wheel-python39:
     name: Verify Python 3.9 wheel
-    needs: [rust-checks, verify-release]
+    needs: verify-release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
