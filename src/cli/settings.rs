@@ -281,9 +281,7 @@ pub(crate) fn parse_format_setting(
             FormatSetting::RelationalSymbols(parse_bool(required(value)?)?)
         }
         OptionId::ArrayBrackets => FormatSetting::ArrayBrackets(parse_bool(required(value)?)?),
-        OptionId::ModernizeDecls => {
-            FormatSetting::ModernizeDecls(parse_bool(required(value)?)?)
-        }
+        OptionId::ModernizeDecls => FormatSetting::ModernizeDecls(parse_bool(required(value)?)?),
         OptionId::CompactMultiplicative => {
             FormatSetting::CompactMultiplicative(parse_bool(required(value)?)?)
         }

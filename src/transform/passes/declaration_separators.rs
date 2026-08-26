@@ -5,7 +5,7 @@ use crate::{
     source::{
         syntax::{
             declaration_type_head_len, first_statement_index, is_declaration_statement,
-            top_level_separator,
+            matching_close, top_level_separator,
         },
         tokens::{tokens, Token, TokenKind},
         LogicalStatement,
@@ -135,6 +135,24 @@ fn declaration_entity_index(tokens: &[Token<'_>]) -> Option<usize> {
         let mut start = first + head_len;
         if tokens
             .get(start)
+            .is_some_and(|token| token.kind == TokenKind::LParen)
+        {
+            let close = matching_close(tokens, start)?;
+            if tokens
+                .get(close + 1)
+                .is_some_and(is_designator_continuation)
+            {
+                return None;
+            }
+            start = close + 1;
+        } else if tokens
+            .get(start)
+            .is_some_and(|token| token.kind == TokenKind::LBracket)
+        {
+            return None;
+        }
+        if tokens
+            .get(start)
             .is_some_and(|token| token.kind == TokenKind::Comma && token.depth == 0)
         {
             return None;
@@ -146,11 +164,9 @@ fn declaration_entity_index(tokens: &[Token<'_>]) -> Option<usize> {
             start = after_star_selector(tokens, start)?;
         }
         return tokens
-            .iter()
-            .enumerate()
-            .skip(start)
-            .find(|(_, token)| token.depth == 0 && token.kind == TokenKind::Name)
-            .map(|(index, _)| index);
+            .get(start)
+            .filter(|token| token.depth == 0 && token.kind == TokenKind::Name)
+            .map(|_| start);
     }
 
     if head.is_name(b"procedure") {
@@ -159,13 +175,7 @@ fn declaration_entity_index(tokens: &[Token<'_>]) -> Option<usize> {
             .get(start)
             .is_some_and(|token| token.kind == TokenKind::LParen)
         {
-            let depth = tokens[start].depth;
-            start = tokens
-                .iter()
-                .enumerate()
-                .skip(start + 1)
-                .find(|(_, token)| token.kind == TokenKind::RParen && token.depth == depth)
-                .map(|(index, _)| index + 1)?;
+            start = matching_close(tokens, start)? + 1;
         }
         if tokens
             .get(start)
@@ -174,19 +184,30 @@ fn declaration_entity_index(tokens: &[Token<'_>]) -> Option<usize> {
             return None;
         }
         return tokens
-            .iter()
-            .enumerate()
-            .skip(start)
-            .find(|(_, token)| token.depth == 0 && token.kind != TokenKind::Comment)
-            .map(|(index, _)| index);
+            .get(start)
+            .filter(|token| token.depth == 0 && token.kind == TokenKind::Name)
+            .map(|_| start);
     }
 
-    tokens
+    let (entity, token) = tokens
         .iter()
         .enumerate()
         .skip(first + 1)
-        .find(|(_, token)| token.depth == 0 && token.kind != TokenKind::Comment)
-        .map(|(index, _)| index)
+        .find(|(_, token)| token.depth == 0 && token.kind != TokenKind::Comment)?;
+    if token.kind == TokenKind::Name
+        || (head.is_name(b"save") && token.kind == TokenKind::Operator && token.text == b"/")
+    {
+        Some(entity)
+    } else {
+        None
+    }
+}
+
+fn is_designator_continuation(token: &Token<'_>) -> bool {
+    token.depth == 0
+        && (matches!(token.kind, TokenKind::LParen | TokenKind::LBracket)
+            || (token.kind == TokenKind::Operator
+                && matches!(token.text, b"=" | b"=>" | b"%")))
 }
 
 fn after_star_selector(tokens: &[Token<'_>], star: usize) -> Option<usize> {
@@ -259,6 +280,15 @@ mod tests {
     #[test]
     fn preserves_existing_separators_and_non_declaration_lookalikes() {
         let source = b"real :: x\nreal elemental function f(x)\ntype is(real)\nclass default\nparameter (n=3)\n";
+        let output = format_source(source, &config(FormatMode::CanonicalizeOnly))
+            .unwrap()
+            .bytes;
+        assert_eq!(output, source);
+    }
+
+    #[test]
+    fn preserves_keyword_spelled_designators_and_cray_pointer() {
+        let source = b"pointer(i) = x\nsave(i) = x\nreal(i) = x\npointer (p, x)\n";
         let output = format_source(source, &config(FormatMode::CanonicalizeOnly))
             .unwrap()
             .bytes;
