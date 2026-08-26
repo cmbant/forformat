@@ -5,12 +5,12 @@
 
 `forformat` is a standalone formatter for free-form Fortran. It combines findent-compatible
 indentation with lexical normalization, project-aware identifier casing, and statement wrapping.
-The native formatter is written in Rust; published Python wheels bundle the executable, so using a
-wheel does not require Rust or a Fortran compiler.
+The formatter is implemented in Rust and designed for fast whole-project formatting. Python wheels
+bundle `forformat`, so normal installation does not require Rust or a Fortran compiler.
 
-Automatic fixed/free input detection is enabled by default. Sources detected as fixed form are
-left unchanged; use `-ifree` or `--input-format=free` to force free-form handling. Fixed-form output
-is not supported.
+Automatic fixed/free input detection is enabled by default. Sources detected as fixed form are left
+unchanged; use `-ifree` or `--input-format=free` to force free-form handling. Fixed-form output is
+not supported.
 
 ## Install
 
@@ -22,37 +22,6 @@ forformat --version
 ```
 
 The package requires Python 3.9 or newer.
-
-Native static Linux binaries are also published for x86_64 and arm64. The following installs the
-latest release into `~/.local/bin` and verifies its SHA-256 checksum first:
-
-```sh
-case "$(uname -m)" in
-  x86_64|amd64) target=x86_64-unknown-linux-musl ;;
-  aarch64|arm64) target=aarch64-unknown-linux-musl ;;
-  *) echo "unsupported Linux architecture: $(uname -m)" >&2; exit 1 ;;
-esac
-
-archive="forformat-$target.tar.gz"
-base="https://github.com/cmbant/forformat/releases/latest/download/$archive"
-curl -LO "$base"
-curl -LO "$base.sha256"
-sha256sum -c "$archive.sha256"
-tar -xzf "$archive"
-mkdir -p "$HOME/.local/bin"
-install -m 0755 "forformat-$target/forformat" "$HOME/.local/bin/forformat"
-"$HOME/.local/bin/forformat" --version
-```
-
-Release archives also receive GitHub artifact provenance attestations. If the GitHub CLI is
-available, a downloaded archive can additionally be checked, for example:
-
-```sh
-gh attestation verify forformat-x86_64-unknown-linux-musl.tar.gz --repo cmbant/forformat
-```
-
-The Linux release binaries also embed their Rust dependency metadata with `cargo-auditable`. This
-provenance and dependency metadata are separate from platform code signing.
 
 For pre-commit, use the separate hook repository:
 
@@ -71,6 +40,10 @@ To build from source, install Rust 1.85 or newer:
 cargo build --locked --release
 "${CARGO_TARGET_DIR:-target}/release/forformat" --version
 ```
+
+Tagged release workflows also build static Linux archives for x86_64 and arm64. Checksums and
+GitHub provenance attestations are included with release artifacts for users who want to verify
+downloads; they are not required for normal PyPI or pre-commit installation.
 
 ## Quick start
 
@@ -114,23 +87,23 @@ forformat --stdin --project-context=src/module.f90 < src/module.f90
 The stdin bytes replace that file's stale on-disk contents during project analysis; only the stdin
 buffer is formatted. Pass a directory instead when the buffer has no corresponding source file.
 
-### Formatting modes
+## Formatting modes
 
-`--full` is the default. The five modes are:
+Full formatting is the default. The other modes are useful when you want a narrower transformation:
 
 - `--full` — normalization, wrapping, and findent-compatible layout.
 - `--indent-only` — findent-compatible indentation and trailing-whitespace handling only.
 - `--normalize-only` — normalization without structural layout or wrapping.
 - `--canonicalize-only` — canonical transformations without whitespace or layout normalization.
-- `--canonicalize-and-indent` — canonical transformations followed by findent-compatible indentation, without wrapping or full-mode post-layout alignment.
+- `--canonicalize-and-indent` — canonical transformations followed by findent-compatible
+  indentation, without wrapping or full-mode post-layout alignment.
 
-Normalizing modes target Fortran 2003 output by default, preserving the existing behavior that can
-modernize `(/ ... /)` array constructors to `[ ... ]`. Use `--target-standard=f95` (or
+Normalizing modes target Fortran 2003 output by default. Use `--target-standard=f95` (or
 `target_standard = "f95"` in configuration) to prevent the formatter from introducing syntax newer
 than Fortran 95. The target constrains formatter-generated syntax; it does not validate or downgrade
 syntax already present in the input.
 
-For example:
+Common examples:
 
 ```sh
 forformat --indent=4 --indent-module=0 --indent-procedure=0 src/module.f90
@@ -138,14 +111,10 @@ forformat --keyword-case=upper --line-length=100 src/module.f90
 forformat --canonicalize-and-indent src/module.f90
 ```
 
-Options configure formatter policy; they do not correspond one-for-one with internal formatting
-passes. Some safe full-mode transformations are part of the mode contract rather than separate
-switches.
-
-See **[CLI and configuration options](docs/options.md)** for the main user-facing option reference,
-defaults, configuration keys, and small examples. Legacy findent spellings that are not useful in
-normal operation are kept in the migration and compatibility docs instead. `forformat --help` is
-the compact terminal summary.
+See **[CLI and configuration options](docs/options.md)** for the full option reference, defaults,
+configuration keys, and examples. Legacy findent spellings that are only useful for compatibility
+are documented separately in [migration](docs/migration.md) and
+[compatibility](docs/compatibility.md). `forformat --help` is the compact terminal summary.
 
 ## Project configuration
 
@@ -172,7 +141,7 @@ precedence, and the full list of command-line-only settings.
 
 ## Python API
 
-Python callers can format text or bytes with the bundled native executable:
+Python callers can format text or bytes using the same formatter shipped with the package:
 
 ```python
 from forformat import format_source
@@ -199,7 +168,7 @@ unless `options` explicitly supplies `--config`.
 
 ## Development
 
-The Rust implementation is under `src/`; tests and golden fixtures are under `tests/`. Run:
+The implementation is under `src/`; tests and golden fixtures are under `tests/`. Run:
 
 ```sh
 ./tools/check_local.sh
@@ -210,10 +179,8 @@ advisories are reported separately so a newly published advisory does not unexpe
 otherwise unrelated pull request.
 
 For changes to full-mode normalization, wrapping, or layout, also run
-`./tools/check_fuzz_regression.sh` and the relevant focused properties. That script sweeps the
-fixture corpus through every libFuzzer target; `FUZZ_TIME=60 ./tools/check_fuzz_regression.sh`
-turns it into a mutating campaign, writing any crashing input to `fuzz/artifacts/`. See
-[`AGENTS.md`](AGENTS.md) for the full repository verification bar.
+`./tools/check_fuzz_regression.sh` and the relevant focused properties. See [`AGENTS.md`](AGENTS.md)
+for the full repository verification bar.
 
 ## Relationship to findent
 

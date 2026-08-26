@@ -5,8 +5,8 @@ findent-compatible indentation with lexical normalization, project-aware identif
 statement wrapping. `--indent-only` provides the findent-compatible indentation contract.
 
 The package installs the `forformat` command and an importable in-memory API. It requires Python
-3.9 or newer. Published wheels bundle the native Rust executable, so they do not require Rust or a
-Fortran compiler; Rust is only needed when building from source.
+3.9 or newer. Published wheels include the formatter, so normal installation does not require Rust
+or a Fortran compiler.
 
 ## Install
 
@@ -57,8 +57,8 @@ forformat --stdin < src/module.f90 > /tmp/module.f90
 forformat --stdout src/module.f90 > /tmp/module.f90
 ```
 
-The default input mode automatically detects fixed versus free form. A source detected as fixed
-form is skipped unchanged. Use `-ifree` or `--input-format=free` to force free-form handling, and
+Automatic fixed/free input detection is enabled by default. A source detected as fixed form is
+skipped unchanged. Use `-ifree` or `--input-format=free` to force free-form handling, and
 `--query-format` to print the detected form. Fixed-form output is unsupported.
 
 ## Modes and common options
@@ -67,40 +67,22 @@ form is skipped unchanged. Use `-ifree` or `--input-format=free` to force free-f
 - `--indent-only` — findent-compatible indentation and trailing-whitespace handling.
 - `--normalize-only` — normalization without structural layout or wrapping.
 - `--canonicalize-only` — canonical transformations without whitespace or layout normalization.
-- `--canonicalize-and-indent` — canonical transformations followed by findent-compatible indentation, without wrapping or full-mode post-layout alignment.
+- `--canonicalize-and-indent` — canonical transformations followed by findent-compatible
+  indentation, without wrapping or full-mode post-layout alignment.
 
-Normalizing modes target Fortran 2003 output by default, preserving the existing behavior that can
-modernize `(/ ... /)` array constructors to `[ ... ]`. Use `--target-standard=f95` (or
+Normalizing modes target Fortran 2003 output by default. Use `--target-standard=f95` (or
 `target_standard = "f95"` in configuration) to prevent the formatter from introducing syntax newer
 than Fortran 95. The target constrains formatter-generated syntax; it does not validate or downgrade
 syntax already present in the input.
 
-For example:
+Common examples:
 
 ```sh
 forformat --indent=4 --indent-module=0 --indent-procedure=0 src/module.f90
 forformat --keyword-case=upper --line-length=100 src/module.f90
 forformat --canonicalize-and-indent src/module.f90
-```
-
-If authored internal spacing must be preserved while both canonical spelling and structural
-indentation are wanted, use the combined mode:
-
-```sh
-forformat --canonicalize-and-indent src/module.f90
-```
-
-It is defined as canonicalize-only followed by indent-only with the same settings, so it preserves
-authored interior spacing, does not wrap statements, and does not run full-mode alignment passes.
-
-If all spelling must also be preserved, use the indentation-only mode:
-
-```sh
 forformat --indent-only src/module.f90
 ```
-
-This changes indentation and trailing whitespace but deliberately does not apply keyword casing or
-full-mode normalization.
 
 The main option reference, including defaults, project settings, and file-selection options, is in
 the [project documentation](https://github.com/cmbant/forformat/blob/main/docs/options.md).
