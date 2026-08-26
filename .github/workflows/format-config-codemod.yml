@@ -1,0 +1,616 @@
+name: FormatConfig staging codemod
+
+on:
+  push:
+    branches:
+      - refactor/format-config-staging
+
+permissions:
+  contents: write
+
+jobs:
+  codemod:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: refactor/format-config-staging
+          fetch-depth: 0
+      - name: Apply FormatConfig cleanup
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          def write(path, text):
+              Path(path).write_text(text)
+
+          # One numeric value is the whole state: zero is off, positive values
+          # retain the optional CLI level. There is no second boolean to disagree.
+          path = Path('src/config.rs')
+          text = path.read_text()
+          wrap_default = '''impl Default for WrapConfig {
+              fn default() -> Self {
+                  Self {
+                      enabled: true,
+                      line_length: 120,
+                  }
+              }
+          }
+          '''
+          feature_level = '''
+          /// Numeric setting for options whose level also acts as their enable switch.
+          ///
+          /// Zero disables the feature; positive values enable it while retaining the
+          /// exact optional numeric CLI value. Keeping both facts in one value makes
+          /// contradictory enabled/value states unrepresentable.
+          #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+          pub struct FeatureLevel(usize);
+
+          impl FeatureLevel {
+              pub const fn new(value: usize) -> Self {
+                  Self(value)
+              }
+
+              pub const fn enabled(self) -> bool {
+                  self.0 != 0
+              }
+
+              pub const fn value(self) -> usize {
+                  self.0
+              }
+          }
+
+          impl From<usize> for FeatureLevel {
+              fn from(value: usize) -> Self {
+                  Self::new(value)
+              }
+          }
+
+          impl From<bool> for FeatureLevel {
+              fn from(enabled: bool) -> Self {
+                  Self::new(enabled as usize)
+              }
+          }
+          '''
+          assert wrap_default in text
+          text = text.replace(wrap_default, wrap_default + feature_level, 1)
+          text = text.replace(
+              '''    /// Whether parenthesis alignment is enabled.  `align_paren_value` keeps
+              /// the optional numeric CLI value without breaking boolean API callers.
+              pub align_paren: bool,
+              pub align_paren_value: usize,
+          ''',
+              '''    /// Parenthesis-alignment level; zero disables the feature.
+              pub align_paren: FeatureLevel,
+          ''',
+          )
+          text = text.replace(
+              '''    /// Whether redundant-whitespace reduction is enabled.  The numeric mode
+              /// is retained in `ws_remred_value` for the optional CLI contract.
+              pub ws_remred: bool,
+              pub ws_remred_value: usize,
+              pub last_indent: bool,
+              pub last_usable: bool,
+          ''',
+              '''    /// Redundant-whitespace-reduction level; zero disables the feature.
+              pub ws_remred: FeatureLevel,
+          ''',
+          )
+          text = text.replace(
+              '''            align_paren: false,
+              align_paren_value: 0,
+          ''',
+              '''            align_paren: FeatureLevel::default(),
+          ''',
+          )
+          text = text.replace(
+              '''            ws_remred: false,
+              ws_remred_value: 0,
+              last_indent: false,
+              last_usable: false,
+          ''',
+              '''            ws_remred: FeatureLevel::default(),
+          ''',
+          )
+          assert 'align_paren_value' not in text
+          assert 'ws_remred_value' not in text
+          write(path, text)
+
+          # CLI option application writes the one canonical level value.
+          path = Path('src/cli/settings.rs')
+          text = path.read_text()
+          text = text.replace(
+              'config::{FormatConfig, FormatMode, FortranStandard, KeywordCase, MacroDefine},',
+              'config::{FeatureLevel, FormatConfig, FormatMode, FortranStandard, KeywordCase, MacroDefine},',
+          )
+          text = text.replace(
+              '''            Self::AlignParen(value) => {
+                  config.align_paren_value = *value;
+                  config.align_paren = *value != 0;
+              }
+              Self::WhitespaceReduction(value) => {
+                  config.ws_remred_value = *value;
+                  config.ws_remred = *value != 0;
+              }
+          ''',
+              '''            Self::AlignParen(value) => config.align_paren = FeatureLevel::new(*value),
+              Self::WhitespaceReduction(value) => config.ws_remred = FeatureLevel::new(*value),
+          ''',
+          )
+          write(path, text)
+
+          for name in ['src/format/planner.rs', 'src/format/emitter.rs']:
+              path = Path(name)
+              text = path.read_text()
+              text = text.replace(
+                  'config.align_paren || config.align_paren_value != 0',
+                  'config.align_paren.enabled()',
+              )
+              text = text.replace(
+                  'config.ws_remred || config.ws_remred_value != 0',
+                  'config.ws_remred.enabled()',
+              )
+              write(path, text)
+
+          # Collapse public Rust construction sites to the single level field.
+          # The numeric member is intentionally the source of truth because it
+          # preserves the complete CLI value rather than only its nonzero-ness.
+          def collapse_pairs(path):
+              text = path.read_text()
+              for field, value_field in [
+                  ('align_paren', 'align_paren_value'),
+                  ('ws_remred', 'ws_remred_value'),
+              ]:
+                  # Struct literal, bool first then numeric value.
+                  pat = re.compile(
+                      rf'(?m)^(?P<i>[ \t]*){field}:\s*[^,\n]+,\n(?P=i){value_field}:\s*(?P<v>[^,\n]+),'
+                  )
+                  text = pat.sub(
+                      lambda m: f"{m.group('i')}{field}: ({m.group('v').strip()}).into(),",
+                      text,
+                  )
+                  # Struct literal, numeric value first then bool.
+                  pat = re.compile(
+                      rf'(?m)^(?P<i>[ \t]*){value_field}:\s*(?P<v>[^,\n]+),\n(?P=i){field}:\s*[^,\n]+,'
+                  )
+                  text = pat.sub(
+                      lambda m: f"{m.group('i')}{field}: ({m.group('v').strip()}).into(),",
+                      text,
+                  )
+                  # Shorthand numeric field (used by the fuzz target), then bool.
+                  pat = re.compile(
+                      rf'(?m)^(?P<i>[ \t]*){value_field},\n(?P=i){field}:\s*[^,\n]+,'
+                  )
+                  text = pat.sub(
+                      lambda m: f"{m.group('i')}{field}: {value_field}.into(),",
+                      text,
+                  )
+                  # Assignment pair, bool first then numeric value.
+                  pat = re.compile(
+                      rf'(?m)^(?P<i>[ \t]*)(?P<obj>[A-Za-z_][A-Za-z0-9_\.]*)\.{field}\s*=\s*[^;]+;\n(?P=i)(?P=obj)\.{value_field}\s*=\s*(?P<v>[^;]+);'
+                  )
+                  text = pat.sub(
+                      lambda m: f"{m.group('i')}{m.group('obj')}.{field} = ({m.group('v').strip()}).into();",
+                      text,
+                  )
+                  # Assignment pair, numeric first then bool.
+                  pat = re.compile(
+                      rf'(?m)^(?P<i>[ \t]*)(?P<obj>[A-Za-z_][A-Za-z0-9_\.]*)\.{value_field}\s*=\s*(?P<v>[^;]+);\n(?P=i)(?P=obj)\.{field}\s*=\s*[^;]+;'
+                  )
+                  text = pat.sub(
+                      lambda m: f"{m.group('i')}{m.group('obj')}.{field} = ({m.group('v').strip()}).into();",
+                      text,
+                  )
+
+              # Remaining value-field occurrences are reads, principally CLI tests.
+              text = text.replace('.align_paren_value', '.align_paren.value()')
+              text = text.replace('.ws_remred_value', '.ws_remred.value()')
+
+              # A few construction sites only supplied the old boolean. Preserve
+              # their meaning through From<bool>.
+              if path.as_posix() != 'src/config.rs':
+                  for field in ['align_paren', 'ws_remred']:
+                      pat = re.compile(rf'(?m)^(?P<i>[ \t]*){field}:\s*(?P<v>true|false|align),$')
+                      text = pat.sub(
+                          lambda m: f"{m.group('i')}{field}: ({m.group('v')}).into(),",
+                          text,
+                      )
+                      pat = re.compile(
+                          rf'(?m)^(?P<i>[ \t]*)(?P<obj>[A-Za-z_][A-Za-z0-9_\.]*)\.{field}\s*=\s*(?P<v>true|false);$'
+                      )
+                      text = pat.sub(
+                          lambda m: f"{m.group('i')}{m.group('obj')}.{field} = ({m.group('v')}).into();",
+                          text,
+                      )
+              path.write_text(text)
+
+          for path in Path('.').rglob('*.rs'):
+              collapse_pairs(path)
+
+          # Boolean assertions over the old pair become explicit queries of the
+          # value object; numeric assertions already became `.value()` above.
+          path = Path('src/cli/tests.rs')
+          text = path.read_text()
+          text = text.replace('.align_paren);', '.align_paren.enabled());')
+          text = text.replace('.ws_remred);', '.ws_remred.enabled());')
+          text = text.replace(
+              '''    assert!(invocation.config.last_indent);
+              assert!(invocation.config.last_usable);
+          ''',
+              '''    assert_eq!(invocation.indent_query, Some(super::IndentQuery::Both));
+          ''',
+          )
+          write(path, text)
+
+          # Query intent belongs to the invocation, not formatting policy.
+          path = Path('src/cli.rs')
+          text = path.read_text()
+          anchor = '''/// Parsed command-line state. Formatting remains configured by
+          /// [`FormatConfig`]; file/project policy lives here.
+          '''
+          query_enum = '''/// Metadata-only indentation query requested by the CLI.
+          ///
+          /// `Both` preserves the historical combined-option behavior: the CLI
+          /// reports `last_usable`, which previously won the engine's output branch.
+          #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+          pub enum IndentQuery {
+              LastIndent,
+              LastUsable,
+              Both,
+          }
+
+          '''
+          assert anchor in text
+          text = text.replace(anchor, query_enum + anchor, 1)
+          text = text.replace(
+              '    pub query_format: bool,\n',
+              '    pub query_format: bool,\n    pub indent_query: Option<IndentQuery>,\n',
+              1,
+          )
+          write(path, text)
+
+          path = Path('src/cli/draft.rs')
+          text = path.read_text()
+          text = text.replace('    ContextPath, Invocation,\n', '    ContextPath, IndentQuery, Invocation,\n', 1)
+          text = text.replace(
+              '''#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+          enum IndentQuery {
+              LastIndent,
+              LastUsable,
+              Both,
+          }
+
+          ''',
+              '',
+              1,
+          )
+          text = text.replace(
+              'pub(super) fn finish(mut self, mut config: FormatConfig) -> Result<Invocation, FormatError> {',
+              'pub(super) fn finish(mut self, config: FormatConfig) -> Result<Invocation, FormatError> {',
+              1,
+          )
+          old = '''        let (stdout, check, diff, show_files, query_format, last_indent, last_usable) = match action
+              {
+                  Action::Rewrite => (false, false, false, false, false, false, false),
+                  Action::Stdout => (true, false, false, false, false, false, false),
+                  Action::Check => (false, true, false, false, false, false, false),
+                  Action::Diff { check } => (false, check, true, false, false, false, false),
+                  Action::ShowFiles => (false, false, false, true, false, false, false),
+                  Action::QueryFormat => (false, false, false, false, true, false, false),
+                  Action::IndentQuery(IndentQuery::LastIndent) => {
+                      (false, false, false, false, false, true, false)
+                  }
+                  Action::IndentQuery(IndentQuery::LastUsable) => {
+                      (false, false, false, false, false, false, true)
+                  }
+                  Action::IndentQuery(IndentQuery::Both) => {
+                      (false, false, false, false, false, true, true)
+                  }
+              };
+              config.last_indent = last_indent;
+              config.last_usable = last_usable;
+          '''
+          new = '''        let (stdout, check, diff, show_files, query_format, indent_query) = match action {
+                  Action::Rewrite => (false, false, false, false, false, None),
+                  Action::Stdout => (true, false, false, false, false, None),
+                  Action::Check => (false, true, false, false, false, None),
+                  Action::Diff { check } => (false, check, true, false, false, None),
+                  Action::ShowFiles => (false, false, false, true, false, None),
+                  Action::QueryFormat => (false, false, false, false, true, None),
+                  Action::IndentQuery(query) => (false, false, false, false, false, Some(query)),
+              };
+          '''
+          assert old in text
+          text = text.replace(old, new, 1)
+          text = text.replace(
+              '            query_format,\n            isolated,\n',
+              '            query_format,\n            indent_query,\n            isolated,\n',
+              1,
+          )
+          write(path, text)
+
+          path = Path('src/cli/draft/tests.rs')
+          text = path.read_text()
+          text = text.replace('cli::{parse, Command},', 'cli::{parse, Command, IndentQuery},')
+          text = text.replace(
+              '''    assert!(invocation.config.last_indent);
+              assert!(invocation.config.last_usable);
+          ''',
+              '''    assert_eq!(invocation.indent_query, Some(IndentQuery::Both));
+          ''',
+          )
+          write(path, text)
+
+          path = Path('src/cli/parse.rs')
+          text = path.read_text()
+          old = '''        // Query modes are CLI-only action state, not formatter configuration,
+                  // so retain those two engine-facing compatibility bits when replacing
+                  // the preliminary CLI-only FormatConfig with the merged one.
+                  format.last_indent = invocation.config.last_indent;
+                  format.last_usable = invocation.config.last_usable;
+                  invocation.config = format;
+          '''
+          assert old in text
+          text = text.replace(
+              old,
+              '''        // Query modes stay on Invocation; replacing the preliminary
+                  // formatter config therefore cannot erase action state.
+                  invocation.config = format;
+          ''',
+              1,
+          )
+          write(path, text)
+
+          # The engine always emits formatting output; metadata-only querying is
+          # a separate planner pass and cannot accidentally suppress emission.
+          path = Path('src/format/engine.rs')
+          text = path.read_text()
+          start = text.index('pub fn format_buffer')
+          end = text.index('\n/// Write the physical lines of one planned group.', start)
+          replacement = '''pub fn query(source: &[u8], config: &FormatConfig) -> Result<FormatMeta, FormatError> {
+              let buf = SourceBuffer::new(source)?;
+              query_buffer(&buf, config)
+          }
+
+          fn query_buffer<B: AsRef<[u8]>>(
+              buf: &SourceBuffer<B>,
+              config: &FormatConfig,
+          ) -> Result<FormatMeta, FormatError> {
+              if buf.bytes.as_ref().is_empty() {
+                  return Ok(FormatMeta {
+                      last_indent: 0,
+                      last_usable: 1,
+                      declines: Vec::new(),
+                  });
+              }
+              let mut planner = Planner::new(config);
+              let mut last_indent = 0;
+              let mut last_usable = 1;
+              LogicalGroup::visit(buf, |group| {
+                  let plan = planner.plan(buf, &group, config);
+                  if let Some(value) = plan.last_indent {
+                      last_indent = value;
+                  }
+                  if let Some(value) = plan.last_usable {
+                      last_usable = value;
+                  }
+                  Ok(())
+              })?;
+              Ok(FormatMeta {
+                  last_indent,
+                  last_usable,
+                  declines: Vec::new(),
+              })
+          }
+
+          pub fn format_buffer<B: AsRef<[u8]>, W: Write>(
+              buf: &SourceBuffer<B>,
+              config: &FormatConfig,
+              out: &mut W,
+          ) -> Result<FormatMeta, FormatError> {
+              if buf.bytes.as_ref().is_empty() {
+                  return Ok(FormatMeta {
+                      last_indent: 0,
+                      last_usable: 1,
+                      declines: Vec::new(),
+                  });
+              }
+              let mut planner = Planner::new(config);
+              let mut last_indent = 0;
+              let mut last_usable = 1;
+              LogicalGroup::visit(buf, |group| {
+                  let plan = planner.plan(buf, &group, config);
+                  if let Some(value) = plan.last_indent {
+                      last_indent = value;
+                  }
+                  if let Some(value) = plan.last_usable {
+                      last_usable = value;
+                  }
+                  emit_group(buf, &plan, config, out)
+              })?;
+              Ok(FormatMeta {
+                  last_indent,
+                  last_usable,
+                  declines: Vec::new(),
+              })
+          }
+          '''
+          text = text[:start] + replacement + text[end:]
+          write(path, text)
+
+          path = Path('src/io/report.rs')
+          text = path.read_text()
+          text = text.replace(
+              '''    !invocation.force_free_input
+                  && !invocation.config.last_indent
+                  && !invocation.config.last_usable
+          ''',
+              '''    !invocation.force_free_input
+                  && invocation.indent_query.is_none()
+          ''',
+              1,
+          )
+          write(path, text)
+
+          path = Path('src/io/mod.rs')
+          text = path.read_text()
+          text = text.replace('    cli::Invocation,\n', '    cli::{IndentQuery, Invocation},\n', 1)
+          anchor = '''fn source_form_name(form: SourceForm) -> &'static str {
+          '''
+          query_fn = '''fn execute_indent_query(
+              invocation: &Invocation,
+              query: IndentQuery,
+          ) -> Result<i32, WorkflowError> {
+              let mut source = Vec::new();
+              io::stdin().read_to_end(&mut source)?;
+              let meta = crate::format::engine::query(&source, &invocation.config)?;
+              let value = match query {
+                  IndentQuery::LastIndent => meta.last_indent,
+                  IndentQuery::LastUsable | IndentQuery::Both => meta.last_usable,
+              };
+              write_all_stdout(format!("{value}\\n").as_bytes())?;
+              Ok(0)
+          }
+
+          '''
+          assert anchor in text
+          text = text.replace(anchor, query_fn + anchor, 1)
+          text = text.replace(
+              '''    if invocation.query_format {
+                  return execute_query_format(invocation);
+              }
+          ''',
+              '''    if invocation.query_format {
+                  return execute_query_format(invocation);
+              }
+              if let Some(query) = invocation.indent_query {
+                  return execute_indent_query(&invocation, query);
+              }
+          ''',
+              1,
+          )
+          write(path, text)
+
+          path = Path('src/lib.rs')
+          text = path.read_text()
+          text = text.replace(
+              '    ConstructIndents, FormatConfig, FormatMode, FortranStandard, KeywordCase, MacroDefine,\n',
+              '    ConstructIndents, FeatureLevel, FormatConfig, FormatMode, FortranStandard, KeywordCase,\n    MacroDefine,\n',
+              1,
+          )
+          old = '''    #[test]
+              fn empty_queries_have_stable_results() {
+                  let indent = FormatConfig {
+                      last_indent: true,
+                      ..indent_only_config()
+                  };
+                  assert_eq!(format_source(b"", &indent).unwrap().bytes, b"0\\n");
+                  let usable = FormatConfig {
+                      last_usable: true,
+                      ..indent_only_config()
+                  };
+                  assert_eq!(format_source(b"", &usable).unwrap().bytes, b"1\\n");
+              }
+
+              #[test]
+              fn queries_emit_only_the_requested_metadata() {
+                  let input = b"program p\\nx=1\\n";
+                  let indent = FormatConfig {
+                      last_indent: true,
+                      ..indent_only_config()
+                  };
+                  assert_eq!(format_source(input, &indent).unwrap().bytes, b"3\\n");
+
+                  let usable = FormatConfig {
+                      last_usable: true,
+                      ..indent_only_config()
+                  };
+                  assert_eq!(format_source(input, &usable).unwrap().bytes, b"2\\n");
+
+                  let both = FormatConfig {
+                      last_indent: true,
+                      last_usable: true,
+                      ..indent_only_config()
+                  };
+                  assert_eq!(format_source(input, &both).unwrap().bytes, b"2\\n");
+              }
+          '''
+          new = '''    #[test]
+              fn indentation_query_metadata_is_stable() {
+                  let config = indent_only_config();
+                  let empty = crate::format::engine::query(b"", &config).unwrap();
+                  assert_eq!((empty.last_indent, empty.last_usable), (0, 1));
+
+                  let meta = crate::format::engine::query(b"program p\\nx=1\\n", &config).unwrap();
+                  assert_eq!((meta.last_indent, meta.last_usable), (3, 2));
+              }
+          '''
+          assert old in text
+          text = text.replace(old, new, 1)
+          write(path, text)
+
+          # Add an end-to-end CLI guard for the action-level query path.
+          path = Path('tests/io_workflow.rs')
+          text = path.read_text()
+          test = r'''
+
+          #[test]
+          fn indentation_queries_emit_only_metadata_from_stdin() {
+              let repo = temp_repo();
+              let source = b"program p\nx=1\n";
+
+              let indent = run_stdin(&repo, &["-lastindent"], source);
+              assert_eq!(indent.status.code(), Some(0));
+              assert_eq!(indent.stdout, b"3\n");
+
+              let usable = run_stdin(&repo, &["--last-usable"], source);
+              assert_eq!(usable.status.code(), Some(0));
+              assert_eq!(usable.stdout, b"2\n");
+
+              let both = run_stdin(&repo, &["-lastindent", "-lastusable"], source);
+              assert_eq!(both.status.code(), Some(0));
+              assert_eq!(both.stdout, b"2\n");
+
+              let empty_indent = run_stdin(&repo, &["-lastindent"], b"");
+              assert_eq!(empty_indent.stdout, b"0\n");
+              let empty_usable = run_stdin(&repo, &["-lastusable"], b"");
+              assert_eq!(empty_usable.stdout, b"1\n");
+
+              let _ = fs::remove_dir_all(repo);
+          }
+          '''
+          if 'fn indentation_queries_emit_only_metadata_from_stdin()' not in text:
+              text += test
+          write(path, text)
+
+          # No production code should retain the old paired field names or query
+          # flags as FormatConfig members. Local variable names in the fuzz target
+          # are fine; field/member syntax is not.
+          offenders = []
+          for path in Path('.').rglob('*.rs'):
+              text = path.read_text()
+              for needle in ['.align_paren_value', '.ws_remred_value', 'config.last_indent', 'config.last_usable']:
+                  if needle in text:
+                      offenders.append(f'{path}: {needle}')
+              for needle in ['align_paren_value:', 'ws_remred_value:', 'last_indent: true', 'last_usable: true']:
+                  if needle in text:
+                      offenders.append(f'{path}: {needle}')
+          if offenders:
+              raise SystemExit('unconverted config references:\n' + '\n'.join(offenders))
+          PY
+      - name: Format Rust sources
+        run: |
+          rustup component add rustfmt
+          cargo fmt --all
+      - name: Commit staged cleanup
+        shell: bash
+        run: |
+          rm .github/workflows/format-config-codemod.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Stage FormatConfig state cleanup'
+          git push origin HEAD:refactor/format-config-staging
