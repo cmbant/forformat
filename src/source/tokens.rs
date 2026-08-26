@@ -86,9 +86,7 @@ impl Token<'_> {
 pub fn tokenize<'a>(s: &'a [u8], state: &mut LexState) -> Vec<Token<'a>> {
     let mut depth = 0usize;
     let mut out = Vec::new();
-    let mut regions = Vec::new();
-    state.scan(s, |region| regions.push(region));
-    for region in regions {
+    state.scan(s, |region| {
         let range = region.range.clone();
         match region.kind {
             RegionKind::StringLiteral => out.push(Token {
@@ -117,7 +115,7 @@ pub fn tokenize<'a>(s: &'a [u8], state: &mut LexState) -> Vec<Token<'a>> {
             }),
             RegionKind::Code => lex_code(s, range, &mut depth, &mut out),
         }
-    }
+    });
     out
 }
 
