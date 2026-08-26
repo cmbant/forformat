@@ -68,6 +68,7 @@ pub(crate) enum OptionId {
     OpenmpCase,
     RelationalSymbols,
     ArrayBrackets,
+    ModernizeDecls,
     CompactMultiplicative,
     JoinGoto,
     SplitCompoundKeywords,
@@ -632,6 +633,18 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
     .help(
         "--array-brackets=<BOOL>",
         "rewrite `(/ ... /)` as `[ ... ]` (default true)",
+    ),
+    OptionSpec::new(
+        OptionId::ModernizeDecls,
+        "modernize-decls",
+        ValueKind::Boolean,
+    )
+    .aliases(&["modernize-declarations"])
+    .config(ConfigMapping::Same)
+    .default_text("false")
+    .help(
+        "--modernize-decls=<BOOL>",
+        "insert `::` in legacy declarations (default false)",
     ),
     OptionSpec::new(
         OptionId::CompactMultiplicative,
