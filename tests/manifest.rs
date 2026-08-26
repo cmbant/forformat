@@ -66,7 +66,18 @@ fn checked_in_manifest_covers_success_and_rejection_paths() {
                     other => panic!("unknown manifest project {other} in case {}", case.name),
                 };
                 match formatted {
-                    Ok(result) => (result.bytes, String::new(), 0),
+                    Ok(result) => {
+                        let stdout = match invocation.indent_query {
+                            Some(cli::IndentQuery::LastIndent) => {
+                                format!("{}\n", result.meta.last_indent).into_bytes()
+                            }
+                            Some(cli::IndentQuery::LastUsable | cli::IndentQuery::Both) => {
+                                format!("{}\n", result.meta.last_usable).into_bytes()
+                            }
+                            None => result.bytes,
+                        };
+                        (stdout, String::new(), 0)
+                    }
                     Err(error) => (Vec::new(), format_error(error), 1),
                 }
             }

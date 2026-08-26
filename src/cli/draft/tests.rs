@@ -1,5 +1,5 @@
 use crate::{
-    cli::{parse, Command},
+    cli::{parse, Command, IndentQuery},
     error::FormatError,
 };
 
@@ -41,8 +41,7 @@ fn typed_actions_preserve_supported_combinations() {
     .unwrap() else {
         panic!("expected run")
     };
-    assert!(invocation.config.last_indent);
-    assert!(invocation.config.last_usable);
+    assert_eq!(invocation.indent_query, Some(IndentQuery::Both));
 }
 
 #[test]

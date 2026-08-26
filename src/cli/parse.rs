@@ -52,11 +52,8 @@ where
 
     let mut command = preliminary.command;
     if let Command::Run(invocation) = &mut command {
-        // Query modes are CLI-only action state, not formatter configuration,
-        // so retain those two engine-facing compatibility bits when replacing
-        // the preliminary CLI-only FormatConfig with the merged one.
-        format.last_indent = invocation.config.last_indent;
-        format.last_usable = invocation.config.last_usable;
+        // Query modes stay on Invocation; replacing the preliminary
+        // formatter config therefore cannot erase action state.
         invocation.config = format;
 
         invocation.no_submodules = preliminary

@@ -31,6 +31,17 @@ pub struct ContextPath {
     pub base: Option<PathBuf>,
 }
 
+/// Metadata-only indentation query requested by the CLI.
+///
+/// `Both` preserves the historical combined-option behavior: the CLI
+/// reports `last_usable`, which previously won the engine output branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndentQuery {
+    LastIndent,
+    LastUsable,
+    Both,
+}
+
 /// Parsed command-line state. Formatting remains configured by
 /// [`FormatConfig`]; file/project policy lives here.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +57,7 @@ pub struct Invocation {
     pub stdout: bool,
     pub force_free_input: bool,
     pub query_format: bool,
+    pub indent_query: Option<IndentQuery>,
     pub isolated: bool,
     pub check: bool,
     pub diff: bool,

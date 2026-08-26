@@ -55,18 +55,12 @@ pub fn format_buffer<B: AsRef<[u8]>, W: Write>(
     out: &mut W,
 ) -> Result<FormatMeta, FormatError> {
     if buf.bytes.as_ref().is_empty() {
-        if config.last_usable {
-            writeln!(out, "1").map_err(FormatError::Write)?;
-        } else if config.last_indent {
-            writeln!(out, "0").map_err(FormatError::Write)?;
-        }
         return Ok(FormatMeta {
             last_indent: 0,
             last_usable: 1,
             declines: Vec::new(),
         });
     }
-    let query_mode = config.last_indent || config.last_usable;
     let mut planner = Planner::new(config);
     let mut last_indent = 0;
     let mut last_usable = 1;
@@ -78,28 +72,8 @@ pub fn format_buffer<B: AsRef<[u8]>, W: Write>(
         if let Some(value) = plan.last_usable {
             last_usable = value;
         }
-        if query_mode {
-            Ok(())
-        } else {
-            emit_group(buf, &plan, config, out)
-        }
+        emit_group(buf, &plan, config, out)
     })?;
-    if config.last_usable {
-        writeln!(out, "{last_usable}").map_err(FormatError::Write)?;
-        return Ok(FormatMeta {
-            last_indent,
-            last_usable,
-            declines: Vec::new(),
-        });
-    }
-    if config.last_indent {
-        writeln!(out, "{last_indent}").map_err(FormatError::Write)?;
-        return Ok(FormatMeta {
-            last_indent,
-            last_usable,
-            declines: Vec::new(),
-        });
-    }
     Ok(FormatMeta {
         last_indent,
         last_usable,

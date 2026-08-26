@@ -46,8 +46,8 @@ pub mod transform;
 
 pub use analysis::{analyze_project, ProjectContext};
 pub use config::{
-    ConstructIndents, FormatConfig, FormatMode, FortranStandard, KeywordCase, MacroDefine,
-    StyleConfig, WrapConfig,
+    ConstructIndents, FeatureLevel, FormatConfig, FormatMode, FortranStandard, KeywordCase,
+    MacroDefine, StyleConfig, WrapConfig,
 };
 pub use error::FormatError;
 
@@ -266,40 +266,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_queries_have_stable_results() {
-        let indent = FormatConfig {
-            last_indent: true,
-            ..indent_only_config()
-        };
-        assert_eq!(format_source(b"", &indent).unwrap().bytes, b"0\n");
-        let usable = FormatConfig {
-            last_usable: true,
-            ..indent_only_config()
-        };
-        assert_eq!(format_source(b"", &usable).unwrap().bytes, b"1\n");
-    }
+    fn formatting_metadata_is_stable() {
+        let config = indent_only_config();
+        let empty = format_source(b"", &config).unwrap().meta;
+        assert_eq!((empty.last_indent, empty.last_usable), (0, 1));
 
-    #[test]
-    fn queries_emit_only_the_requested_metadata() {
-        let input = b"program p\nx=1\n";
-        let indent = FormatConfig {
-            last_indent: true,
-            ..indent_only_config()
-        };
-        assert_eq!(format_source(input, &indent).unwrap().bytes, b"3\n");
-
-        let usable = FormatConfig {
-            last_usable: true,
-            ..indent_only_config()
-        };
-        assert_eq!(format_source(input, &usable).unwrap().bytes, b"2\n");
-
-        let both = FormatConfig {
-            last_indent: true,
-            last_usable: true,
-            ..indent_only_config()
-        };
-        assert_eq!(format_source(input, &both).unwrap().bytes, b"2\n");
+        let meta = format_source(b"program p\nx=1\n", &config).unwrap().meta;
+        assert_eq!((meta.last_indent, meta.last_usable), (3, 2));
     }
 
     #[test]

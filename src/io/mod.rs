@@ -31,7 +31,7 @@ pub use write::atomic_replace;
 
 use crate::{
     analysis::{analyze_file, analyze_file_at},
-    cli::Invocation,
+    cli::{IndentQuery, Invocation},
     error::FormatError,
     format_source,
     source::SourceForm,
@@ -390,11 +390,7 @@ fn format_bare_stdin(invocation: &Invocation) -> Result<i32, WorkflowError> {
         return Ok(0);
     }
     let result = in_input(format_source(&source, &invocation.config), None, None)?;
-    let mut declines = DeclineReporter::default();
-    declines.report(&result.meta, None, None);
-    declines.finish();
-    write_all_stdout(&result.bytes)?;
-    Ok(0)
+    write_stdin_result(invocation, result, None)
 }
 
 /// The two stdin routes that answer before any project source is read: a
@@ -423,11 +419,7 @@ fn stdin_shortcut(
             None,
             scope.root.as_deref(),
         )?;
-        let mut declines = DeclineReporter::default();
-        declines.report(&formatted.meta, None, scope.root.as_deref());
-        declines.finish();
-        write_all_stdout(&formatted.bytes)?;
-        return Ok(Some(0));
+        return write_stdin_result(invocation, formatted, scope.root.as_deref()).map(Some);
     }
     Ok(None)
 }
@@ -487,10 +479,32 @@ fn format_project_stdin(
             scope.root.as_deref(),
         )?
     };
+    write_stdin_result(invocation, formatted, scope.root.as_deref())
+}
+
+/// Deliver one successfully formatted stdin buffer.
+///
+/// Indentation queries intentionally share every preparation step with ordinary
+/// stdin formatting — source-form handling, project/context resolution,
+/// normalization, wrapping, and layout. Only the final delivery differs: a
+/// query prints one metadata value instead of the formatted bytes.
+fn write_stdin_result(
+    invocation: &Invocation,
+    formatted: crate::FormatResult,
+    root: Option<&Path>,
+) -> Result<i32, WorkflowError> {
     let mut declines = DeclineReporter::default();
-    declines.report(&formatted.meta, None, scope.root.as_deref());
+    declines.report(&formatted.meta, None, root);
     declines.finish();
-    write_all_stdout(&formatted.bytes)?;
+    if let Some(query) = invocation.indent_query {
+        let value = match query {
+            IndentQuery::LastIndent => formatted.meta.last_indent,
+            IndentQuery::LastUsable | IndentQuery::Both => formatted.meta.last_usable,
+        };
+        write_all_stdout(format!("{value}\n").as_bytes())?;
+    } else {
+        write_all_stdout(&formatted.bytes)?;
+    }
     Ok(0)
 }
 

@@ -100,12 +100,12 @@ fn overloaded_short_options_accept_attached_and_separated_values() {
 #[test]
 fn optional_values_are_not_taken_from_the_next_argument() {
     let bare = run(&["--align_paren"]);
-    assert!(bare.align_paren);
-    assert_eq!(bare.align_paren_value, 1);
-    assert!(!run(&["--align-paren=0"]).align_paren);
-    assert_eq!(run(&["--align_paren=4"]).align_paren_value, 4);
-    assert!(run(&["--ws-remred"]).ws_remred);
-    assert_eq!(run(&["--ws_remred=0"]).ws_remred_value, 0);
+    assert!(bare.align_paren.enabled());
+    assert_eq!(bare.align_paren.value(), 1);
+    assert!(!run(&["--align-paren=0"]).align_paren.enabled());
+    assert_eq!(run(&["--align_paren=4"]).align_paren.value(), 4);
+    assert!(run(&["--ws-remred"]).ws_remred.enabled());
+    assert_eq!(run(&["--ws_remred=0"]).ws_remred.value(), 0);
 
     let Command::Run(invocation) = parse(
         ["forformat", "--no-config", "--wrap", "source.f90"]
@@ -189,8 +189,7 @@ fn legacy_boolean_and_refactor_options_honor_explicit_values() {
         "--uppercase-single-l=false",
         "--refactor-end=false",
     ]);
-    assert!(invocation.config.last_indent);
-    assert!(invocation.config.last_usable);
+    assert_eq!(invocation.indent_query, Some(super::IndentQuery::Both));
     assert!(!invocation.config.uppercase_single_l);
     assert!(!invocation.config.refactor_end);
 
@@ -359,13 +358,13 @@ fn long_alias_spellings_and_optional_values_have_a_matrix() {
         );
     }
 
-    assert_eq!(run(&["--align_paren"]).align_paren_value, 1);
-    assert!(!run(&["--align-paren=0"]).align_paren);
-    assert!(run(&["--align_paren=1"]).align_paren);
-    assert_eq!(run(&["--align-paren=7"]).align_paren_value, 7);
-    assert_eq!(run(&["--ws_remred"]).ws_remred_value, 1);
-    assert!(!run(&["--ws-remred=0"]).ws_remred);
-    assert!(run(&["--ws_remred=1"]).ws_remred);
+    assert_eq!(run(&["--align_paren"]).align_paren.value(), 1);
+    assert!(!run(&["--align-paren=0"]).align_paren.enabled());
+    assert!(run(&["--align_paren=1"]).align_paren.enabled());
+    assert_eq!(run(&["--align-paren=7"]).align_paren.value(), 7);
+    assert_eq!(run(&["--ws_remred"]).ws_remred.value(), 1);
+    assert!(!run(&["--ws-remred=0"]).ws_remred.enabled());
+    assert!(run(&["--ws_remred=1"]).ws_remred.enabled());
 }
 
 #[test]

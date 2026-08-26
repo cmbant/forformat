@@ -9,10 +9,8 @@ fuzz_target!(|input: &[u8]| {
     let align_paren_value = input.first().copied().unwrap_or(0) as usize;
     let ws_remred_value = input.get(1).copied().unwrap_or(0) as usize;
     let config = FormatConfig {
-        align_paren_value,
-        align_paren: align_paren_value != 0,
-        ws_remred_value,
-        ws_remred: ws_remred_value != 0,
+        align_paren: align_paren_value.into(),
+        ws_remred: ws_remred_value.into(),
         ..FormatConfig::default()
     };
     let _ = format_source(input, &config);

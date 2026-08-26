@@ -114,8 +114,7 @@ pub(super) fn skips_fixed_form(
     source: &[u8],
 ) -> bool {
     !invocation.force_free_input
-        && !invocation.config.last_indent
-        && !invocation.config.last_usable
+        && invocation.indent_query.is_none()
         && source.iter().any(|byte| !byte.is_ascii_whitespace())
         && input_path.map_or_else(
             || crate::source::detect(source),
