@@ -1,9 +1,7 @@
 name: Publish Python package to PyPI
 
 on:
-  push:
-    tags:
-      - "v*"
+  workflow_call:
 
 permissions:
   contents: read

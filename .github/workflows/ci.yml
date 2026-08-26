@@ -1,7 +1,9 @@
-name: Rust conversion checks
+name: forformat checks
 
 on:
   push:
+    branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -33,6 +35,7 @@ jobs:
       - run: ./tools/check_package.sh
       - run: cargo bench --locked --bench throughput
       - uses: actions/upload-artifact@v7
+        if: startsWith(github.ref, 'refs/tags/')
         with:
           name: release-measurements
           path: target/release-metrics.txt
@@ -182,7 +185,7 @@ jobs:
   windows-artifact:
     name: Windows release artifact
     needs: checks
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     env:
       RUSTFLAGS: >-
@@ -229,9 +232,16 @@ jobs:
             throw "reproducible Windows build hash mismatch"
           }
 
-          "$a  forformat.exe" |
+          $artifact =
+            "target/repro-a/x86_64-pc-windows-msvc/release/forformat-x86_64-pc-windows-msvc.exe"
+
+          Copy-Item `
+            target/repro-a/x86_64-pc-windows-msvc/release/forformat.exe `
+            $artifact
+
+          "$a  forformat-x86_64-pc-windows-msvc.exe" |
             Out-File `
-              target/repro-a/x86_64-pc-windows-msvc/release/forformat.exe.sha256 `
+              "$artifact.sha256" `
               -Encoding ascii
 
           Write-Output $a
@@ -240,23 +250,93 @@ jobs:
         with:
           name: forformat-x86_64-pc-windows-msvc
           path: |
-            target/repro-a/x86_64-pc-windows-msvc/release/forformat.exe
-            target/repro-a/x86_64-pc-windows-msvc/release/forformat.exe.sha256
+            target/repro-a/x86_64-pc-windows-msvc/release/forformat-x86_64-pc-windows-msvc.exe
+            target/repro-a/x86_64-pc-windows-msvc/release/forformat-x86_64-pc-windows-msvc.exe.sha256
+
+  macos-artifacts:
+    name: macOS release artifact (${{ matrix.target }})
+    needs: checks
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            arch: x86_64
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+
+      - name: Build reproducible binary A
+        shell: bash
+        run: |
+          CARGO_TARGET_DIR=target/repro-a \
+            cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Build reproducible binary B
+        shell: bash
+        run: |
+          CARGO_TARGET_DIR=target/repro-b \
+            cargo build --locked --release --target ${{ matrix.target }}
+
+      - name: Verify reproducible macOS binary and package it
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          target=${{ matrix.target }}
+          a="target/repro-a/$target/release/forformat"
+          b="target/repro-b/$target/release/forformat"
+          artifact="target/repro-a/$target/release/forformat-$target"
+
+          test "$(shasum -a 256 "$a" | awk '{print $1}')" = \
+               "$(shasum -a 256 "$b" | awk '{print $1}')"
+          test "$(lipo -archs "$a")" = "${{ matrix.arch }}"
+
+          cp "$a" "$artifact"
+          (
+            cd "$(dirname "$artifact")"
+            shasum -a 256 "$(basename "$artifact")" \
+              > "$(basename "$artifact").sha256"
+          )
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: forformat-${{ matrix.target }}
+          path: |
+            target/repro-a/${{ matrix.target }}/release/forformat-${{ matrix.target }}
+            target/repro-a/${{ matrix.target }}/release/forformat-${{ matrix.target }}.sha256
 
   artifact-verification:
-    name: verify Linux release artifacts
+    name: verify release artifacts
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    needs: static-artifacts
+    needs: [static-artifacts, windows-artifact, macos-artifacts]
     runs-on: ubuntu-latest
     steps:
-      # Checkout is useful for a manual dry-run: we can compare the
-      # extracted binary's version against the Cargo.toml version even
-      # though GITHUB_REF_NAME is then "main" (or another branch).
       - uses: actions/checkout@v5
 
       - uses: actions/download-artifact@v8
         with:
           pattern: linux-release-*
+          path: artifacts
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: forformat-x86_64-pc-windows-msvc
+          path: artifacts
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: forformat-*-apple-darwin
           path: artifacts
           merge-multiple: true
 
@@ -267,20 +347,17 @@ jobs:
           shopt -s nullglob
 
           archives=(artifacts/*.tar.gz)
-          sidecars=(artifacts/*.tar.gz.sha256)
+          archive_sidecars=(artifacts/*.tar.gz.sha256)
+          binary_sidecars=(artifacts/forformat-*.sha256)
 
           test "${#archives[@]}" -eq 2
-          test "${#sidecars[@]}" -eq 2
+          test "${#archive_sidecars[@]}" -eq 2
+          test "${#binary_sidecars[@]}" -eq 3
 
-          for archive in "${archives[@]}"; do
-            sidecar="$archive.sha256"
-            test -f "$sidecar"
-
-            (
-              cd artifacts
-              sha256sum -c "$(basename "$sidecar")"
-            )
-          done
+          (
+            cd artifacts
+            sha256sum -c ./*.sha256
+          )
 
       - name: Smoke-test x86_64 archive
         shell: bash
@@ -314,8 +391,8 @@ jobs:
 
           readelf -S "$binary" | grep -F .dep-v0
 
-  publish-linux-release:
-    name: publish Linux GitHub release
+  publish-github-release:
+    name: publish GitHub release
     if: startsWith(github.ref, 'refs/tags/')
     needs: artifact-verification
     runs-on: ubuntu-latest
@@ -326,7 +403,7 @@ jobs:
 
     # Never allow two publication jobs to mutate releases concurrently.
     concurrency:
-      group: publish-linux-release
+      group: publish-github-release
       cancel-in-progress: false
 
     permissions:
@@ -341,6 +418,17 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: forformat-x86_64-pc-windows-msvc
+          path: artifacts
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: forformat-*-apple-darwin
+          path: artifacts
+          merge-multiple: true
+
       - name: Re-verify checksums before publishing
         shell: bash
         run: |
@@ -348,29 +436,31 @@ jobs:
           shopt -s nullglob
 
           archives=(artifacts/*.tar.gz)
-          sidecars=(artifacts/*.tar.gz.sha256)
+          archive_sidecars=(artifacts/*.tar.gz.sha256)
+          binary_sidecars=(artifacts/forformat-*.sha256)
 
           test "${#archives[@]}" -eq 2
-          test "${#sidecars[@]}" -eq 2
+          test "${#archive_sidecars[@]}" -eq 2
+          test "${#binary_sidecars[@]}" -eq 3
 
-          for archive in "${archives[@]}"; do
-            sidecar="$archive.sha256"
-            test -f "$sidecar"
+          (
+            cd artifacts
+            sha256sum -c ./*.sha256
+          )
 
-            (
-              cd artifacts
-              sha256sum -c "$(basename "$sidecar")"
-            )
-          done
-
-      - name: Attest release archives
+      - name: Attest release artifacts
         uses: actions/attest@v4
         with:
-          subject-path: artifacts/*.tar.gz
+          subject-path: |
+            artifacts/*.tar.gz
+            artifacts/forformat-x86_64-pc-windows-msvc.exe
+            artifacts/forformat-x86_64-apple-darwin
+            artifacts/forformat-aarch64-apple-darwin
 
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
@@ -388,3 +478,12 @@ jobs:
               --generate-notes \
               --title "forformat $GITHUB_REF_NAME"
           fi
+
+  publish-pypi:
+    name: publish Python package to PyPI
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: artifact-verification
+    uses: ./.github/workflows/pypi.yml
+    permissions:
+      contents: read
+      id-token: write
