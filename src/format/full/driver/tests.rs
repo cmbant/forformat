@@ -352,8 +352,7 @@ fn generated_wrapping_stress_cases_are_fixed_points_and_fit_safe_breaks() {
                             enabled: true,
                             line_length,
                         },
-                        align_paren: align,
-                        align_paren_value: usize::from(align),
+                        align_paren: (usize::from(align)).into(),
                         continuation_indent: continuation,
                         ..FormatConfig::default()
                     };

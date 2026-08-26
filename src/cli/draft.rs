@@ -1,7 +1,7 @@
 use super::{
     options::OptionId,
     settings::{FormatSetting, OptionLayer},
-    ContextPath, Invocation,
+    ContextPath, IndentQuery, Invocation,
 };
 use crate::{config::FormatConfig, error::FormatError};
 use std::path::PathBuf;
@@ -23,13 +23,6 @@ enum InputSelection {
     AllFiles {
         directory: Option<PathBuf>,
     },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IndentQuery {
-    LastIndent,
-    LastUsable,
-    Both,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,7 +264,7 @@ impl DraftInvocation {
         self.options.push_format(id, setting);
     }
 
-    pub(super) fn finish(mut self, mut config: FormatConfig) -> Result<Invocation, FormatError> {
+    pub(super) fn finish(mut self, config: FormatConfig) -> Result<Invocation, FormatError> {
         self.validate()?;
         let action = self.resolve_action();
 
@@ -301,26 +294,15 @@ impl DraftInvocation {
             ),
         };
 
-        let (stdout, check, diff, show_files, query_format, last_indent, last_usable) = match action
-        {
-            Action::Rewrite => (false, false, false, false, false, false, false),
-            Action::Stdout => (true, false, false, false, false, false, false),
-            Action::Check => (false, true, false, false, false, false, false),
-            Action::Diff { check } => (false, check, true, false, false, false, false),
-            Action::ShowFiles => (false, false, false, true, false, false, false),
-            Action::QueryFormat => (false, false, false, false, true, false, false),
-            Action::IndentQuery(IndentQuery::LastIndent) => {
-                (false, false, false, false, false, true, false)
-            }
-            Action::IndentQuery(IndentQuery::LastUsable) => {
-                (false, false, false, false, false, false, true)
-            }
-            Action::IndentQuery(IndentQuery::Both) => {
-                (false, false, false, false, false, true, true)
-            }
+        let (stdout, check, diff, show_files, query_format, indent_query) = match action {
+            Action::Rewrite => (false, false, false, false, false, None),
+            Action::Stdout => (true, false, false, false, false, None),
+            Action::Check => (false, true, false, false, false, None),
+            Action::Diff { check } => (false, check, true, false, false, None),
+            Action::ShowFiles => (false, false, false, true, false, None),
+            Action::QueryFormat => (false, false, false, false, true, None),
+            Action::IndentQuery(query) => (false, false, false, false, false, Some(query)),
         };
-        config.last_indent = last_indent;
-        config.last_usable = last_usable;
 
         Ok(Invocation {
             config,
@@ -334,6 +316,7 @@ impl DraftInvocation {
             stdout,
             force_free_input: self.options.force_free_input.unwrap_or(false),
             query_format,
+            indent_query,
             isolated,
             check,
             diff,

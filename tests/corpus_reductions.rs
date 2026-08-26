@@ -278,8 +278,7 @@ fn an_io_unit_star_survives_a_break_in_its_if_condition() {
     // Parenthesis alignment is what pushes the break into the condition here,
     // exactly as `full-layout-edge` does on the corpus file.
     let mut config = deep_indent(forformat::StyleConfig::default());
-    config.align_paren = true;
-    config.align_paren_value = 8;
+    config.align_paren = (8).into();
     let output = fixed_point(source, &config);
 
     assert!(output.contains("print *"), "{output}");

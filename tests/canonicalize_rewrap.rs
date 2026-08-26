@@ -112,8 +112,7 @@ fn rewrap_settles_a_literal_split_before_choosing_write_breaks() {
     config.wrap.line_length = 100;
     config.start_indent = 28;
     config.continuation_indent = 4;
-    config.align_paren = true;
-    config.align_paren_value = 4;
+    config.align_paren = (4).into();
 
     let once = format_source(source, &config).unwrap().bytes;
     let twice = format_source(&once, &config).unwrap().bytes;
@@ -146,8 +145,7 @@ fn rewrap_settles_a_generated_literal_split_at_an_assignment() {
     config.wrap.line_length = 100;
     config.start_indent = 8;
     config.continuation_indent = 4;
-    config.align_paren = true;
-    config.align_paren_value = 4;
+    config.align_paren = (4).into();
 
     let once = format_source(source, &config).unwrap().bytes;
     let twice = format_source(&once, &config).unwrap().bytes;
@@ -185,8 +183,7 @@ fn rewrap_settles_post_layout_declaration_breaks() {
     config.wrap.line_length = 100;
     config.start_indent = 8;
     config.continuation_indent = 4;
-    config.align_paren = true;
-    config.align_paren_value = 4;
+    config.align_paren = (4).into();
 
     let once = format_source(source, &config).unwrap().bytes;
     let twice = format_source(&once, &config).unwrap().bytes;
@@ -220,8 +217,7 @@ fn rewrap_settles_a_write_control_list_break() {
     config.wrap.line_length = 100;
     config.start_indent = 8;
     config.continuation_indent = 4;
-    config.align_paren = true;
-    config.align_paren_value = 4;
+    config.align_paren = (4).into();
 
     let once = format_source(source, &config).unwrap().bytes;
     let twice = format_source(&once, &config).unwrap().bytes;
@@ -250,8 +246,7 @@ unit_str=cp_unit_desc(unit=unit))\n";
     config.wrap.line_length = 72;
     config.start_indent = 14;
     config.continuation_indent = 4;
-    config.align_paren = true;
-    config.align_paren_value = 2;
+    config.align_paren = (2).into();
     config.style.max_blank_lines = Some(0);
 
     let once = format_source(source, &config).unwrap().bytes;
@@ -283,8 +278,7 @@ fn rewrap_preserves_the_gap_before_a_commented_continuation() {
     config.wrap.line_length = 100;
     config.start_indent = 0;
     config.continuation_indent = 4;
-    config.align_paren = true;
-    config.align_paren_value = 4;
+    config.align_paren = (4).into();
 
     let once = format_source(source, &config).unwrap().bytes;
     let twice = format_source(&once, &config).unwrap().bytes;
@@ -385,7 +379,7 @@ fn a_continued_literal_carries_its_lexical_state_to_the_next_physical_line() {
         for ws_remred in [false, true] {
             let config = FormatConfig {
                 mode,
-                ws_remred,
+                ws_remred: ws_remred.into(),
                 ..FormatConfig::default()
             };
             let text = String::from_utf8(format_source(source, &config).unwrap().bytes).unwrap();

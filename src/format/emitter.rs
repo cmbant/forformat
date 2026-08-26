@@ -40,7 +40,7 @@ impl<'a> EmitStyle<'a> {
         Self {
             config,
             apply_indent: config.apply_indent,
-            remred: config.ws_remred || config.ws_remred_value != 0,
+            remred: config.ws_remred.enabled(),
         }
     }
 }
@@ -633,7 +633,7 @@ mod tests {
             b"x = \"a  b\"\n"
         );
         let mut reduced = config.clone();
-        reduced.ws_remred = true;
+        reduced.ws_remred = (true).into();
         assert_eq!(
             emit_line(&whitespace, 0, first(0), &EmitStyle::new(&reduced), None),
             b"x = \"a  b\"\n"
@@ -646,7 +646,7 @@ mod tests {
         // gap the corresponding alignment pass owns is left for it to decide.
         let declaration = SourceBuffer::new(b"real(dl), intent(in)  ::   x\n").unwrap();
         let mut reduced = FormatConfig {
-            ws_remred: true,
+            ws_remred: (true).into(),
             ..FormatConfig::default()
         };
         assert_eq!(
@@ -690,7 +690,7 @@ mod tests {
         let declaration = SourceBuffer::new(b"real(dl), intent(in)  :: x\n").unwrap();
         let reduced = FormatConfig {
             mode: FormatMode::IndentOnly,
-            ws_remred: true,
+            ws_remred: (true).into(),
             ..FormatConfig::default()
         };
         assert!(

@@ -187,7 +187,7 @@ impl Planner {
                 first_indent,
                 directive_indent: self.stack.current(),
                 group_first_cont: line0.continues,
-                align: !hollerith && (config.align_paren || config.align_paren_value != 0),
+                align: !hollerith && config.align_paren.enabled(),
                 replacement,
             },
             apply_indent: config.apply_indent,
@@ -236,7 +236,7 @@ impl Planner {
 }
 
 fn remred(config: &FormatConfig) -> bool {
-    config.ws_remred || config.ws_remred_value != 0
+    config.ws_remred.enabled()
 }
 
 /// Advance the indent stack for one statement and return the column its line
