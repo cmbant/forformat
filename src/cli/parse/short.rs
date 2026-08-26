@@ -36,12 +36,7 @@ where
             let setting = if value == "-" {
                 FormatSetting::RestartContains
             } else {
-                FormatSetting::SetContainsIndent {
-                    value: settings::parse_num(&value)?,
-                    // Preserve the findent short-option behavior: a numeric -C
-                    // explicitly leaves restart mode after an earlier -C-.
-                    clear_restart: true,
-                }
+                FormatSetting::SetContainsIndent(settings::parse_num(&value)?)
             };
             draft.push_format(OptionId::IndentContains, setting);
         }
