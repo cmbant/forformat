@@ -1,4 +1,4 @@
-name: Rust conversion checks
+name: forformat checks
 
 on:
   push:
