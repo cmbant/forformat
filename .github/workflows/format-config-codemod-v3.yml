@@ -23,6 +23,7 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
           import textwrap
 
           # v2's only remaining fragile matches are indentation-only. Normalize
@@ -44,6 +45,18 @@ jobs:
               1,
           )
           path.write_text(text)
+
+          # Rust field shorthand cannot infer the new FeatureLevel type from a
+          # bool local. Make shorthand FormatConfig fields explicit before the
+          # general pair-collapsing migration runs.
+          for rust_file in Path('.').rglob('*.rs'):
+              text = rust_file.read_text()
+              text = re.sub(
+                  r'(?m)^(?P<i>[ \t]*)(?P<f>align_paren|ws_remred),$',
+                  lambda m: f"{m.group('i')}{m.group('f')}: {m.group('f')}.into(),",
+                  text,
+              )
+              rust_file.write_text(text)
 
           workflow = Path('.github/workflows/format-config-codemod-v2.yml').read_text()
           marker = "          python3 - <<'PY'\n"
