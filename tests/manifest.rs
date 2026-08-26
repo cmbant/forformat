@@ -56,29 +56,29 @@ fn checked_in_manifest_covers_success_and_rejection_paths() {
         let (stdout, stderr, status) = match cli::parse(argv) {
             Ok(cli::Command::Run(mut invocation)) => {
                 invocation.config.mode = mode;
-                if let Some(query) = invocation.indent_query {
-                    let meta = forformat::format::engine::query(&input, &invocation.config)
-                        .expect("manifest indentation query succeeds");
-                    let value = match query {
-                        cli::IndentQuery::LastIndent => meta.last_indent,
-                        cli::IndentQuery::LastUsable | cli::IndentQuery::Both => meta.last_usable,
-                    };
-                    (format!("{value}\n").into_bytes(), String::new(), 0)
-                } else {
-                    let formatted = match case.project.as_str() {
-                        "" => format_source(&input, &invocation.config),
-                        "self" => {
-                            let project =
-                                analyze_project([(input_path.as_path(), input.as_slice())])
-                                    .expect("manifest project analyzes");
-                            format_source_with_context(&input, &project, &invocation.config)
-                        }
-                        other => panic!("unknown manifest project {other} in case {}", case.name),
-                    };
-                    match formatted {
-                        Ok(result) => (result.bytes, String::new(), 0),
-                        Err(error) => (Vec::new(), format_error(error), 1),
+                let formatted = match case.project.as_str() {
+                    "" => format_source(&input, &invocation.config),
+                    "self" => {
+                        let project = analyze_project([(input_path.as_path(), input.as_slice())])
+                            .expect("manifest project analyzes");
+                        format_source_with_context(&input, &project, &invocation.config)
                     }
+                    other => panic!("unknown manifest project {other} in case {}", case.name),
+                };
+                match formatted {
+                    Ok(result) => {
+                        let stdout = match invocation.indent_query {
+                            Some(cli::IndentQuery::LastIndent) => {
+                                format!("{}\n", result.meta.last_indent).into_bytes()
+                            }
+                            Some(cli::IndentQuery::LastUsable | cli::IndentQuery::Both) => {
+                                format!("{}\n", result.meta.last_usable).into_bytes()
+                            }
+                            None => result.bytes,
+                        };
+                        (stdout, String::new(), 0)
+                    }
+                    Err(error) => (Vec::new(), format_error(error), 1),
                 }
             }
             Ok(cli::Command::Help) | Ok(cli::Command::Version) => (Vec::new(), String::new(), 0),
