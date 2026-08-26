@@ -36,7 +36,7 @@ use crate::{
         pipeline::{Changed, PassContext},
     },
 };
-use std::{collections::HashMap, ops::Range};
+use std::ops::Range;
 
 #[cfg(test)]
 use crate::analysis::scoped_declared_names;
@@ -61,7 +61,7 @@ struct ClassificationContext<'a> {
     evidence: Option<&'a mut CaseEvidence>,
 }
 
-/// Why the base declared-case pass made (or declined) a spelling decision.
+/// Why declared-case classification made (or declined) a spelling decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CaseEvidence {
     KeepBase,
@@ -74,13 +74,41 @@ pub(crate) enum CaseEvidence {
         module: Vec<u8>,
     },
     Member {
-        /// Textual owner chain, retained only when exact resolution failed.
+        /// Textual owner chain, materialized only when exact resolution failed.
         owner: Vec<Vec<u8>>,
         resolved_owner: Option<ResolvedType>,
     },
 }
 
-pub(crate) type CaseEvidenceMap = HashMap<(usize, usize), CaseEvidence>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Reconciliation {
+    KeepBase,
+    Replace(Vec<u8>),
+    Restore,
+}
+
+pub(crate) trait CaseReconciler {
+    const ENABLED: bool;
+
+    fn reconcile(&mut self, evidence: &CaseEvidence, name: &[u8], line: usize) -> Reconciliation;
+}
+
+#[cfg(test)]
+struct NoopReconciler;
+
+#[cfg(test)]
+impl CaseReconciler for NoopReconciler {
+    const ENABLED: bool = false;
+
+    fn reconcile(
+        &mut self,
+        _evidence: &CaseEvidence,
+        _name: &[u8],
+        _line: usize,
+    ) -> Reconciliation {
+        Reconciliation::KeepBase
+    }
+}
 
 /// Step 5: apply scoped declared spellings to identifier occurrences.
 #[cfg(test)]
@@ -95,29 +123,29 @@ fn declared_with_names(
     cx: &PassContext,
     declared_names: &DeclaredNameIndex,
 ) -> Result<Changed, FormatError> {
-    declared_with_names_impl(document, cx, declared_names, None)
+    let mut reconciler = NoopReconciler;
+    declared_with_names_impl(document, cx, declared_names, &mut reconciler)
 }
 
-pub(crate) fn declared_with_names_and_evidence(
+pub(crate) fn declared_with_names_and_reconciler<R: CaseReconciler>(
     document: &mut Document,
     cx: &PassContext,
     declared_names: &DeclaredNameIndex,
-) -> Result<(Changed, CaseEvidenceMap), FormatError> {
-    let mut evidence = CaseEvidenceMap::default();
-    let changed = declared_with_names_impl(document, cx, declared_names, Some(&mut evidence))?;
-    Ok((changed, evidence))
+    reconciler: &mut R,
+) -> Result<Changed, FormatError> {
+    declared_with_names_impl(document, cx, declared_names, reconciler)
 }
 
-fn declared_with_names_impl(
+fn declared_with_names_impl<R: CaseReconciler>(
     document: &mut Document,
     cx: &PassContext,
     declared_names: &DeclaredNameIndex,
-    mut evidence_map: Option<&mut CaseEvidenceMap>,
+    reconciler: &mut R,
 ) -> Result<Changed, FormatError> {
     let procedure_spellings = implicit_function_spellings(cx.analysis, declared_names);
     let mut association_stack: Vec<AssociationScope> = Vec::new();
     let mut line_edits: Vec<Vec<(Range<usize>, Vec<u8>)>> = vec![Vec::new(); document.lines.len()];
-    let record_evidence = evidence_map.is_some();
+    let reconcile = R::ENABLED;
 
     for group in &cx.analysis.groups {
         for statement in &group.statements {
@@ -162,12 +190,12 @@ fn declared_with_names_impl(
                     continue;
                 }
                 let spans = source_spans(group, statement, token);
-                let Some((line, first_span)) = spans.first() else {
+                let Some((line, _)) = spans.first() else {
                     continue;
                 };
                 let line = *line;
                 let mut token_evidence = CaseEvidence::KeepBase;
-                let replacement = classify_spelling(
+                let mut replacement = classify_spelling(
                     &tokens,
                     index,
                     line,
@@ -176,10 +204,10 @@ fn declared_with_names_impl(
                     ClassificationContext {
                         associates: Some(&statement_context),
                         procedure_spellings: Some(&procedure_spellings),
-                        evidence: record_evidence.then_some(&mut token_evidence),
+                        evidence: reconcile.then_some(&mut token_evidence),
                     },
                 );
-                if record_evidence {
+                if reconcile {
                     if !cx.project.macros.contains(token.text) {
                         reconcile_occurrence_evidence(
                             &tokens,
@@ -189,8 +217,10 @@ fn declared_with_names_impl(
                         );
                     }
                     if !matches!(token_evidence, CaseEvidence::KeepBase) {
-                        if let Some(map) = evidence_map.as_deref_mut() {
-                            map.insert((line, first_span.start), token_evidence);
+                        match reconciler.reconcile(&token_evidence, token.text, line) {
+                            Reconciliation::KeepBase => {}
+                            Reconciliation::Replace(spelling) => replacement = Some(spelling),
+                            Reconciliation::Restore => replacement = None,
                         }
                     }
                 }

@@ -16,5 +16,7 @@ mod tests;
 #[cfg(test)]
 use declared::declared;
 pub(crate) use declared::restore_declined_component_spellings;
-pub(super) use declared::{declared_with_names_and_evidence, CaseEvidence};
+pub(super) use declared::{
+    declared_with_names_and_reconciler, CaseEvidence, CaseReconciler, Reconciliation,
+};
 pub(crate) use macros::macros;
