@@ -747,7 +747,7 @@ fn exclude_accepts_repeatable_separated_and_normalized_spellings() {
 #[test]
 fn extend_exclude_adds_to_the_set_exclude_selects() {
     let run = |args: &[&str]| {
-        let argv = std::iter::once("forformat".to_string())
+        let argv = std::iter::once("forformat")
             .chain(args.iter().copied())
             .map(str::to_owned);
         let Command::Run(invocation) = parse(argv).unwrap() else {
