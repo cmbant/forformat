@@ -64,6 +64,44 @@ jobs:
           end = workflow.index('\n          PY\n', start)
           script = textwrap.dedent(workflow[start:end])
           exec(compile(script, '<format-config-codemod-v2>', 'exec'), {'__name__': '__main__'})
+
+          # The checked-in manifest harness parses CLI state but intentionally
+          # bypasses the CLI executor and calls the library formatter directly.
+          # Once indentation queries no longer live in FormatConfig, mirror the
+          # executor's metadata-only branch explicitly in that harness.
+          path = Path('tests/manifest.rs')
+          text = path.read_text()
+          start = text.index('            Ok(cli::Command::Run(mut invocation)) => {')
+          end = text.index('            Ok(cli::Command::Help)', start)
+          replacement = '''            Ok(cli::Command::Run(mut invocation)) => {
+                invocation.config.mode = mode;
+                if let Some(query) = invocation.indent_query {
+                    let meta = forformat::format::engine::query(&input, &invocation.config)
+                        .expect("manifest indentation query succeeds");
+                    let value = match query {
+                        cli::IndentQuery::LastIndent => meta.last_indent,
+                        cli::IndentQuery::LastUsable | cli::IndentQuery::Both => meta.last_usable,
+                    };
+                    (format!("{value}\\n").into_bytes(), String::new(), 0)
+                } else {
+                    let formatted = match case.project.as_str() {
+                        "" => format_source(&input, &invocation.config),
+                        "self" => {
+                            let project = analyze_project([(input_path.as_path(), input.as_slice())])
+                                .expect("manifest project analyzes");
+                            format_source_with_context(&input, &project, &invocation.config)
+                        }
+                        other => panic!("unknown manifest project {other} in case {}", case.name),
+                    };
+                    match formatted {
+                        Ok(result) => (result.bytes, String::new(), 0),
+                        Err(error) => (Vec::new(), format_error(error), 1),
+                    }
+                }
+            }
+'''
+          text = text[:start] + replacement + text[end:]
+          path.write_text(text)
           PY
 
       - name: Format
