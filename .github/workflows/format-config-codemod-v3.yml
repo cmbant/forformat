@@ -99,7 +99,7 @@ jobs:
                     }
                 }
             }
-'''
+          '''
           text = text[:start] + replacement + text[end:]
           path.write_text(text)
           PY
