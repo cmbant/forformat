@@ -5,20 +5,17 @@ on:
 
 jobs:
   fast-checks:
-    name: ${{ matrix.check }} (Rust ${{ matrix.toolchain }})
+    name: ${{ matrix.check }} (Rust stable)
     runs-on: ubuntu-latest
     strategy:
-      # Let every fast check report its result before the expensive checks are
-      # considered. The checks job below is the failure gate.
       fail-fast: false
       matrix:
-        toolchain: ["1.85.0", stable]
         check: [fmt, clippy]
     steps:
       - uses: actions/checkout@v5
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: ${{ matrix.toolchain }}
+          toolchain: stable
           components: ${{ matrix.check == 'fmt' && 'rustfmt' || 'clippy' }}
       - name: Check formatting
         if: matrix.check == 'fmt'
