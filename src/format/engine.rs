@@ -49,42 +49,6 @@ pub fn format_to_owned<W: Write>(
     format_buffer(&buf, config, out)
 }
 
-pub fn query(source: &[u8], config: &FormatConfig) -> Result<FormatMeta, FormatError> {
-    let buf = SourceBuffer::new(source)?;
-    query_buffer(&buf, config)
-}
-
-fn query_buffer<B: AsRef<[u8]>>(
-    buf: &SourceBuffer<B>,
-    config: &FormatConfig,
-) -> Result<FormatMeta, FormatError> {
-    if buf.bytes.as_ref().is_empty() {
-        return Ok(FormatMeta {
-            last_indent: 0,
-            last_usable: 1,
-            declines: Vec::new(),
-        });
-    }
-    let mut planner = Planner::new(config);
-    let mut last_indent = 0;
-    let mut last_usable = 1;
-    LogicalGroup::visit(buf, |group| {
-        let plan = planner.plan(buf, &group, config);
-        if let Some(value) = plan.last_indent {
-            last_indent = value;
-        }
-        if let Some(value) = plan.last_usable {
-            last_usable = value;
-        }
-        Ok(())
-    })?;
-    Ok(FormatMeta {
-        last_indent,
-        last_usable,
-        declines: Vec::new(),
-    })
-}
-
 pub fn format_buffer<B: AsRef<[u8]>, W: Write>(
     buf: &SourceBuffer<B>,
     config: &FormatConfig,

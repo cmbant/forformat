@@ -266,12 +266,12 @@ mod tests {
     }
 
     #[test]
-    fn indentation_query_metadata_is_stable() {
+    fn formatting_metadata_is_stable() {
         let config = indent_only_config();
-        let empty = crate::format::engine::query(b"", &config).unwrap();
+        let empty = format_source(b"", &config).unwrap().meta;
         assert_eq!((empty.last_indent, empty.last_usable), (0, 1));
 
-        let meta = crate::format::engine::query(b"program p\nx=1\n", &config).unwrap();
+        let meta = format_source(b"program p\nx=1\n", &config).unwrap().meta;
         assert_eq!((meta.last_indent, meta.last_usable), (3, 2));
     }
 

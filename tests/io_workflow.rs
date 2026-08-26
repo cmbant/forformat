@@ -1513,6 +1513,19 @@ fn indentation_queries_emit_only_metadata_from_stdin() {
     assert_eq!(both.status.code(), Some(0));
     assert_eq!(both.stdout, b"2\n");
 
+    let contextual = run_stdin(&repo, &["-lastindent", "--project-context", "."], source);
+    assert_eq!(contextual.status.code(), Some(0));
+    assert_eq!(contextual.stdout, b"3\n");
+
+    let missing_context = run_stdin(
+        &repo,
+        &["-lastindent", "--project-context", "DOES_NOT_EXIST"],
+        source,
+    );
+    assert_eq!(missing_context.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&missing_context.stderr)
+        .contains("--project-context path does not exist"));
+
     let empty_indent = run_stdin(&repo, &["-lastindent"], b"");
     assert_eq!(empty_indent.stdout, b"0\n");
     let empty_usable = run_stdin(&repo, &["-lastusable"], b"");
