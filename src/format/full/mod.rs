@@ -1,11 +1,11 @@
 //! Public full-formatting facade.
 //!
-//! Most modes run through the established full-mode driver.  The composed
+//! Most modes run through the established full-mode driver. The composed
 //! `CanonicalizeAndIndent` mode is deliberately routed here instead: it runs
 //! canonicalization first and then feeds those bytes to the indent-only engine,
 //! without entering the driver's wrapping or post-layout presentation passes.
 
-use super::{engine, planner, wrapping};
+use super::engine;
 use crate::{
     analysis::{analyze_file, FileFacts, ProjectContext},
     config::{FormatConfig, FormatMode},
@@ -14,11 +14,13 @@ use crate::{
 };
 
 mod driver;
+mod layout;
+mod reflow;
 
-// Keep the existing public API while the driver itself stays an implementation
-// detail. Repository-internal call sites do not use these helpers, but removing
-// public exports is a separate compatibility decision from this module cleanup.
-pub use driver::{reflow, reflow_with_context};
+// Keep the existing public API while reflow remains an implementation detail.
+// Repository-internal call sites do not use these helpers, but removing public
+// exports is a separate compatibility decision from this module cleanup.
+pub use reflow::{reflow, reflow_with_context};
 
 pub fn format_with_context(
     source: &[u8],
