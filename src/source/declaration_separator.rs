@@ -134,10 +134,6 @@ fn type_declaration_separator(
     if token.kind != TokenKind::Name {
         return DeclarationSeparator::NotApplicable;
     }
-    if tokens.iter().skip(entity + 1).any(is_top_level_assignment) {
-        // Initializers require an authored separator in a type declaration.
-        return DeclarationSeparator::NotApplicable;
-    }
     if token.is_name(b"function")
         && tokens
             .get(entity + 1)
@@ -291,10 +287,6 @@ fn is_separator(token: &Token<'_>) -> bool {
     token.depth == 0 && token.kind == TokenKind::Operator && token.text == b"::"
 }
 
-fn is_top_level_assignment(token: &Token<'_>) -> bool {
-    token.depth == 0 && token.kind == TokenKind::Operator && matches!(token.text, b"=" | b"=>")
-}
-
 fn is_star(token: &Token<'_>) -> bool {
     token.depth == 0 && token.kind == TokenKind::Operator && token.text == b"*"
 }
@@ -350,6 +342,9 @@ mod tests {
             ("enumerator red=1", Expected::Missing(b"red")),
             ("import name", Expected::Missing(b"name")),
             ("enumeration type color", Expected::Missing(b"color")),
+            ("real x = 1", Expected::Missing(b"x")),
+            ("real x => null()", Expected::Missing(b"x")),
+            ("procedure(iface) p => target", Expected::Missing(b"p")),
             ("real :: x", Expected::Present),
             ("intent(in) :: x", Expected::Present),
             ("external :: foo", Expected::Present),
@@ -361,7 +356,6 @@ mod tests {
             ("save(i) = x", Expected::NotApplicable),
             ("real(i) = x", Expected::NotApplicable),
             ("real(i)%x = y", Expected::NotApplicable),
-            ("real x = 1", Expected::NotApplicable),
             ("pointer (p, x)", Expected::NotApplicable),
             ("type is(real)", Expected::NotApplicable),
             ("class default", Expected::NotApplicable),
