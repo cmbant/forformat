@@ -1,93 +1,35 @@
 //! Scope-aware reconciliation for the declared-case pass.
 //!
-//! `case_pass` remains the spelling engine. While it runs, it records the
-//! evidence class behind each identifier decision. This wrapper only revisits
-//! evidence that came from compatibility/project-wide tables; semantic answers
-//! from the base pass are authoritative by default and therefore cannot be
-//! discarded merely because a new token shape was not added here.
+//! `case_pass` remains the spelling engine. Scoped decisions are applied while
+//! that pass still owns the token and its base spelling, so the project-aware
+//! correction does not need a retained evidence map or a second token walk.
 
 use crate::{
     analysis::{project::ResolvedType, scoped_declared_names},
     error::FormatError,
-    source::{
-        tokens::{tokenize, TokenKind},
-        LexState,
-    },
     transform::{
         document::Document,
-        edit::EditBuffer,
-        passes::{
-            case_pass::{self, CaseEvidence},
-            provenance::{source_spans, spread_replacement},
-        },
+        passes::case_pass::{self, CaseEvidence, CaseReconciler, Reconciliation},
         pipeline::{Changed, PassContext},
     },
 };
-use std::ops::Range;
 
 pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
     let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
-    let (mut changed, evidence) =
-        case_pass::declared_with_names_and_evidence(document, cx, &declared_names)?;
-    let mut line_edits: Vec<Vec<(Range<usize>, Vec<u8>)>> = vec![Vec::new(); document.lines.len()];
-
-    for group in &cx.analysis.groups {
-        for statement in &group.statements {
-            let tokens = tokenize(&statement.text, &mut LexState::default());
-            for token in &tokens {
-                if token.kind != TokenKind::Name {
-                    continue;
-                }
-                let spans = source_spans(group, statement, token);
-                let Some((line, first_span)) = spans.first() else {
-                    continue;
-                };
-                let Some(evidence) = evidence.get(&(*line, first_span.start)) else {
-                    continue;
-                };
-                let replacement = match scoped_spelling(evidence, token.text, *line, cx) {
-                    Decision::KeepBase => continue,
-                    Decision::Replace(spelling) => spelling,
-                    Decision::Restore => token.text.to_vec(),
-                };
-                let Some(pieces) = spread_replacement(&spans, token, &replacement) else {
-                    continue;
-                };
-                for (source_line, span, piece) in pieces {
-                    let line_start = cx.analysis.buffer.lines[source_line].span.start as usize;
-                    line_edits[source_line].push((
-                        span.start - line_start..span.end - line_start,
-                        piece.to_vec(),
-                    ));
-                }
-            }
-        }
-    }
-
-    for (line, edits) in line_edits.into_iter().enumerate() {
-        if edits.is_empty() {
-            continue;
-        }
-        let source = &document.lines[line];
-        let mut buffer = EditBuffer::new(source);
-        for (span, replacement) in edits {
-            buffer.replace(span, &replacement);
-        }
-        let updated = buffer.finish();
-        if updated != *source {
-            document.lines[line] = updated;
-            changed = changed.or(Changed::Text);
-        }
-    }
-
-    Ok(changed)
+    let mut reconciler = ScopedReconciler { cx };
+    case_pass::declared_with_names_and_reconciler(document, cx, &declared_names, &mut reconciler)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Decision {
-    KeepBase,
-    Replace(Vec<u8>),
-    Restore,
+struct ScopedReconciler<'a, 'cx> {
+    cx: &'a PassContext<'cx>,
+}
+
+impl CaseReconciler for ScopedReconciler<'_, '_> {
+    const ENABLED: bool = true;
+
+    fn reconcile(&mut self, evidence: &CaseEvidence, name: &[u8], line: usize) -> Reconciliation {
+        scoped_spelling(evidence, name, line, self.cx)
+    }
 }
 
 fn scoped_spelling(
@@ -95,34 +37,34 @@ fn scoped_spelling(
     name: &[u8],
     line: usize,
     cx: &PassContext,
-) -> Decision {
+) -> Reconciliation {
     match evidence {
-        CaseEvidence::KeepBase => Decision::KeepBase,
-        CaseEvidence::Alias(spelling) => Decision::Replace(spelling.clone()),
+        CaseEvidence::KeepBase => Reconciliation::KeepBase,
+        CaseEvidence::Alias(spelling) => Reconciliation::Replace(spelling.clone()),
         CaseEvidence::UseRemote { module } => cx
             .project
             .visible_use_symbol_spelling(module, name)
-            .map(Decision::Replace)
-            .unwrap_or(Decision::Restore),
+            .map(Reconciliation::Replace)
+            .unwrap_or(Reconciliation::Restore),
         CaseEvidence::Type => cx
             .project
             .visible_type_spelling(cx.local, line, name)
-            .map(Decision::Replace)
-            .unwrap_or(Decision::Restore),
+            .map(Reconciliation::Replace)
+            .unwrap_or(Reconciliation::Restore),
         CaseEvidence::Member {
             owner,
             resolved_owner,
         } => scoped_member_spelling(owner, resolved_owner.as_ref(), name, line, cx),
         CaseEvidence::Symbol { allow_external } => {
             if let Some(spelling) = cx.project.visible_symbol_spelling(cx.local, line, name) {
-                return Decision::Replace(spelling);
+                return Reconciliation::Replace(spelling);
             }
             if *allow_external {
                 if let Some(spelling) = cx.project.external_symbol_spelling(name) {
-                    return Decision::Replace(spelling);
+                    return Reconciliation::Replace(spelling);
                 }
             }
-            Decision::Restore
+            Reconciliation::Restore
         }
     }
 }
@@ -133,25 +75,25 @@ fn scoped_member_spelling(
     name: &[u8],
     line: usize,
     cx: &PassContext,
-) -> Decision {
+) -> Reconciliation {
     let owner = if let Some(owner) = resolved_owner {
         owner.clone()
     } else {
         let Some(root) = names.first() else {
-            return Decision::KeepBase;
+            return Reconciliation::KeepBase;
         };
         let Some(current) = cx.project.visible_variable_type(cx.local, line, root) else {
-            return Decision::Restore;
+            return Reconciliation::Restore;
         };
         let Some(owner) = resolve_component_owner(current, &names[1..], line, cx) else {
-            return Decision::Restore;
+            return Reconciliation::Restore;
         };
         owner
     };
     cx.project
         .visible_member_spelling(cx.local, line, &owner, name)
-        .map(Decision::Replace)
-        .unwrap_or(Decision::Restore)
+        .map(Reconciliation::Replace)
+        .unwrap_or(Reconciliation::Restore)
 }
 
 fn resolve_component_owner(
@@ -166,4 +108,53 @@ fn resolve_component_owner(
             .visible_component_type(cx.local, line, &current, link)?;
     }
     Some(current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::declared;
+    use crate::{
+        analysis::{analyze_file, analyze_project, ScopeTree},
+        config::{FormatConfig, FormatMode},
+        transform::{
+            document::Document,
+            pipeline::{Changed, PassContext},
+        },
+    };
+    use std::path::Path;
+
+    #[test]
+    fn restore_of_split_identifier_emits_no_edit() {
+        let declarations =
+            b"module unrelated\ntype :: CamelType\nend type CamelType\nend module unrelated\n";
+        let target = b"program p\ntype(CAM&\n&ELTYPE) :: value\nend program p\n";
+        let project = analyze_project([
+            (Path::new("unrelated.f90"), declarations.as_slice()),
+            (Path::new("target.f90"), target.as_slice()),
+        ])
+        .unwrap();
+        let local = analyze_file(target).unwrap();
+        let mut document = Document::from_bytes(target);
+        let analysis = document.analyze().unwrap();
+        let scopes = ScopeTree::build(&analysis);
+        let config = FormatConfig {
+            mode: FormatMode::NormalizeOnly,
+            ..FormatConfig::default()
+        };
+        let context = PassContext {
+            config: &config,
+            project: &project,
+            local: &local,
+            analysis: &analysis,
+            scopes: &scopes,
+        };
+
+        // The project-wide type table gives the base pass a CamelType spelling,
+        // but the type is not visible here, so scoped policy must restore the
+        // authored split spelling without ever emitting that base edit.
+        assert!(project.declared_types.contains(b"CAMELTYPE"));
+        assert_eq!(project.visible_type_spelling(&local, 1, b"CAMELTYPE"), None);
+        assert_eq!(declared(&mut document, &context).unwrap(), Changed::No);
+        assert_eq!(document.to_bytes(), target);
+    }
 }
