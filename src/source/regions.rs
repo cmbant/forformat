@@ -189,22 +189,29 @@ impl LexState {
                 });
                 return;
             }
-            if let Some((count, after_h)) = hollerith_at(s, i) {
-                if i > code_start {
+            if c.is_ascii_digit()
+                && (i == 0 || !(s[i - 1].is_ascii_alphanumeric() || s[i - 1] == b'_'))
+            {
+                let (hollerith, digit_end) = hollerith_from_digit(s, i);
+                if let Some((count, after_h)) = hollerith {
+                    if i > code_start {
+                        push(Region {
+                            range: code_start..i,
+                            kind: RegionKind::Code,
+                        });
+                    }
+                    let take = count.min(s.len() - after_h);
+                    self.hollerith = count - take;
+                    let end = after_h + take;
                     push(Region {
-                        range: code_start..i,
-                        kind: RegionKind::Code,
+                        range: i..end,
+                        kind: RegionKind::Hollerith,
                     });
+                    i = end;
+                    code_start = end;
+                    continue;
                 }
-                let take = count.min(s.len() - after_h);
-                self.hollerith = count - take;
-                let end = after_h + take;
-                push(Region {
-                    range: i..end,
-                    kind: RegionKind::Hollerith,
-                });
-                i = end;
-                code_start = end;
+                i = digit_end;
                 continue;
             }
             i += 1;
@@ -259,27 +266,21 @@ impl LexState {
     }
 }
 
-/// `nH` recognized at `i`: returns the payload length and the offset just past
-/// the `H`.
-fn hollerith_at(s: &[u8], i: usize) -> Option<(usize, usize)> {
-    if !s[i].is_ascii_digit() {
-        return None;
-    }
-    if i > 0 && (s[i - 1].is_ascii_alphanumeric() || s[i - 1] == b'_') {
-        return None;
-    }
+/// `nH` recognized at `i`, where `s[i]` is already known to be an eligible
+/// leading digit. Returns the match plus the end of the digit run so a rejected
+/// candidate can be skipped without rechecking each later digit.
+fn hollerith_from_digit(s: &[u8], i: usize) -> (Option<(usize, usize)>, usize) {
     let mut j = i;
+    let mut count = Some(0usize);
     while j < s.len() && s[j].is_ascii_digit() {
+        let digit = usize::from(s[j] - b'0');
+        count = count.and_then(|value| value.checked_mul(10)?.checked_add(digit));
         j += 1;
     }
     if !s.get(j).is_some_and(|x| *x == b'h' || *x == b'H') {
-        return None;
+        return (None, j);
     }
-    let count = std::str::from_utf8(&s[i..j])
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    Some((count, j + 1))
+    (Some((count.unwrap_or(0), j + 1)), j)
 }
 
 /// Regions of a standalone slice, starting from a clean lexical state.
@@ -698,6 +699,17 @@ mod tests {
     }
 
     #[test]
+    fn overflowing_hollerith_count_preserves_zero_count_behavior() {
+        let source = format!("{}0Habc", usize::MAX).into_bytes();
+        let prefix_end = source.iter().position(|byte| *byte == b'H').unwrap() + 1;
+        let parsed = regions(&source);
+        assert_eq!(parsed[0].kind, RegionKind::Hollerith);
+        assert_eq!(parsed[0].range, 0..prefix_end);
+        assert_eq!(parsed[1].kind, RegionKind::Code);
+        assert_eq!(&source[parsed[1].range.clone()], b"abc");
+    }
+
+    #[test]
     fn comment_detection_matches_the_previous_hand_written_scanner() {
         assert_eq!(comment_start(b"x='!'; y=\"!\" ! real"), Some(13));
         assert_eq!(comment_start(b"x=3H;!; ! real"), Some(8));
@@ -791,7 +803,7 @@ mod tests {
 
     #[test]
     fn conditional_sentinel_transparency_respects_compact_context() {
-        for line in [b"!$ x = 1".as_slice(), b"!$	x = 1"] {
+        for line in [b"!$ x = 1".as_slice(), b"!$\tx = 1"] {
             assert!(!super::stepped_over_by_continuation(line), "{line:?}");
         }
         for line in [

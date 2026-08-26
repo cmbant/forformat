@@ -1,5 +1,8 @@
 use super::statement::{StatementClass, StatementInfo, StatementKind};
-use crate::source::{regions, scanner::tokens};
+use crate::source::{
+    regions,
+    scanner::{iter_tokens, tokens},
+};
 
 pub fn classify(input: &[u8]) -> StatementInfo {
     let text = trim(input);
@@ -30,7 +33,7 @@ pub fn classify(input: &[u8]) -> StatementInfo {
     }
     let low = lower(s);
     let words = words(&low);
-    let first = words.first().map(|v| v.as_slice()).unwrap_or(b"");
+    let first = words.first().copied().unwrap_or(b"");
     let mut info = StatementInfo::unknown(text);
     info.statement_label = label;
     info.construct_name = construct;
@@ -88,6 +91,9 @@ pub fn classify(input: &[u8]) -> StatementInfo {
             (StatementKind::ElseIf, StatementClass::Executable)
         }
         b"elseif" => (StatementKind::ElseIf, StatementClass::Executable),
+        b"else" if words.get(1).is_some_and(|x| x == b"where") => {
+            (StatementKind::ElseWhere, StatementClass::Executable)
+        }
         b"else" => (StatementKind::Else, StatementClass::Executable),
         b"do" => (StatementKind::Do, StatementClass::Executable),
         b"select" => (StatementKind::Select, StatementClass::Executable),
@@ -123,6 +129,9 @@ pub fn classify(input: &[u8]) -> StatementInfo {
             (StatementKind::ChangeTeam, StatementClass::Executable)
         }
         b"enum" => (StatementKind::Enum, StatementClass::Definition),
+        b"enumeration" if words.get(1).is_some_and(|x| x == b"type") => {
+            (StatementKind::Enum, StatementClass::Definition)
+        }
         b"entry" => (StatementKind::Entry, StatementClass::Executable),
         b"include" => (StatementKind::Include, StatementClass::Neutral),
         b"continue" => (StatementKind::LabelContinue, StatementClass::Neutral),
@@ -178,15 +187,14 @@ fn trim(s: &[u8]) -> &[u8] {
 fn lower(s: &[u8]) -> Vec<u8> {
     s.iter().map(|c| c.to_ascii_lowercase()).collect()
 }
-fn words(s: &[u8]) -> Vec<Vec<u8>> {
-    tokens(s)
-        .into_iter()
+fn words(s: &[u8]) -> Vec<&[u8]> {
+    iter_tokens(s)
         .filter(|t| {
             t.text
                 .first()
                 .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_')
         })
-        .map(|t| t.text.to_ascii_lowercase())
+        .map(|t| t.text)
         .collect()
 }
 fn leading_label(s: &[u8]) -> Option<(u32, &[u8])> {
@@ -290,7 +298,7 @@ fn is_designator(s: &[u8]) -> bool {
     designator
 }
 
-fn prefixed_procedure(source: &[u8], words: &[Vec<u8>]) -> Option<(StatementKind, StatementClass)> {
+fn prefixed_procedure(source: &[u8], words: &[&[u8]]) -> Option<(StatementKind, StatementClass)> {
     if words.first().is_some_and(|x| x == b"end") {
         return None;
     }
@@ -373,7 +381,7 @@ fn statement_procedure_keyword(source: &[u8]) -> Option<(usize, StatementKind)> 
 /// and the overwhelming majority contain neither word. Rejecting those against
 /// the word list the caller already built keeps the token scan — which has to
 /// look at both spellings and at bracket depth — off the hot path.
-fn mentions_procedure_keyword(words: &[Vec<u8>]) -> bool {
+fn mentions_procedure_keyword(words: &[&[u8]]) -> bool {
     words
         .iter()
         .any(|word| word == b"function" || word == b"subroutine")
@@ -430,7 +438,7 @@ fn bracket_scan(before: &[u8]) -> (usize, bool) {
     (depth, comma)
 }
 
-fn comma_prefixed_procedure(source: &[u8], words: &[Vec<u8>]) -> Option<StatementKind> {
+fn comma_prefixed_procedure(source: &[u8], words: &[&[u8]]) -> Option<StatementKind> {
     if !mentions_procedure_keyword(words) {
         return None;
     }
@@ -449,11 +457,11 @@ fn has_prefix_comma(source: &[u8], at: usize) -> bool {
     bracket_scan(&source[..at]).1
 }
 
-fn explicit_end_kind(words: &[Vec<u8>]) -> Option<StatementKind> {
-    match words.first().map(Vec::as_slice) {
+fn explicit_end_kind(words: &[&[u8]]) -> Option<StatementKind> {
+    match words.first().copied() {
         Some(b"endfunction") => Some(StatementKind::Function),
         Some(b"endsubroutine") => Some(StatementKind::Subroutine),
-        Some(b"end") => match words.get(1).map(Vec::as_slice) {
+        Some(b"end") => match words.get(1).copied() {
             Some(b"function") => Some(StatementKind::Function),
             Some(b"subroutine") => Some(StatementKind::Subroutine),
             _ => None,
@@ -554,8 +562,8 @@ fn starts_keyword(s: &[u8], keyword: &[u8]) -> bool {
             .is_none_or(|c| c.is_ascii_whitespace() || *c == b'(' || *c == b',' || *c == b':')
 }
 
-fn end_kind(w: &[Vec<u8>]) -> (StatementKind, StatementClass) {
-    match w.get(1).map(Vec::as_slice).unwrap_or(b"") {
+fn end_kind(w: &[&[u8]]) -> (StatementKind, StatementClass) {
+    match w.get(1).copied().unwrap_or(b"") {
         b"if" => (StatementKind::EndIf, StatementClass::Neutral),
         b"do" => (StatementKind::EndDo, StatementClass::Neutral),
         b"select" => (StatementKind::EndSelect, StatementClass::Neutral),
@@ -569,6 +577,10 @@ fn end_kind(w: &[Vec<u8>]) -> (StatementKind, StatementClass) {
         b"critical" => (StatementKind::EndCritical, StatementClass::Neutral),
         b"team" => (StatementKind::EndTeam, StatementClass::Neutral),
         b"enum" => (StatementKind::EndEnum, StatementClass::Neutral),
+        b"enumeration" if w.get(2).is_some_and(|x| x == b"type") => {
+            (StatementKind::EndEnum, StatementClass::Neutral)
+        }
+        b"file" => (StatementKind::Unknown, StatementClass::Neutral),
         b"procedure" => (StatementKind::EndProcedure, StatementClass::EndDefinition),
         b"structure" => (StatementKind::EndStructure, StatementClass::Neutral),
         b"union" => (StatementKind::EndUnion, StatementClass::Neutral),
@@ -788,6 +800,25 @@ mod tests {
             assert_eq!(info.kind, StatementKind::Unknown, "{source:?}");
             assert_ne!(info.class, StatementClass::Definition, "{source:?}");
         }
+    }
+
+    #[test]
+    fn supplemental_structural_spellings_share_the_recognizer_word_scan() {
+        let enumeration = classify(b"enumeration type");
+        assert_eq!(enumeration.kind, StatementKind::Enum);
+        assert_eq!(enumeration.class, StatementClass::Definition);
+
+        let end_enumeration = classify(b"end enumeration type");
+        assert_eq!(end_enumeration.kind, StatementKind::EndEnum);
+        assert_eq!(end_enumeration.class, StatementClass::Neutral);
+
+        let elsewhere = classify(b"else where");
+        assert_eq!(elsewhere.kind, StatementKind::ElseWhere);
+        assert_eq!(elsewhere.class, StatementClass::Executable);
+
+        let endfile = classify(b"end file");
+        assert_eq!(endfile.kind, StatementKind::Unknown);
+        assert_eq!(endfile.class, StatementClass::Neutral);
     }
 
     #[test]
