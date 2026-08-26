@@ -24,7 +24,7 @@ struct ScopedReconciler<'a, 'cx> {
     cx: &'a PassContext<'cx>,
 }
 
-impl<'a, 'cx> CaseReconciler for ScopedReconciler<'a, 'cx> {
+impl CaseReconciler for ScopedReconciler<'_, '_> {
     const ENABLED: bool = true;
 
     fn reconcile(&mut self, evidence: &CaseEvidence, name: &[u8], line: usize) -> Reconciliation {
@@ -108,4 +108,53 @@ fn resolve_component_owner(
             .visible_component_type(cx.local, line, &current, link)?;
     }
     Some(current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::declared;
+    use crate::{
+        analysis::{analyze_file, analyze_project, ScopeTree},
+        config::{FormatConfig, FormatMode},
+        transform::{
+            document::Document,
+            pipeline::{Changed, PassContext},
+        },
+    };
+    use std::path::Path;
+
+    #[test]
+    fn restore_of_split_identifier_emits_no_edit() {
+        let declarations =
+            b"module unrelated\ntype :: CamelType\nend type CamelType\nend module unrelated\n";
+        let target = b"program p\ntype(CAM&\n&ELTYPE) :: value\nend program p\n";
+        let project = analyze_project([
+            (Path::new("unrelated.f90"), declarations.as_slice()),
+            (Path::new("target.f90"), target.as_slice()),
+        ])
+        .unwrap();
+        let local = analyze_file(target).unwrap();
+        let mut document = Document::from_bytes(target);
+        let analysis = document.analyze().unwrap();
+        let scopes = ScopeTree::build(&analysis);
+        let config = FormatConfig {
+            mode: FormatMode::NormalizeOnly,
+            ..FormatConfig::default()
+        };
+        let context = PassContext {
+            config: &config,
+            project: &project,
+            local: &local,
+            analysis: &analysis,
+            scopes: &scopes,
+        };
+
+        // The project-wide type table gives the base pass a CamelType spelling,
+        // but the type is not visible here, so scoped policy must restore the
+        // authored split spelling without ever emitting that base edit.
+        assert!(project.declared_types.contains(b"CAMELTYPE"));
+        assert_eq!(project.visible_type_spelling(&local, 1, b"CAMELTYPE"), None);
+        assert_eq!(declared(&mut document, &context).unwrap(), Changed::No);
+        assert_eq!(document.to_bytes(), target);
+    }
 }
