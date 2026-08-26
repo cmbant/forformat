@@ -161,6 +161,7 @@ unless `options` explicitly supplies `--config`.
 - [CLI and configuration options](docs/options.md) — primary user-facing option reference.
 - [File and project workflow](docs/file-workflow.md) — tracked-file selection, project context,
   exclusions, submodules, stdin identity, and fixed/free detection.
+- [VS Code setup](docs/vscode.md) — configure the Fortran extension to use `forformat`.
 - [Full-mode guide](docs/full-mode.md) — normalization, wrapping, layout, invariants, and code map.
 - [Compatibility](docs/compatibility.md) — the findent compatibility boundary and reviewed
   divergences.

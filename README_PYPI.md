@@ -87,6 +87,8 @@ forformat --indent-only src/module.f90
 The main option reference, including defaults, project settings, and file-selection options, is in
 the [project documentation](https://github.com/cmbant/forformat/blob/main/docs/options.md).
 
+For setup instructions for using `forformat` with VS Code, see the [VS Code setup guide](https://github.com/cmbant/forformat/blob/main/docs/vscode.md).
+
 ## Project context and configuration
 
 Explicit file paths use declarations from the surrounding Git checkout for project-aware case
