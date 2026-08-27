@@ -243,6 +243,7 @@ completed with their construct kind and matching name.
 | `--openmp-case` / `openmp_case` | boolean | true | uppercase reserved OpenMP sentinels and directive words |
 | `--relational-symbols` / `relational_symbols` | boolean | true | `.eq.` etc. become symbolic operators |
 | `--array-brackets` / `array_brackets` | boolean | true | `(/ ... /)` becomes `[ ... ]` where safe and permitted by `target_standard` |
+| `--modernize-decls` / `modernize_decls` | boolean | false | insert `::` in recognized legacy declarations |
 | `--compact-multiplicative` / `compact_multiplicative` | boolean | true | compact binary `*`, `/`, and `**` |
 | `--join-goto` / `join_goto` | boolean | true | `go to` becomes `goto` |
 | `--split-compound-keywords` / `split_compound_keywords` | boolean | true | `endif` becomes `end if` and similar |
@@ -256,6 +257,14 @@ completed with their construct kind and matching name.
 | `--comment-spacing` / `comment_spacing` | boolean | true | normalize the gap before trailing `!` |
 | `--continuation-markers` / `continuation_markers` | boolean | true | normalize continuation markers and OpenMP sentinels |
 | `--uppercase-single-l[=BOOL]` / `uppercase_single_l` | boolean | false | uppercase a lone identifier `l` |
+
+`--modernize-decls=true` (also `--modernize-declarations=true`) inserts `::` in recognized
+Fortran declaration forms whose legacy spelling permits the separator to be omitted. For example,
+`real x` becomes `real :: x`, `integer*4 i` becomes `integer*4 :: i`, and `type box` becomes
+`type :: box`. Existing separators, typed function headers, `TYPE IS`/`CLASS DEFAULT` selector
+guards, and `PARAMETER` statements are left alone. The option is syntax modernization, so it is
+available in every normalizing mode. Modes that normalize presentation whitespace use the normal
+` :: ` spelling; canonicalization modes retain the authored gap before the inserted separator.
 
 `--program-unit-spacing` separates adjacent program units by a blank line and puts one on each side
 of `CONTAINS`. It does not insert a blank line before a unit's `END`, so an empty procedure stays

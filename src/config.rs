@@ -200,6 +200,9 @@ pub struct StyleConfig {
     pub openmp_case: bool,
     pub relational_symbols: bool,
     pub array_brackets: bool,
+    /// Insert `::` in recognized declaration forms whose legacy spelling
+    /// permits the separator to be omitted.
+    pub modernize_declarations: bool,
     pub compact_multiplicative: bool,
     pub join_goto: bool,
     pub split_compound_keywords: bool,
@@ -239,6 +242,7 @@ impl Default for StyleConfig {
             openmp_case: true,
             relational_symbols: true,
             array_brackets: true,
+            modernize_declarations: false,
             compact_multiplicative: true,
             join_goto: true,
             split_compound_keywords: true,

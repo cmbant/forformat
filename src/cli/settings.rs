@@ -39,6 +39,7 @@ pub(crate) enum FormatSetting {
     OpenmpCase(bool),
     RelationalSymbols(bool),
     ArrayBrackets(bool),
+    ModernizeDecls(bool),
     CompactMultiplicative(bool),
     JoinGoto(bool),
     SplitCompoundKeywords(bool),
@@ -99,6 +100,7 @@ impl FormatSetting {
             Self::OpenmpCase(value) => config.style.openmp_case = *value,
             Self::RelationalSymbols(value) => config.style.relational_symbols = *value,
             Self::ArrayBrackets(value) => config.style.array_brackets = *value,
+            Self::ModernizeDecls(value) => config.style.modernize_declarations = *value,
             Self::CompactMultiplicative(value) => config.style.compact_multiplicative = *value,
             Self::JoinGoto(value) => config.style.join_goto = *value,
             Self::SplitCompoundKeywords(value) => config.style.split_compound_keywords = *value,
@@ -279,6 +281,7 @@ pub(crate) fn parse_format_setting(
             FormatSetting::RelationalSymbols(parse_bool(required(value)?)?)
         }
         OptionId::ArrayBrackets => FormatSetting::ArrayBrackets(parse_bool(required(value)?)?),
+        OptionId::ModernizeDecls => FormatSetting::ModernizeDecls(parse_bool(required(value)?)?),
         OptionId::CompactMultiplicative => {
             FormatSetting::CompactMultiplicative(parse_bool(required(value)?)?)
         }

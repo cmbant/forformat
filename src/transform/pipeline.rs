@@ -208,10 +208,18 @@ pub fn normalize(
         Ok(stage)
     })?;
 
+    // Declaration modernization changes syntax and width before wrapping. Use
+    // the logical statement provenance here so semicolon-separated and
+    // continued declarations receive the same rule, then let line rules own
+    // the ordinary spacing around the inserted separator.
+    if config.style.modernize_declarations {
+        contexts.run(document, passes::declaration_separators::run)?;
+    }
+
     // Step 11 consumes statement/scope data, so rebuild after the lexical,
-    // parenthesis, and separator edits above. Steps 12-13 read only
-    // config/project fields from PassContext; they intentionally share this
-    // snapshot after line rules.
+    // parenthesis, separator, and optional declaration edits above. Steps 12-13
+    // read only config/project fields from PassContext; they intentionally share
+    // this snapshot after line rules.
     contexts.run(document, |document, cx| {
         let mut stage = passes::line_rules::run(document, cx)?;
         // How a reserved OpenMP directive is spelled is canonicalization,

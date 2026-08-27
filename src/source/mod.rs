@@ -1,4 +1,5 @@
 pub mod buffer;
+pub(crate) mod declaration_separator;
 pub mod format_detect;
 pub mod logical_statement;
 pub mod physical_line;
