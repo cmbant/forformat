@@ -6,6 +6,12 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      credentialed_signing:
+        description: "Use signing/notarization credentials for this manual artifact test (does not publish)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -187,6 +193,9 @@ jobs:
     needs: checks
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
     env:
       RUSTFLAGS: >-
         -C debuginfo=0
@@ -200,6 +209,10 @@ jobs:
         with:
           toolchain: stable
           target: x86_64-pc-windows-msvc
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
 
       - name: Build reproducible binary A
         shell: pwsh
@@ -232,29 +245,50 @@ jobs:
             throw "reproducible Windows build hash mismatch"
           }
 
-          $artifact =
-            "target/repro-a/x86_64-pc-windows-msvc/release/forformat-x86_64-pc-windows-msvc.exe"
+          Write-Output $a
 
-          Copy-Item `
-            target/repro-a/x86_64-pc-windows-msvc/release/forformat.exe `
-            $artifact
+      - name: Authenticate to Google Cloud
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.credentialed_signing == 'true'
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
-          "$a  forformat-x86_64-pc-windows-msvc.exe" |
+      - name: Set up Cloud SDK
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.credentialed_signing == 'true'
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Sign Windows release binary
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.credentialed_signing == 'true'
+        shell: pwsh
+        env:
+          GCP_KMS_KEY: ${{ secrets.GCP_KMS_KEY }}
+          GCP_CERTIFICATE_CHAIN: ${{ secrets.GCP_CERTIFICATE_CHAIN }}
+        run: |
+          python tools/sign_windows_app.py `
+            --install-cng `
+            --file target/repro-a/x86_64-pc-windows-msvc/release/forformat.exe
+
+      - name: Write Windows release checksum
+        shell: pwsh
+        run: |
+          $artifact = "target/repro-a/x86_64-pc-windows-msvc/release/forformat.exe"
+          $hash = (Get-FileHash $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          "$hash  forformat.exe" |
             Out-File `
               "$artifact.sha256" `
               -Encoding ascii
 
-          Write-Output $a
-
       - uses: actions/upload-artifact@v7
         with:
-          name: forformat-x86_64-pc-windows-msvc
+          name: forformat-windows
           path: |
-            target/repro-a/x86_64-pc-windows-msvc/release/forformat-x86_64-pc-windows-msvc.exe
-            target/repro-a/x86_64-pc-windows-msvc/release/forformat-x86_64-pc-windows-msvc.exe.sha256
+            target/repro-a/x86_64-pc-windows-msvc/release/forformat.exe
+            target/repro-a/x86_64-pc-windows-msvc/release/forformat.exe.sha256
 
-  macos-artifacts:
-    name: macOS release artifact (${{ matrix.target }})
+  macos-binaries:
+    name: macOS reproducible binary (${{ matrix.target }})
     needs: checks
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
@@ -287,7 +321,7 @@ jobs:
           CARGO_TARGET_DIR=target/repro-b \
             cargo build --locked --release --target ${{ matrix.target }}
 
-      - name: Verify reproducible macOS binary and package it
+      - name: Verify reproducible macOS binary
         shell: bash
         run: |
           set -euo pipefail
@@ -302,23 +336,229 @@ jobs:
           test "$(lipo -archs "$a")" = "${{ matrix.arch }}"
 
           cp "$a" "$artifact"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-thin-${{ matrix.target }}
+          path: target/repro-a/${{ matrix.target }}/release/forformat-${{ matrix.target }}
+
+  macos-package:
+    name: macOS universal installer
+    needs: macos-binaries
+    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: macos-thin-*
+          path: target/macos-thin
+          merge-multiple: true
+
+      - name: Create universal macOS binary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          root=target/macos-package/root
+          binary="$root/usr/local/bin/forformat"
+
+          mkdir -p "$(dirname "$binary")"
+          lipo -create \
+            target/macos-thin/forformat-x86_64-apple-darwin \
+            target/macos-thin/forformat-aarch64-apple-darwin \
+            -output "$binary"
+          chmod 0755 "$binary"
+
+          lipo "$binary" -verify_arch x86_64 arm64
+
+      - name: Package unsigned macOS installer
+        if: github.event.inputs.credentialed_signing != 'true' && !startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)
+          pkgbuild \
+            --root target/macos-package/root \
+            --identifier com.cmbant.forformat \
+            --version "$version" \
+            --install-location / \
+            --ownership recommended \
+            target/macos-package/forformat-macos.pkg
+
+          pkgutil --payload-files target/macos-package/forformat-macos.pkg |
+            grep -Fx './usr/local/bin/forformat'
+
+      - name: Sign, package, and notarize macOS installer
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.credentialed_signing == 'true'
+        shell: bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          MACOS_INSTALLER_CERTIFICATE: ${{ secrets.MACOS_INSTALLER_CERTIFICATE }}
+          MACOS_INSTALLER_CERTIFICATE_PWD: ${{ secrets.MACOS_INSTALLER_CERTIFICATE_PWD }}
+          APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          APP_STORE_CONNECT_API_ISSUER: ${{ secrets.APP_STORE_CONNECT_API_ISSUER }}
+        run: |
+          set -euo pipefail
+
+          root=target/macos-package/root
+          binary="$root/usr/local/bin/forformat"
+          pkg=target/macos-package/forformat-macos.pkg
+          app_certificate=$(mktemp)
+          installer_certificate=$(mktemp)
+          keychain=$(mktemp).keychain-db
+          api_key_dir=$(mktemp -d)
+          notarization_result=$(mktemp).json
+          notarization_stderr=$(mktemp)
+          notarization_log=$(mktemp).json
+
+          cleanup() {
+            rm -f \
+              "$app_certificate" \
+              "$installer_certificate" \
+              "$notarization_result" \
+              "$notarization_stderr" \
+              "$notarization_log"
+            rm -rf "$api_key_dir"
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$app_certificate"
+          printf '%s' "$MACOS_INSTALLER_CERTIFICATE" | base64 --decode > "$installer_certificate"
+
+          security create-keychain -p "temporary-password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "temporary-password" "$keychain"
+          security import "$app_certificate" \
+            -P "$MACOS_CERTIFICATE_PWD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$keychain"
+          security import "$installer_certificate" \
+            -P "$MACOS_INSTALLER_CERTIFICATE_PWD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$keychain"
+          security list-keychain -d user -s "$keychain"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "temporary-password" \
+            "$keychain"
+
+          app_identity=$(
+            security find-identity -v -p codesigning "$keychain" |
+              sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' |
+              head -n 1
+          )
+          installer_identity=$(
+            security find-identity -v "$keychain" |
+              sed -n 's/.*"\(Developer ID Installer: .*\)"/\1/p' |
+              head -n 1
+          )
+          test -n "$app_identity"
+          test -n "$installer_identity"
+
+          codesign \
+            --force \
+            --options runtime \
+            --timestamp \
+            --sign "$app_identity" \
+            "$binary"
+          codesign --verify --strict --verbose=4 "$binary"
+          lipo "$binary" -verify_arch x86_64 arm64
+
+          version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)
+          pkgbuild \
+            --root "$root" \
+            --identifier com.cmbant.forformat \
+            --version "$version" \
+            --install-location / \
+            --ownership recommended \
+            --sign "$installer_identity" \
+            --keychain "$keychain" \
+            "$pkg"
+
+          pkgutil --payload-files "$pkg" | grep -Fx './usr/local/bin/forformat'
+          pkgutil --check-signature "$pkg"
+
+          api_key="$api_key_dir/AuthKey_$APP_STORE_CONNECT_API_KEY.p8"
+          printf '%s\n' "$APP_STORE_CONNECT_KEY" > "$api_key"
+          openssl pkey -in "$api_key" -noout >/dev/null
+
+          set +e
+          xcrun notarytool submit "$pkg" \
+            --key "$api_key" \
+            --key-id "$APP_STORE_CONNECT_API_KEY" \
+            --issuer "$APP_STORE_CONNECT_API_ISSUER" \
+            --wait \
+            --output-format json \
+            > "$notarization_result" \
+            2> "$notarization_stderr"
+          notary_exit=$?
+          set -e
+
+          cat "$notarization_result"
+          if [ -s "$notarization_stderr" ]; then
+            cat "$notarization_stderr" >&2
+          fi
+
+          read_notary_field() {
+            python3 -c \
+              'import json, sys; value = json.load(open(sys.argv[1], encoding="utf-8")).get(sys.argv[2], ""); print(value or "")' \
+              "$notarization_result" "$1" 2>/dev/null || true
+          }
+
+          submission_id=$(read_notary_field id)
+          notarization_status=$(read_notary_field status)
+
+          if [ "$notary_exit" -ne 0 ] || [ "$notarization_status" != "Accepted" ]; then
+            echo "Notarization failed with status: ${notarization_status:-unknown}" >&2
+            if [ -n "$submission_id" ]; then
+              xcrun notarytool log "$submission_id" \
+                --key "$api_key" \
+                --key-id "$APP_STORE_CONNECT_API_KEY" \
+                --issuer "$APP_STORE_CONNECT_API_ISSUER" \
+                "$notarization_log" || true
+              cat "$notarization_log" || true
+            fi
+            exit 1
+          fi
+
+          xcrun stapler staple "$pkg"
+          xcrun stapler validate "$pkg"
+
+      - name: Write macOS installer checksum
+        shell: bash
+        run: |
+          set -euo pipefail
           (
-            cd "$(dirname "$artifact")"
-            shasum -a 256 "$(basename "$artifact")" \
-              > "$(basename "$artifact").sha256"
+            cd target/macos-package
+            shasum -a 256 forformat-macos.pkg > forformat-macos.pkg.sha256
           )
 
       - uses: actions/upload-artifact@v7
         with:
-          name: forformat-${{ matrix.target }}
+          name: forformat-macos
           path: |
-            target/repro-a/${{ matrix.target }}/release/forformat-${{ matrix.target }}
-            target/repro-a/${{ matrix.target }}/release/forformat-${{ matrix.target }}.sha256
+            target/macos-package/forformat-macos.pkg
+            target/macos-package/forformat-macos.pkg.sha256
 
   artifact-verification:
     name: verify release artifacts
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
-    needs: [static-artifacts, windows-artifact, macos-artifacts]
+    needs: [static-artifacts, windows-artifact, macos-package]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -331,14 +571,13 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: forformat-x86_64-pc-windows-msvc
+          name: forformat-windows
           path: artifacts
 
       - uses: actions/download-artifact@v8
         with:
-          pattern: forformat-*-apple-darwin
+          name: forformat-macos
           path: artifacts
-          merge-multiple: true
 
       - name: Verify artifact checksums
         shell: bash
@@ -352,17 +591,9 @@ jobs:
           test "${#archives[@]}" -eq 2
           test "${#archive_sidecars[@]}" -eq 2
 
-          # Named rather than counted by glob: `forformat-*.sha256` also matches
-          # the two archive sidecars above, so no glob can isolate the loose
-          # binaries. Asserting each name also catches an upload that silently
-          # produced the wrong file name, which a bare count cannot.
-          for binary in \
-            forformat-x86_64-pc-windows-msvc.exe \
-            forformat-x86_64-apple-darwin \
-            forformat-aarch64-apple-darwin
-          do
-            test -f "artifacts/$binary"
-            test -f "artifacts/$binary.sha256"
+          for artifact in forformat.exe forformat-macos.pkg; do
+            test -f "artifacts/$artifact"
+            test -f "artifacts/$artifact.sha256"
           done
 
           (
@@ -431,14 +662,13 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: forformat-x86_64-pc-windows-msvc
+          name: forformat-windows
           path: artifacts
 
       - uses: actions/download-artifact@v8
         with:
-          pattern: forformat-*-apple-darwin
+          name: forformat-macos
           path: artifacts
-          merge-multiple: true
 
       - name: Re-verify checksums before publishing
         shell: bash
@@ -452,17 +682,9 @@ jobs:
           test "${#archives[@]}" -eq 2
           test "${#archive_sidecars[@]}" -eq 2
 
-          # Named rather than counted by glob: `forformat-*.sha256` also matches
-          # the two archive sidecars above, so no glob can isolate the loose
-          # binaries. Asserting each name also catches an upload that silently
-          # produced the wrong file name, which a bare count cannot.
-          for binary in \
-            forformat-x86_64-pc-windows-msvc.exe \
-            forformat-x86_64-apple-darwin \
-            forformat-aarch64-apple-darwin
-          do
-            test -f "artifacts/$binary"
-            test -f "artifacts/$binary.sha256"
+          for artifact in forformat.exe forformat-macos.pkg; do
+            test -f "artifacts/$artifact"
+            test -f "artifacts/$artifact.sha256"
           done
 
           (
@@ -475,9 +697,8 @@ jobs:
         with:
           subject-path: |
             artifacts/*.tar.gz
-            artifacts/forformat-x86_64-pc-windows-msvc.exe
-            artifacts/forformat-x86_64-apple-darwin
-            artifacts/forformat-aarch64-apple-darwin
+            artifacts/forformat.exe
+            artifacts/forformat-macos.pkg
 
       - name: Create or update GitHub Release
         env:
