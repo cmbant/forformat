@@ -1,0 +1,217 @@
+name: stdin filename review fixes
+on:
+  push:
+    branches: [tmp/stdin-filename-review-fixes]
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: feat/stdin-filename
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Apply review fixes
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          def sub(path, pattern, replacement):
+              p = Path(path); s = p.read_text()
+              s2, n = re.subn(pattern, replacement, s, count=1, flags=re.S)
+              if n != 1: raise SystemExit(f"{path}: expected 1 match, got {n}")
+              p.write_text(s2)
+
+          sub("src/io/sources.rs", r'''/// Resolve the file identity assigned to stdin.*?pub\(super\) fn resolve_stdin_filename\(path: &Path, cwd: &Path\) -> Result<PathBuf, WorkflowError> \{.*?\n\}\n\npub\(super\) fn read_source''', '''/// Resolve the file identity assigned to stdin. Existing paths are
+          /// canonicalized as a whole so aliases compare equal to tracked project
+          /// sources, while genuinely new editor buffers keep their requested filename
+          /// under a canonical parent. Virtual filenames are not restricted to the
+          /// filesystem source-extension allow-list.
+          pub(super) fn resolve_stdin_filename(path: &Path, cwd: &Path) -> Result<PathBuf, WorkflowError> {
+              let candidate = if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) };
+              let file_name = candidate.file_name().ok_or_else(|| WorkflowError::Usage(format!(
+                  "--stdin-filename requires a filename: {}", path.display()
+              )))?;
+              match fs::symlink_metadata(&candidate) {
+                  Ok(_) => {
+                      let canonical = fs::canonicalize(&candidate).map_err(|error| WorkflowError::Usage(format!(
+                          "--stdin-filename path could not be resolved: {} ({error})", candidate.display()
+                      )))?;
+                      if !fs::metadata(&canonical)?.is_file() {
+                          return Err(WorkflowError::Usage(format!(
+                              "--stdin-filename requires a regular file when the path exists: {}", candidate.display()
+                          )));
+                      }
+                      Ok(canonical)
+                  }
+                  Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                      let parent = candidate.parent().unwrap_or(cwd);
+                      let directory = fs::canonicalize(parent).map_err(|error| WorkflowError::Usage(format!(
+                          "--stdin-filename parent directory does not exist: {} ({error})", parent.display()
+                      )))?;
+                      if !fs::metadata(&directory)?.is_dir() {
+                          return Err(WorkflowError::Usage(format!(
+                              "--stdin-filename parent is not a directory: {}", parent.display()
+                          )));
+                      }
+                      Ok(directory.join(file_name))
+                  }
+                  Err(error) => Err(WorkflowError::Io(error)),
+              }
+          }
+
+          pub(super) fn read_source''')
+
+          sub("src/source/format_detect.rs", r'''fn has_modern_free_suffix\(path: &std::path::Path\) -> bool \{.*?\n\}''', '''fn has_modern_free_suffix(path: &std::path::Path) -> bool {
+              let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+                  return false;
+              };
+              !extension.eq_ignore_ascii_case("f")
+                  && crate::transform::vocab::SOURCE_EXTENSIONS.iter().any(|candidate| {
+                      candidate.strip_prefix('.').is_some_and(|known| known.eq_ignore_ascii_case(extension))
+                  })
+          }''')
+
+          p = Path("tests/io_workflow.rs"); s = p.read_text()
+          marker = "#[test]\nfn stdin_filename_excludes_the_stale_on_disk_target() {"
+          test = '''#[test]
+          fn stdin_filename_accepts_arbitrary_extensions_and_ifree_controls_the_form() {
+              let repo = temp_repo();
+              let source = b"      program p\\n      x=1\\n      end program p\\n";
+              let automatic = run_stdin(&repo, &["--full", "--no-config", "--isolated", "--stdin-filename", "buffer.fypp"], source);
+              assert_eq!(automatic.status.code(), Some(0));
+              assert_eq!(automatic.stdout, source);
+              assert!(String::from_utf8_lossy(&automatic.stderr).contains("fixed-form source, skipped"));
+              let forced = run_stdin(&repo, &["--full", "--no-config", "--isolated", "--stdin-filename", "buffer.fypp", "-ifree"], source);
+              assert_eq!(forced.status.code(), Some(0));
+              assert_ne!(forced.stdout, source);
+              assert!(forced.stderr.is_empty());
+              let _ = fs::remove_dir_all(repo);
+          }
+
+          '''
+          if s.count(marker) != 1: raise SystemExit("stale marker mismatch")
+          s = s.replace(marker, test + marker, 1)
+          marker = "#[test]\nfn stdin_filename_uses_its_config_origin_when_project_context_is_overridden() {"
+          test = '''#[test]
+          fn stdin_filename_case_alias_excludes_the_stale_on_disk_target_when_supported() {
+              let repo = temp_repo();
+              let target = repo.join("target.f90");
+              fs::write(&target, b"program p\\ninteger :: StaleName\\nend program p\\n").unwrap();
+              fs::write(repo.join("shared.f90"), b"module SharedName\\nend module SharedName\\n").unwrap();
+              git_add(&repo);
+              let alias = repo.join("TARGET.F90");
+              if !alias.exists() { let _ = fs::remove_dir_all(repo); return; }
+              let output = run_stdin(&repo, &["--full", "--no-config", "--stdin-filename", alias.to_str().unwrap()], b"program p\\nuse sharedname\\nprint *, stalename\\nend program p\\n");
+              assert_eq!(output.status.code(), Some(0));
+              assert_eq!(output.stdout, b"program p\\n   use SharedName\\n   print *, stalename\\nend program p\\n");
+              let _ = fs::remove_dir_all(repo);
+          }
+
+          '''
+          if s.count(marker) != 1: raise SystemExit("config marker mismatch")
+          s = s.replace(marker, test + marker, 1)
+          marker = "#[test]\nfn project_context_requires_a_directory() {"
+          test = '''#[test]
+          fn stdin_filename_rejects_an_existing_non_file_path() {
+              let repo = temp_repo();
+              fs::create_dir(repo.join("looks-like-source.f90")).unwrap();
+              let output = run_stdin(&repo, &["--no-config", "--stdin-filename", "looks-like-source.f90"], b"program p\\nend program p\\n");
+              assert_eq!(output.status.code(), Some(2));
+              assert!(String::from_utf8_lossy(&output.stderr).contains("--stdin-filename requires a regular file when the path exists"));
+              let _ = fs::remove_dir_all(repo);
+          }
+
+          '''
+          if s.count(marker) != 1: raise SystemExit("project marker mismatch")
+          p.write_text(s.replace(marker, test + marker, 1))
+
+          def repl(path, old, new):
+              p=Path(path); s=p.read_text()
+              if s.count(old)!=1: raise SystemExit(f"{path}: paragraph mismatch")
+              p.write_text(s.replace(old,new,1))
+
+          repl("docs/options.md",
+          """`--stdin-filename` implies stdin. Its parent directory must exist, but FILE itself may be a new
+          unsaved path. The filename participates in automatic source-form detection, so
+          `--query-format --stdin-filename=FILE` uses the same filename prior as a real file without opening FILE.
+          """,
+          """`--stdin-filename` implies stdin and accepts any filename; it is virtual-input metadata rather than
+          a filesystem target selector. Its parent directory must exist, and an existing FILE must be a regular
+          file, but FILE itself may be a new unsaved path. Recognized Fortran suffixes participate in automatic
+          source-form detection exactly as they do for real targets; other suffixes provide no form prior, so
+          use `-ifree`/`--input-format=free` for ambiguous free-form buffers such as `foo.fypp`.
+          `--query-format --stdin-filename=FILE` uses the same recognized filename prior without opening a new FILE.
+          """)
+          repl("docs/options.md",
+          """resolved there, and diagnostics name FILE. If FILE is tracked, its stale on-disk copy is removed
+          from project input and the stdin facts replace it. The file itself need not exist; this supports new
+          editor buffers.
+          """,
+          """resolved there, and diagnostics name FILE. Existing paths are canonicalized as a whole, so alternate
+          spellings or symlink aliases still shadow the same tracked source; an existing path must be a regular
+          file. If FILE is tracked, its stale on-disk copy is removed from project input and the stdin facts
+          replace it. The file itself need not exist; this supports new editor buffers.
+          """)
+          repl("docs/file-workflow.md",
+          """`--stdin-filename=<file>` identifies the source represented by stdin. The file itself need not exist,
+          which makes the option suitable for an unsaved editor buffer, but its parent directory must exist.
+          The filename is the buffer's identity for configuration discovery, default Git-project discovery,
+          source-form detection, relative Fortran `INCLUDE` resolution, and diagnostics. When the filename is
+          a tracked source, its stale on-disk copy is omitted from project analysis and the stdin facts take
+          its place. `--stdin-filename` implies stdin; `--isolated` may be added when the filename-local
+          behaviour is wanted without scanning project sources.
+          """,
+          """`--stdin-filename=<file>` identifies the source represented by stdin and accepts any filename; it is
+          virtual-input metadata, not a request to discover that path as a filesystem formatting target. The
+          file itself need not exist, which makes the option suitable for an unsaved editor buffer, but its
+          parent directory must exist. If the path already exists it is canonicalized as a whole and must be a
+          regular file, so alternate spellings and symlink aliases resolve to the same tracked identity. The
+          filename is the buffer's identity for configuration discovery, default Git-project discovery,
+          source-form detection, relative Fortran `INCLUDE` resolution, and diagnostics. When the filename is
+          a tracked source, its stale on-disk copy is omitted from project analysis and the stdin facts take
+          its place. `--stdin-filename` implies stdin; `--isolated` may be added when the filename-local
+          behaviour is wanted without scanning project sources.
+          """)
+          repl("docs/file-workflow.md",
+          """available — including through `--stdin-filename` — modern suffixes such as `.f90` and `.F90` add a
+          strong free-form prior, while bare `.f` and `.F` remain content-driven. Anonymous stdin has no
+          filename prior, so it is formatted when the bytes contain positive free-form evidence and remains
+          conservatively fixed when the content is ambiguous. Fixed-form sources are skipped: their bytes are
+          """,
+          """available — including through `--stdin-filename` — recognized modern Fortran suffixes such as `.f90`
+          and `.F90` add a strong free-form prior, while bare `.f` and `.F` remain content-driven. Arbitrary
+          virtual filenames are accepted, but unrecognized suffixes add no prior; use `-ifree` for ambiguous
+          free-form editor buffers such as `.fypp`. Anonymous stdin has no filename prior, so it is formatted
+          when the bytes contain positive free-form evidence and remains conservatively fixed when the content
+          is ambiguous. Fixed-form sources are skipped: their bytes are
+          """)
+          repl("docs/vscode.md",
+          """stale on-disk shadowing.
+          """,
+          """stale on-disk shadowing. The virtual filename is not limited to forformat's filesystem source
+          extension allow-list, so editor-only names such as `.fypp` are accepted; pass `-ifree` when such an
+          unrecognized suffix needs an explicit free-form override.
+          """)
+          PY
+      - name: Format and focused tests
+        run: |
+          cargo fmt --all -- --check
+          cargo test --locked --test io_workflow stdin_filename -- --nocapture
+          cargo test --locked source::format_detect::tests
+          cargo build --locked
+          ./tools/check_docs.sh target/debug/forformat
+      - name: Commit review fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/io/sources.rs src/source/format_detect.rs tests/io_workflow.rs docs/options.md docs/file-workflow.md docs/vscode.md
+          git diff --cached --check
+          git commit -m "Harden stdin filename identity"
+          git push origin HEAD:feat/stdin-filename
