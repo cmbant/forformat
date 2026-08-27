@@ -194,8 +194,9 @@ named by a source that is already being analyzed is read from disk relative to t
 it is part of that source's text; named stdin uses `--stdin-filename` as that source path. Absolute
 paths are also honored. Compiler include-directory (`-I`) search paths are not modeled, and
 missing/unreadable/unanalysable fragments are left unresolved rather than guessed. An include
-fragment is never selected as a project source in its own right. `--isolated` disables project
-analysis and with it project INCLUDE expansion.
+fragment is never selected as a project source in its own right. `--isolated` disables project-source
+analysis, but named stdin still expands its own `INCLUDE` fragments from `--stdin-filename`, because
+those fragments are part of the current file rather than project context.
 
 See [file-workflow.md](file-workflow.md) for repository discovery, non-Git context discovery,
 submodule behaviour, symlinks, and write semantics.

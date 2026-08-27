@@ -485,11 +485,20 @@ fn format_project_stdin(
             scope.root.as_deref(),
         )?
     } else {
+        let local = stdin_local.expect("full-mode stdin must have precomputed facts");
+        // A named stdin buffer owns its INCLUDE resolution even when it is
+        // deliberately absent from project tables (for example --isolated or
+        // a context-path that excludes the buffer). Mirror format_source_at:
+        // expand the current file's local facts from its resolved path before
+        // formatting. If project construction already cached this exact
+        // expansion, expand_uncached leaves lookup to that cache.
+        let expanded_local = input_path.map(|path| context.expand_uncached(path, local.clone()));
+        let local = expanded_local.as_ref().unwrap_or(local);
         in_input(
             crate::format::full::format_with_context_and_local(
                 source,
                 context,
-                stdin_local.expect("full-mode stdin must have precomputed facts"),
+                local,
                 &invocation.config,
             ),
             input_path,
