@@ -1,6 +1,6 @@
 [package]
 name = "forformat"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2021"
 rust-version = "1.85"
 description = "A standalone free-form Fortran formatter"
