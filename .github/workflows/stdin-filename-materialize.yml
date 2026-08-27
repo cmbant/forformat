@@ -1,0 +1,37 @@
+name: stdin filename materialize
+
+on:
+  push:
+    branches:
+      - tmp/stdin-filename-materialize
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reconstruct candidate files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .tmp-stdin-filename/payload.* | base64 --decode > /tmp/stdin-filename.tar.gz
+          tar -xzf /tmp/stdin-filename.tar.gz
+          test "$(git hash-object docs/options.md)" = d92ef46e4ffcd632e8960de343e5fb5df0712932
+          test "$(git hash-object src/cli/settings.rs)" = c46c8f328a368f47081c6cc537ba287316203340
+          test "$(git hash-object src/io/mod.rs)" = ba2ff2dab07d950e9e68c6092838fef00ca8cde0
+          test "$(git hash-object tests/io_workflow.rs)" = fca847c1a2675eb66d95dc52521f8438c1009e4f
+      - name: Commit materialized files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add docs/options.md src/cli/settings.rs src/io/mod.rs tests/io_workflow.rs
+          git commit -m 'materialize stdin filename candidate'
+          git push
