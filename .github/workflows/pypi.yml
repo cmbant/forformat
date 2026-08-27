@@ -1,33 +1,61 @@
 name: Publish Python package to PyPI
 
 on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      release_ref:
+        description: "Existing v* tag to publish"
+        required: true
+        type: string
+  # Keep this temporarily so the existing ci.yml caller remains valid. Jobs
+  # below are gated so a reusable invocation is a no-op; Trusted Publishing
+  # only runs when pypi.yml itself is the top-level workflow.
   workflow_call:
 
 permissions:
   contents: read
 
-# Reached only through `workflow_call` from ci.yml, whose `publish-pypi` job
-# runs after artifact verification -- which transitively requires the `checks`
-# job, i.e. this same rust-checks.yml. Calling it again here would re-run the
-# whole correctness matrix, Windows and macOS tests included, for every tag.
+env:
+  FORFORMAT_RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.release_ref || github.ref_name }}
+
 jobs:
   verify-release:
     name: Verify release
+    # In a reusable workflow GitHub associates github.workflow with the caller.
+    # PyPI Trusted Publishing does not support publishing from that context, so
+    # only execute for top-level pypi.yml tag/manual runs.
+    if: github.workflow == 'Publish Python package to PyPI'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.FORFORMAT_RELEASE_REF }}
+          fetch-depth: 0
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
-      - name: Verify the tag matches the package version
+      - name: Verify the release ref and package version
         shell: bash
         run: |
           set -euo pipefail
+
+          case "$FORFORMAT_RELEASE_REF" in
+            v*) ;;
+            *)
+              echo "release_ref must be an existing v* tag" >&2
+              exit 1
+              ;;
+          esac
+
+          test "$(git describe --tags --exact-match)" = "$FORFORMAT_RELEASE_REF"
+
           version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)
-          test "$GITHUB_REF_NAME" = "v$version"
+          test "$FORFORMAT_RELEASE_REF" = "v$version"
       - run: ./tools/check_package.sh
 
   build-wheels:
@@ -66,6 +94,8 @@ jobs:
             wheel_platform_tag: win_arm64
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.FORFORMAT_RELEASE_REF }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
@@ -125,6 +155,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.FORFORMAT_RELEASE_REF }}
       - uses: actions/setup-python@v6
         with:
           python-version: "3.9"
