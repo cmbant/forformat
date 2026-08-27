@@ -1,5 +1,5 @@
 use crate::source::{
-    syntax::declaration_type_head_len,
+    declaration_separator::{declaration_separator, DeclarationSeparator},
     tokens::{tokenize, Token, TokenKind},
     LexState,
 };
@@ -16,11 +16,16 @@ pub(super) fn declared_variable_names(text: &[u8]) -> Vec<Vec<u8>> {
     if first.kind != TokenKind::Name || first.is(b"use") {
         return Vec::new();
     }
-    let separator = tokens
-        .iter()
-        .position(|token| token.depth == 0 && token.text == b"::");
-    let Some(separator) = separator else {
-        return old_style_variable_names(&tokens, first_index);
+    let start = match declaration_separator(&tokens) {
+        DeclarationSeparator::Present => tokens
+            .iter()
+            .position(|token| token.depth == 0 && token.text == b"::")
+            .map(|separator| separator + 1),
+        DeclarationSeparator::Missing { insert_before } => Some(insert_before),
+        DeclarationSeparator::NotApplicable => None,
+    };
+    let Some(start) = start else {
+        return Vec::new();
     };
     if matches!(
         first.text.to_ascii_lowercase().as_slice(),
@@ -37,7 +42,7 @@ pub(super) fn declared_variable_names(text: &[u8]) -> Vec<Vec<u8>> {
     ) {
         return Vec::new();
     }
-    declaration_entity_names(&tokens, separator + 1)
+    declaration_entity_names(&tokens, start)
 }
 
 pub(super) fn declared_binding_names(text: &[u8]) -> Vec<Vec<u8>> {
@@ -54,26 +59,22 @@ pub(super) fn declared_binding_names(text: &[u8]) -> Vec<Vec<u8>> {
     ) {
         return Vec::new();
     }
-    let Some(separator) = tokens
-        .iter()
-        .position(|token| token.depth == 0 && token.text == b"::")
-    else {
-        return Vec::new();
+    let start = if tokens[first].is_name(b"generic") {
+        tokens
+            .iter()
+            .position(|token| token.depth == 0 && token.text == b"::")
+            .map(|separator| separator + 1)
+    } else {
+        match declaration_separator(&tokens) {
+            DeclarationSeparator::Present => tokens
+                .iter()
+                .position(|token| token.depth == 0 && token.text == b"::")
+                .map(|separator| separator + 1),
+            DeclarationSeparator::Missing { insert_before } => Some(insert_before),
+            DeclarationSeparator::NotApplicable => None,
+        }
     };
-    declaration_entity_names(&tokens, separator + 1)
-}
-
-fn old_style_variable_names(tokens: &[Token<'_>], first_index: usize) -> Vec<Vec<u8>> {
-    let Some(head_len) = declaration_type_head_len(tokens, first_index) else {
-        return Vec::new();
-    };
-    let start = first_index + head_len;
-    if tokens.iter().skip(start).any(|token| {
-        token.kind == TokenKind::Name && token.depth == 0 && token.is_name(b"function")
-    }) {
-        return Vec::new();
-    }
-    declaration_entity_names(tokens, start)
+    start.map_or_else(Vec::new, |start| declaration_entity_names(&tokens, start))
 }
 
 fn declaration_entity_names(tokens: &[Token<'_>], start: usize) -> Vec<Vec<u8>> {
@@ -247,18 +248,58 @@ pub(super) fn old_style_type_name<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::declared_variable_names;
+    use super::{declared_binding_names, declared_variable_names};
 
     #[test]
-    fn old_style_declarations_use_shared_type_heads() {
+    fn old_style_declarations_use_shared_separator_sites() {
         for (source, expected) in [
             (b"DOUBLEPRECISION sum".as_slice(), b"sum".as_slice()),
             (b"TYPEOF(x) result", b"result"),
             (b"CLASSOF(x) kind", b"kind"),
             (b"DOUBLE COMPLEX product", b"product"),
             (b"INTEGER*1 count", b"count"),
+            (b"DIMENSION RADSAV(2)", b"RADSAV"),
+            (b"INTENT(IN) Arg", b"Arg"),
+            (b"PUBLIC kmlAddScale", b"kmlAddScale"),
         ] {
             assert_eq!(declared_variable_names(source), vec![expected.to_vec()]);
+        }
+    }
+
+    #[test]
+    fn declaration_facts_do_not_depend_on_separator_modernization() {
+        for (legacy, modern) in [
+            (
+                b"dimension RADSAV(2)".as_slice(),
+                b"dimension :: RADSAV(2)".as_slice(),
+            ),
+            (b"intent(in) Arg", b"intent(in) :: Arg"),
+            (b"public kmlAddScale", b"public :: kmlAddScale"),
+            (b"procedure(cb) Handler", b"procedure(cb) :: Handler"),
+        ] {
+            assert_eq!(
+                declared_variable_names(legacy),
+                declared_variable_names(modern),
+                "facts differ for {:?}",
+                String::from_utf8_lossy(legacy)
+            );
+        }
+    }
+    #[test]
+    fn binding_facts_do_not_depend_on_separator_modernization() {
+        for (legacy, modern) in [
+            (
+                b"procedure(cb) Handler".as_slice(),
+                b"procedure(cb) :: Handler".as_slice(),
+            ),
+            (b"final Finish".as_slice(), b"final :: Finish".as_slice()),
+        ] {
+            assert_eq!(
+                declared_binding_names(legacy),
+                declared_binding_names(modern),
+                "binding facts differ for {:?}",
+                String::from_utf8_lossy(legacy)
+            );
         }
     }
 }
