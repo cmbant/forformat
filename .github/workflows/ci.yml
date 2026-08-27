@@ -6,6 +6,12 @@ on:
     tags: ["v*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      skip_signing:
+        description: "Skip macOS/Windows signing and notarization (for testing only)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -187,6 +193,9 @@ jobs:
     needs: checks
     if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
     env:
       RUSTFLAGS: >-
         -C debuginfo=0
@@ -200,6 +209,10 @@ jobs:
         with:
           toolchain: stable
           target: x86_64-pc-windows-msvc
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
 
       - name: Build reproducible binary A
         shell: pwsh
@@ -239,12 +252,41 @@ jobs:
             target/repro-a/x86_64-pc-windows-msvc/release/forformat.exe `
             $artifact
 
-          "$a  forformat-x86_64-pc-windows-msvc.exe" |
+          Write-Output $a
+
+      - name: Authenticate to Google Cloud
+        if: github.event.inputs.skip_signing != 'true'
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        if: github.event.inputs.skip_signing != 'true'
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Sign Windows release binary
+        if: github.event.inputs.skip_signing != 'true'
+        shell: pwsh
+        env:
+          GCP_KMS_KEY: ${{ secrets.GCP_KMS_KEY }}
+          GCP_CERTIFICATE_CHAIN: ${{ secrets.GCP_CERTIFICATE_CHAIN }}
+        run: |
+          python tools/sign_windows_app.py `
+            --install-cng `
+            --file target/repro-a/x86_64-pc-windows-msvc/release/forformat-x86_64-pc-windows-msvc.exe
+
+      - name: Write Windows release checksum
+        shell: pwsh
+        run: |
+          $artifact =
+            "target/repro-a/x86_64-pc-windows-msvc/release/forformat-x86_64-pc-windows-msvc.exe"
+          $hash = (Get-FileHash $artifact -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          "$hash  forformat-x86_64-pc-windows-msvc.exe" |
             Out-File `
               "$artifact.sha256" `
               -Encoding ascii
-
-          Write-Output $a
 
       - uses: actions/upload-artifact@v7
         with:
@@ -287,7 +329,7 @@ jobs:
           CARGO_TARGET_DIR=target/repro-b \
             cargo build --locked --release --target ${{ matrix.target }}
 
-      - name: Verify reproducible macOS binary and package it
+      - name: Verify reproducible macOS binary
         shell: bash
         run: |
           set -euo pipefail
@@ -302,6 +344,82 @@ jobs:
           test "$(lipo -archs "$a")" = "${{ matrix.arch }}"
 
           cp "$a" "$artifact"
+
+      - name: Sign and notarize macOS release binary
+        if: github.event.inputs.skip_signing != 'true'
+        shell: bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PWD: ${{ secrets.MACOS_CERTIFICATE_PWD }}
+          APP_STORE_CONNECT_KEY: ${{ secrets.APP_STORE_CONNECT_KEY }}
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          APP_STORE_CONNECT_API_ISSUER: ${{ secrets.APP_STORE_CONNECT_API_ISSUER }}
+        run: |
+          set -euo pipefail
+
+          artifact="target/repro-a/${{ matrix.target }}/release/forformat-${{ matrix.target }}"
+          certificate=$(mktemp)
+          keychain=$(mktemp).keychain-db
+          api_key_dir=$(mktemp -d)
+          notarization_zip=$(mktemp).zip
+
+          cleanup() {
+            rm -f "$certificate" "$notarization_zip"
+            rm -rf "$api_key_dir"
+            security delete-keychain "$keychain" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$certificate"
+
+          security create-keychain -p "temporary-password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "temporary-password" "$keychain"
+          security import "$certificate" \
+            -P "$MACOS_CERTIFICATE_PWD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$keychain"
+          security list-keychain -d user -s "$keychain"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "temporary-password" \
+            "$keychain"
+
+          identity=$(
+            security find-identity -v -p codesigning "$keychain" |
+              sed -n 's/.*"\(Developer ID Application: .*\)"/\1/p' |
+              head -n 1
+          )
+          test -n "$identity"
+
+          codesign \
+            --force \
+            --options runtime \
+            --timestamp \
+            --sign "$identity" \
+            "$artifact"
+          codesign --verify --strict --verbose=4 "$artifact"
+
+          api_key="$api_key_dir/AuthKey_$APP_STORE_CONNECT_API_KEY.p8"
+          printf '%s' "$APP_STORE_CONNECT_KEY" > "$api_key"
+
+          ditto -c -k --keepParent "$artifact" "$notarization_zip"
+          # The notary service creates an online ticket for this standalone
+          # binary; Apple does not support stapling tickets to loose binaries.
+          xcrun notarytool submit "$notarization_zip" \
+            --key "$api_key" \
+            --key-id "$APP_STORE_CONNECT_API_KEY" \
+            --issuer "$APP_STORE_CONNECT_API_ISSUER" \
+            --wait
+
+      - name: Write macOS release checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          artifact="target/repro-a/${{ matrix.target }}/release/forformat-${{ matrix.target }}"
           (
             cd "$(dirname "$artifact")"
             shasum -a 256 "$(basename "$artifact")" \
