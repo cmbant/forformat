@@ -281,7 +281,7 @@ pub(crate) fn parse_format_setting(
             FormatSetting::RelationalSymbols(parse_bool(required(value)?)?)
         }
         OptionId::ArrayBrackets => FormatSetting::ArrayBrackets(parse_bool(required(value)?)?),
-        OptionId::ModernizeDecls => FormatSetting::ModernizeDecls(parse_bool(required(value)?)?),
+        OptionId::ModernizeDecls => FormatSetting::ModernizeDecls(parse_optional_bool(value)?),
         OptionId::CompactMultiplicative => {
             FormatSetting::CompactMultiplicative(parse_bool(required(value)?)?)
         }
@@ -488,6 +488,25 @@ mod tests {
         assert_eq!(
             parse_format_setting(OptionId::TargetStandard, Some("f95")).unwrap(),
             Some(FormatSetting::TargetStandard(FortranStandard::F95))
+        );
+    }
+
+    #[test]
+    fn modernize_decls_accepts_bare_and_explicit_boolean_values() {
+        assert!(
+            run(&["--no-config", "--modernize-decls"])
+                .style
+                .modernize_declarations
+        );
+        assert!(
+            run(&["--no-config", "--modernize-declarations"])
+                .style
+                .modernize_declarations
+        );
+        assert!(
+            !run(&["--no-config", "--modernize-decls=false"])
+                .style
+                .modernize_declarations
         );
     }
 
