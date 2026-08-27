@@ -1,8 +1,8 @@
 use super::{
     facts::{FileFacts, IncludeDirective},
     syntax::{
-        is_old_style_type_context, is_type_definition, old_style_type_name, type_definition_parent,
-        type_spec_name,
+        declared_binding_names, declared_variable_names, is_type_definition, old_style_type_name,
+        type_definition_parent, type_spec_name,
     },
     Accessibility, HostAccess, HostUnit, ModuleNature, UnitFacts, UseAssociation, UseName,
 };
@@ -333,148 +333,126 @@ fn entity_declaration(
         return;
     };
     let first = &tokens[first_index];
-    if first.kind != TokenKind::Name || first.is(b"use") {
+    if first.kind != TokenKind::Name || is_type_definition(&tokens, first_index) {
         return;
     }
-    if is_type_definition(&tokens, first_index) {
+
+    let names = declared_variable_names(text);
+    let binding_names = owner.map_or_else(Vec::new, |_| declared_binding_names(text));
+    if names.is_empty() && binding_names.is_empty() {
         return;
     }
-    let Some(separator) = tokens.iter().position(|token| {
+
+    let separator = tokens.iter().position(|token| {
         token.depth == 0 && token.kind == TokenKind::Operator && token.text == b"::"
-    }) else {
-        old_style_declaration(
-            &tokens,
-            first_index,
-            owner,
-            procedure,
-            unit_scope,
-            file_scope_declaration,
-            declaring_module,
-            facts,
-        );
-        return;
-    };
+    });
 
     // The name inside `type(...)` refers to a type; it does not name one. It
     // still has to be recorded, because a type the file only uses is a name the
     // file uses, and that is what keeps intrinsic handling off it. But it must
-    // not vote on the spelling: letting it meant `type :: t_Name` and
-    // `type(t_name) :: v` disagreed, so the file's own definition went ambiguous
-    // and `end type t_NAME` -- which resolves through `cases.types` -- could not
-    // be corrected. The use site could, through `declared_types`, which holds
-    // definitions only; and once it had been, the disagreement was gone and the
-    // `end type` name moved on the pass after. Two tables of evidence about one
-    // entity, and a fixed point that took two passes to reach.
-    let declared_type = (first.is(b"type") || first.is(b"class"))
-        .then(|| type_spec_name(&tokens, first_index, separator))
-        .flatten()
-        .map(|name| {
-            facts.cases.types.insert_reference(name);
-            name.to_ascii_lowercase()
-        });
-    let access = declaration_access(&tokens, first_index, separator);
+    // not vote on the spelling: the declaration itself is the authoritative
+    // spelling evidence for its entities.
+    let declared_type = if first.is(b"type") || first.is(b"class") {
+        separator
+            .and_then(|separator| type_spec_name(&tokens, first_index, separator))
+            .or_else(|| old_style_type_name(&tokens, first_index))
+            .map(|name| {
+                facts.cases.types.insert_reference(name);
+                name.to_ascii_lowercase()
+            })
+    } else {
+        None
+    };
+    let access =
+        separator.and_then(|separator| declaration_access(&tokens, first_index, separator));
 
     let bound_procedure =
         owner.is_some() && (first.is(b"procedure") || first.is(b"generic") || first.is(b"final"));
-
-    let mut expect_name = true;
-    for token in &tokens[separator + 1..] {
-        if token.depth > 0 {
-            continue;
-        }
-        match token.kind {
-            TokenKind::Comma => expect_name = true,
-            TokenKind::Name if expect_name => {
-                expect_name = false;
-                if bound_procedure {
-                    facts.cases.type_procedures.insert(token.text);
-                    if !first.is(b"generic") {
-                        if let Some(owner) = owner {
-                            facts.cases.bound_type_procedures.insert(owner, token.text);
-                            if let Some(unit) = facts.units.get_mut(&unit_scope) {
-                                unit.bound_type_procedures.insert(owner, token.text);
-                            }
-                        }
-                    }
-                    if let (Some(owner), Some(access)) = (owner, access) {
-                        if let Some(unit) = facts.units.get_mut(&unit_scope) {
-                            unit.member_access
-                                .entry(owner.to_ascii_lowercase())
-                                .or_default()
-                                .mark(token.text, access);
-                        }
-                    }
-                    if first.is(b"generic") {
-                        facts.generic_type_procedures.insert(token.text);
-                        if let Some(owner) = owner {
-                            facts
-                                .generic_bound_type_procedures
-                                .insert(owner, token.text);
-                            if let Some(unit) = facts.units.get_mut(&unit_scope) {
-                                unit.generic_bound_type_procedures.insert(owner, token.text);
-                            }
-                        }
-                    }
-                    continue;
-                }
-                match (owner, &declared_type) {
-                    (Some(owner), declared) => {
-                        facts.cases.components.insert(owner, token.text);
-                        facts.cases.symbols.insert(token.text);
-                        if let Some(unit) = facts.units.get_mut(&unit_scope) {
-                            unit.components.insert(owner, token.text);
-                            if let Some(access) = access {
-                                unit.member_access
-                                    .entry(owner.to_ascii_lowercase())
-                                    .or_default()
-                                    .mark(token.text, access);
-                            }
-                            if let Some(declared) = declared {
-                                unit.type_graph
-                                    .insert_component(owner, token.text, declared);
-                            }
-                        }
-                        if file_scope_declaration {
-                            facts.file_symbols.insert(token.text);
-                        }
-                        if let Some(declared) = declared {
-                            facts.types.insert_component(owner, token.text, declared);
-                        }
-                    }
-                    (None, declared) => {
-                        facts.cases.symbols.insert(token.text);
-                        if let Some(unit) = facts.units.get_mut(&unit_scope) {
-                            unit.symbols.insert(token.text);
-                            if let Some(declared) = declared {
-                                unit.insert_variable_type(token.text, declared);
-                            }
-                            if let Some(access) = access {
-                                if matches!(unit.kind, ScopeKind::Module | ScopeKind::File) {
-                                    unit.access.mark(token.text, access);
-                                }
-                            }
-                        }
-                        if file_scope_declaration {
-                            facts.file_symbols.insert(token.text);
-                        }
-                        if let Some(declared) = declared {
-                            if let Some(procedure) = procedure {
-                                facts
-                                    .types
-                                    .insert_procedure_local(procedure, token.text, declared);
-                            } else {
-                                facts.types.insert_variable(token.text, declared);
-                            }
-                            if let Some(module) = declaring_module {
-                                facts
-                                    .types
-                                    .insert_module_variable(module, token.text, declared);
-                            }
-                        }
+    if bound_procedure {
+        for name in binding_names {
+            facts.cases.type_procedures.insert(&name);
+            if !first.is(b"generic") {
+                if let Some(owner) = owner {
+                    facts.cases.bound_type_procedures.insert(owner, &name);
+                    if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                        unit.bound_type_procedures.insert(owner, &name);
                     }
                 }
             }
-            _ => {}
+            if let (Some(owner), Some(access)) = (owner, access) {
+                if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                    unit.member_access
+                        .entry(owner.to_ascii_lowercase())
+                        .or_default()
+                        .mark(&name, access);
+                }
+            }
+            if first.is(b"generic") {
+                facts.generic_type_procedures.insert(&name);
+                if let Some(owner) = owner {
+                    facts.generic_bound_type_procedures.insert(owner, &name);
+                    if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                        unit.generic_bound_type_procedures.insert(owner, &name);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    for name in names {
+        match (owner, &declared_type) {
+            (Some(owner), declared) => {
+                facts.cases.components.insert(owner, &name);
+                facts.cases.symbols.insert(&name);
+                if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                    unit.components.insert(owner, &name);
+                    if let Some(access) = access {
+                        unit.member_access
+                            .entry(owner.to_ascii_lowercase())
+                            .or_default()
+                            .mark(&name, access);
+                    }
+                    if let Some(declared) = declared {
+                        unit.type_graph.insert_component(owner, &name, declared);
+                    }
+                }
+                if file_scope_declaration {
+                    facts.file_symbols.insert(&name);
+                }
+                if let Some(declared) = declared {
+                    facts.types.insert_component(owner, &name, declared);
+                }
+            }
+            (None, declared) => {
+                facts.cases.symbols.insert(&name);
+                if let Some(unit) = facts.units.get_mut(&unit_scope) {
+                    unit.symbols.insert(&name);
+                    if let Some(declared) = declared {
+                        unit.insert_variable_type(&name, declared);
+                    }
+                    if let Some(access) = access {
+                        if matches!(unit.kind, ScopeKind::Module | ScopeKind::File) {
+                            unit.access.mark(&name, access);
+                        }
+                    }
+                }
+                if file_scope_declaration {
+                    facts.file_symbols.insert(&name);
+                }
+                if let Some(declared) = declared {
+                    if let Some(procedure) = procedure {
+                        facts
+                            .types
+                            .insert_procedure_local(procedure, &name, declared);
+                    } else {
+                        facts.types.insert_variable(&name, declared);
+                    }
+                    if let Some(module) = declaring_module {
+                        facts.types.insert_module_variable(module, &name, declared);
+                    }
+                }
+            }
         }
     }
 }
@@ -501,119 +479,6 @@ fn declaration_access(
                 .then_some(Accessibility::Private)
                 .or_else(|| token.is_name(b"public").then_some(Accessibility::Public))
         })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn old_style_declaration(
-    tokens: &[crate::source::Token<'_>],
-    first_index: usize,
-    owner: Option<&[u8]>,
-    procedure: Option<&[u8]>,
-    unit_scope: usize,
-    file_scope_declaration: bool,
-    declaring_module: Option<&[u8]>,
-    facts: &mut FileFacts,
-) {
-    let first = &tokens[first_index];
-    let declaration = matches!(
-        first.text.to_ascii_lowercase().as_slice(),
-        b"integer" | b"real" | b"complex" | b"logical" | b"character" | b"type" | b"class"
-    ) || first.is(b"double")
-        && tokens
-            .get(first_index + 1)
-            .is_some_and(|token| token.is_name(b"precision"));
-    if !declaration || is_old_style_type_context(tokens, first_index) {
-        return;
-    }
-    let mut expect_name = true;
-    let mut initializer = false;
-    let entity_start = first_index
-        + 1
-        + usize::from(
-            first.is(b"double")
-                && tokens
-                    .get(first_index + 1)
-                    .is_some_and(|token| token.is_name(b"precision")),
-        );
-    if tokens
-        .iter()
-        .skip(entity_start)
-        .find(|token| token.kind == TokenKind::Name && token.depth == 0)
-        .is_some_and(|token| token.is_name(b"function"))
-    {
-        return;
-    }
-    // A reference, not a declared spelling -- the same reason as in
-    // `declaration` above, for the old-style `type(t) v` spelling of it.
-    let declared_type = if first.is(b"type") || first.is(b"class") {
-        old_style_type_name(tokens, first_index).map(|token| {
-            facts.cases.types.insert_reference(token);
-            token.to_ascii_lowercase()
-        })
-    } else {
-        None
-    };
-    for token in tokens.iter().skip(entity_start) {
-        if token.depth > 0 {
-            continue;
-        }
-        if token.text == b"=" || token.text == b"=>" {
-            initializer = true;
-            continue;
-        }
-        if token.kind == TokenKind::Comma {
-            initializer = false;
-            expect_name = true;
-            continue;
-        }
-        if !initializer && expect_name && token.kind == TokenKind::Name {
-            expect_name = false;
-            if let Some(owner) = owner {
-                facts.cases.components.insert(owner, token.text);
-                facts.cases.symbols.insert(token.text);
-                if let Some(unit) = facts.units.get_mut(&unit_scope) {
-                    unit.components.insert(owner, token.text);
-                    if let Some(declared_type) = &declared_type {
-                        unit.type_graph
-                            .insert_component(owner, token.text, declared_type);
-                    }
-                }
-                if file_scope_declaration {
-                    facts.file_symbols.insert(token.text);
-                }
-                if let Some(declared_type) = &declared_type {
-                    facts
-                        .types
-                        .insert_component(owner, token.text, declared_type);
-                }
-            } else {
-                facts.cases.symbols.insert(token.text);
-                if let Some(unit) = facts.units.get_mut(&unit_scope) {
-                    unit.symbols.insert(token.text);
-                    if let Some(declared_type) = &declared_type {
-                        unit.insert_variable_type(token.text, declared_type);
-                    }
-                }
-                if file_scope_declaration {
-                    facts.file_symbols.insert(token.text);
-                }
-                if let Some(declared_type) = &declared_type {
-                    if let Some(procedure) = procedure {
-                        facts
-                            .types
-                            .insert_procedure_local(procedure, token.text, declared_type);
-                    } else {
-                        facts.types.insert_variable(token.text, declared_type);
-                    }
-                    if let Some(module) = declaring_module {
-                        facts
-                            .types
-                            .insert_module_variable(module, token.text, declared_type);
-                    }
-                }
-            }
-        }
-    }
 }
 
 fn scope_names(scopes: &ScopeTree, facts: &mut FileFacts) {
@@ -927,43 +792,23 @@ fn auxiliary_declaration(text: &[u8], symbols: &mut CaseMap, unit_symbols: &mut 
         }
         return;
     }
-    if !(keyword.is_name(b"external") || keyword.is_name(b"intrinsic")) {
-        if !(keyword.is_name(b"common") || keyword.is_name(b"namelist")) {
-            return;
-        }
-        let mut slash_count = 0;
-        let mut in_names = false;
-        for token in tokens.iter().skip(first + 1) {
-            if token.depth != 0 {
-                continue;
-            }
-            if token.text == b"/" {
-                slash_count += 1;
-                in_names = slash_count % 2 == 0;
-                continue;
-            }
-            if token.kind == TokenKind::Name && (in_names || slash_count == 0 || slash_count == 1) {
-                symbols.insert(token.text);
-                unit_symbols.insert(token.text);
-            }
-        }
+    if !(keyword.is_name(b"common") || keyword.is_name(b"namelist")) {
         return;
     }
-    let start = tokens
-        .iter()
-        .position(|token| token.depth == 0 && token.text == b"::")
-        .map_or(first + 1, |separator| separator + 1);
-    let mut expect_name = true;
-    for token in tokens.iter().skip(start) {
-        if token.depth > 0 {
+    let mut slash_count = 0;
+    let mut in_names = false;
+    for token in tokens.iter().skip(first + 1) {
+        if token.depth != 0 {
             continue;
         }
-        if token.kind == TokenKind::Comma {
-            expect_name = true;
-        } else if token.kind == TokenKind::Name && expect_name {
+        if token.text == b"/" {
+            slash_count += 1;
+            in_names = slash_count % 2 == 0;
+            continue;
+        }
+        if token.kind == TokenKind::Name && (in_names || slash_count == 0 || slash_count == 1) {
             symbols.insert(token.text);
             unit_symbols.insert(token.text);
-            expect_name = false;
         }
     }
 }

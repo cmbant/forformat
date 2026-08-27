@@ -158,4 +158,25 @@ mod tests {
         let output = format_source(b"real x\n", &config).unwrap().bytes;
         assert_eq!(output, b"real x\n");
     }
+
+    #[test]
+    fn modernization_case_facts_are_a_full_mode_fixed_point() {
+        let cases: &[&[u8]] = &[
+            b"subroutine s\ndimension RADSAV(2)\nxx = radsav(1)\nend subroutine s\n",
+            b"subroutine s\ndimension ipiv(2)\ncall ldum(a, IPIV)\nend subroutine s\n",
+            b"subroutine v\nimplicit real*8 (a-h,o-z)\ndimension H(3,3)\nend subroutine v\n",
+            b"module m_wkml_lowlevel\npublic kmlAddScale\ninterface kmlAddScale\nmodule procedure kmlAddscale_int\nend interface kmlAddScale\ncontains\nsubroutine use_it(x)\nreal :: x\ncall kmlAddscale(x)\nend subroutine use_it\nend module m_wkml_lowlevel\n",
+        ];
+        let config = config(FormatMode::Full);
+        for source in cases {
+            let once = format_source(source, &config).unwrap().bytes;
+            let twice = format_source(&once, &config).unwrap().bytes;
+            assert_eq!(
+                once,
+                twice,
+                "modernization is not idempotent for:\n{}",
+                String::from_utf8_lossy(source)
+            );
+        }
+    }
 }

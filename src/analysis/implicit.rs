@@ -59,6 +59,58 @@ pub(super) fn is_implicit_statement(text: &[u8]) -> bool {
         .is_some_and(|token| token.is_name(b"implicit"))
 }
 
+/// True when `index` is one of the one-letter names in an IMPLICIT letter-spec
+/// list, rather than an identifier occurrence whose declaration spelling may
+/// be propagated into this statement.
+pub(crate) fn is_implicit_letter_name(tokens: &[Token<'_>], index: usize) -> bool {
+    let Some(token) = tokens.get(index) else {
+        return false;
+    };
+    if one_letter_name(token).is_none() {
+        return false;
+    }
+    let Some(start) = tokens
+        .iter()
+        .position(|token| token.kind != TokenKind::Number)
+    else {
+        return false;
+    };
+    if !tokens[start].is_name(b"implicit")
+        || tokens
+            .get(start + 1)
+            .is_some_and(|token| token.is_name(b"none"))
+    {
+        return false;
+    }
+
+    let clauses = &tokens[start + 1..];
+    let target = index.saturating_sub(start + 1);
+    let mut clause_start = 0;
+    loop {
+        let clause_end = clauses[clause_start..]
+            .iter()
+            .position(|token| token.kind == TokenKind::Comma && token.depth == 0)
+            .map(|offset| clause_start + offset)
+            .unwrap_or(clauses.len());
+        let clause = &clauses[clause_start..clause_end];
+        if let Some((open, close)) = implicit_clause_letter_bounds(clause) {
+            let absolute_open = clause_start + open;
+            let absolute_close = clause_start + close;
+            if target > absolute_open && target < absolute_close {
+                return true;
+            }
+        }
+        if clause_end == clauses.len() {
+            break;
+        }
+        clause_start = clause_end + 1;
+        if clause_start >= clauses.len() {
+            break;
+        }
+    }
+    false
+}
+
 /// Apply one supported IMPLICIT statement to an inherited permission mask.
 ///
 /// `None` means the syntax could not be proved valid. The public policy
@@ -141,8 +193,8 @@ fn parse_implicit_policy(current: ImplicitPolicy, text: &[u8]) -> Option<Implici
     Some(policy)
 }
 
-fn implicit_clause_ranges(tokens: &[Token<'_>]) -> Option<Vec<(u8, u8)>> {
-    let (open, close) = tokens
+fn implicit_clause_letter_bounds(tokens: &[Token<'_>]) -> Option<(usize, usize)> {
+    tokens
         .iter()
         .enumerate()
         .filter(|(_, token)| token.kind == TokenKind::LParen)
@@ -150,9 +202,13 @@ fn implicit_clause_ranges(tokens: &[Token<'_>]) -> Option<Vec<(u8, u8)>> {
         .find(|(open, close)| {
             *open > 0
                 && *close + 1 == tokens.len()
-                && implicit_letter_ranges(&tokens[open + 1..*close]).is_some()
-        })?;
-    supported_implicit_type_spec(&tokens[..open])?;
+                && supported_implicit_type_spec(&tokens[..*open]).is_some()
+                && implicit_letter_ranges(&tokens[*open + 1..*close]).is_some()
+        })
+}
+
+fn implicit_clause_ranges(tokens: &[Token<'_>]) -> Option<Vec<(u8, u8)>> {
+    let (open, close) = implicit_clause_letter_bounds(tokens)?;
     implicit_letter_ranges(&tokens[open + 1..close])
 }
 
@@ -237,7 +293,8 @@ fn one_letter_name(token: &Token<'_>) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::ImplicitPolicy;
+    use super::{is_implicit_letter_name, ImplicitPolicy};
+    use crate::source::{tokens::tokenize, LexState, TokenKind};
 
     #[test]
     fn malformed_syntax_latches_the_conservative_policy() {
@@ -253,5 +310,23 @@ mod tests {
         let policy = ImplicitPolicy::ALL.apply(b"implicit none(external)");
         assert!(policy.permits(b"A"));
         assert!(policy.permits(b"I"));
+    }
+
+    #[test]
+    fn letter_specs_are_distinct_from_kind_names() {
+        let tokens = tokenize(b"implicit real(kind=H) (a-h,o-z)", &mut LexState::default());
+        let names = tokens
+            .iter()
+            .enumerate()
+            .filter(|(_, token)| token.kind == TokenKind::Name)
+            .map(|(index, token)| (token.text, is_implicit_letter_name(&tokens, index)))
+            .collect::<Vec<_>>();
+        assert!(names.contains(&(b"H".as_slice(), false)));
+        for letter in [b"a".as_slice(), b"h", b"o", b"z"] {
+            assert!(
+                names.contains(&(letter, true)),
+                "missing {letter:?}: {names:?}"
+            );
+        }
     }
 }

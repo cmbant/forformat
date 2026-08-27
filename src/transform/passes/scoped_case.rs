@@ -5,19 +5,89 @@
 //! correction does not need a retained evidence map or a second token walk.
 
 use crate::{
-    analysis::{project::ResolvedType, scoped_declared_names},
+    analysis::{is_implicit_letter_name, project::ResolvedType, scoped_declared_names},
     error::FormatError,
+    source::{tokens::tokenize, LexState},
     transform::{
         document::Document,
-        passes::case_pass::{self, CaseEvidence, CaseReconciler, Reconciliation},
+        passes::{
+            case_pass::{self, CaseEvidence, CaseReconciler, Reconciliation},
+            provenance::source_spans,
+        },
         pipeline::{Changed, PassContext},
     },
 };
+use std::ops::Range;
 
 pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
+    let protected = implicit_letter_spellings(cx);
     let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
     let mut reconciler = ScopedReconciler { cx };
-    case_pass::declared_with_names_and_reconciler(document, cx, &declared_names, &mut reconciler)
+    let changed = case_pass::declared_with_names_and_reconciler(
+        document,
+        cx,
+        &declared_names,
+        &mut reconciler,
+    )?;
+    restore_implicit_letter_spellings(document, &protected);
+    if changed == Changed::Text && matches_analysis_snapshot(document, cx) {
+        Ok(Changed::No)
+    } else {
+        Ok(changed)
+    }
+}
+
+struct ProtectedSpelling {
+    line: usize,
+    range: Range<usize>,
+    spelling: Vec<u8>,
+}
+
+fn implicit_letter_spellings(cx: &PassContext) -> Vec<ProtectedSpelling> {
+    let mut protected = Vec::new();
+    for group in &cx.analysis.groups {
+        for statement in &group.statements {
+            let tokens = tokenize(&statement.text, &mut LexState::default());
+            for (index, token) in tokens.iter().enumerate() {
+                if !is_implicit_letter_name(&tokens, index) {
+                    continue;
+                }
+                let spans = source_spans(group, statement, token);
+                let mut taken = 0;
+                for (line, span) in spans {
+                    let line_start = cx.analysis.buffer.lines[line].span.start as usize;
+                    let len = span.len();
+                    protected.push(ProtectedSpelling {
+                        line,
+                        range: span.start - line_start..span.end - line_start,
+                        spelling: token.text[taken..taken + len].to_vec(),
+                    });
+                    taken += len;
+                }
+            }
+        }
+    }
+    protected
+}
+
+fn restore_implicit_letter_spellings(document: &mut Document, protected: &[ProtectedSpelling]) {
+    for item in protected {
+        let Some(line) = document.lines.get_mut(item.line) else {
+            continue;
+        };
+        if item.range.end <= line.len() && line[item.range.clone()] != item.spelling[..] {
+            line.splice(item.range.clone(), item.spelling.iter().copied());
+        }
+    }
+}
+
+fn matches_analysis_snapshot(document: &Document, cx: &PassContext) -> bool {
+    document.lines.len() == cx.analysis.buffer.lines.len()
+        && document
+            .lines
+            .iter()
+            .zip(&cx.analysis.buffer.lines)
+            .all(|(line, physical)| line.as_slice() == cx.analysis.buffer.line_bytes(physical))
 }
 
 struct ScopedReconciler<'a, 'cx> {
@@ -123,6 +193,28 @@ mod tests {
     };
     use std::path::Path;
 
+    fn run_declared(target: &[u8]) -> (Changed, Vec<u8>) {
+        let project = analyze_project([(Path::new("target.f90"), target)]).unwrap();
+        let local = analyze_file(target).unwrap();
+        let mut document = Document::from_bytes(target);
+        let analysis = document.analyze().unwrap();
+        let scopes = ScopeTree::build(&analysis);
+        let config = FormatConfig {
+            mode: FormatMode::NormalizeOnly,
+            ..FormatConfig::default()
+        };
+        let context = PassContext {
+            config: &config,
+            project: &project,
+            local: &local,
+            analysis: &analysis,
+            scopes: &scopes,
+        };
+
+        let changed = declared(&mut document, &context).unwrap();
+        (changed, document.to_bytes())
+    }
+
     #[test]
     fn restore_of_split_identifier_emits_no_edit() {
         let declarations =
@@ -149,12 +241,31 @@ mod tests {
             scopes: &scopes,
         };
 
-        // The project-wide type table gives the base pass a CamelType spelling,
-        // but the type is not visible here, so scoped policy must restore the
-        // authored split spelling without ever emitting that base edit.
         assert!(project.declared_types.contains(b"CAMELTYPE"));
         assert_eq!(project.visible_type_spelling(&local, 1, b"CAMELTYPE"), None);
         assert_eq!(declared(&mut document, &context).unwrap(), Changed::No);
         assert_eq!(document.to_bytes(), target);
+    }
+
+    #[test]
+    fn implicit_letter_ranges_do_not_follow_declared_symbol_case() {
+        let target =
+            b"subroutine s\ndimension H(3)\nimplicit real*8 (a-h,o-z)\nx = h\nend subroutine s\n";
+        let (changed, output) = run_declared(target);
+        assert_eq!(changed, Changed::Text);
+        assert!(output
+            .windows(b"(a-h,o-z)".len())
+            .any(|window| window == b"(a-h,o-z)"));
+        assert!(output
+            .windows(b"x = H".len())
+            .any(|window| window == b"x = H"));
+    }
+
+    #[test]
+    fn protected_implicit_letters_do_not_report_a_change() {
+        let target = b"subroutine s\ndimension H(3)\nimplicit real*8 (a-h,o-z)\nend subroutine s\n";
+        let (changed, output) = run_declared(target);
+        assert_eq!(changed, Changed::No);
+        assert_eq!(output, target);
     }
 }
