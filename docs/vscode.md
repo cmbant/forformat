@@ -67,7 +67,11 @@ represented by the unsaved buffer. That single identity also supplies configurat
 default project discovery, filename-aware source-form detection, relative `INCLUDE` resolution, and
 stale on-disk shadowing. The virtual filename is not limited to forformat's filesystem source
 extension allow-list, so editor-only names such as `.fypp` are accepted; pass `-ifree` when such an
-unrecognized suffix needs an explicit free-form override.
+unrecognized suffix needs an explicit free-form override. For example:
+
+```sh
+forformat --stdin-filename=/path/to/file.fypp -ifree
+```
 
 Use **Format Document** (`Shift+Alt+F`) to test the setup.
 
