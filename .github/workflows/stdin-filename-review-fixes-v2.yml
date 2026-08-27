@@ -1,0 +1,50 @@
+name: stdin filename review fixes v2
+on:
+  push:
+    branches: [tmp/stdin-filename-review-fixes]
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: feat/stdin-filename
+          fetch-depth: 0
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Reuse staged edits
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import subprocess
+          text = subprocess.check_output([
+              "git", "show",
+              "origin/tmp/stdin-filename-review-fixes:.github/workflows/stdin-filename-review-fixes.yml",
+          ], text=True)
+          start = "      - name: Apply review fixes\n        run: |\n"
+          end = "      - name: Format and focused tests\n"
+          block = text.split(start, 1)[1].split(end, 1)[0]
+          lines = [line[10:] if line.startswith("          ") else line for line in block.splitlines()]
+          Path("/tmp/apply-review-fixes.sh").write_text("\n".join(lines) + "\n")
+          PY
+          bash /tmp/apply-review-fixes.sh
+      - name: Format and focused tests
+        run: |
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo test --locked --test io_workflow stdin_filename -- --nocapture
+          cargo test --locked source::format_detect::tests
+          cargo build --locked
+          ./tools/check_docs.sh target/debug/forformat
+      - name: Commit review fixes
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/io/sources.rs src/source/format_detect.rs tests/io_workflow.rs docs/options.md docs/file-workflow.md docs/vscode.md
+          git diff --cached --check
+          git commit -m "Harden stdin filename identity"
+          git push origin HEAD:feat/stdin-filename
