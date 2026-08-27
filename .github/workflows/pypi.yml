@@ -9,10 +9,6 @@ on:
         description: "Existing v* tag to publish"
         required: true
         type: string
-  # Keep this temporarily so the existing ci.yml caller remains valid. Jobs
-  # below are gated so a reusable invocation is a no-op; Trusted Publishing
-  # only runs when pypi.yml itself is the top-level workflow.
-  workflow_call:
 
 permissions:
   contents: read
@@ -23,10 +19,6 @@ env:
 jobs:
   verify-release:
     name: Verify release
-    # In a reusable workflow GitHub associates github.workflow with the caller.
-    # PyPI Trusted Publishing does not support publishing from that context, so
-    # only execute for top-level pypi.yml tag/manual runs.
-    if: github.workflow == 'Publish Python package to PyPI'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
