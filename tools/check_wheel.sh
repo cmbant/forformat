@@ -115,7 +115,8 @@ target.write_text("program p\ninteger :: StaleName\nend program p\n")
 subprocess.run(["git", "add", "target.f90"], check=True)
 contextual = format_source(
     "program p\nuse sharedname\nprint *, stalename\nend program p\n",
-    repo_context_path=target,
+    filename=target,
+    repo_context_path=repo,
 )
 assert "\n   use SharedName\n" in contextual
 assert "stalename" in contextual

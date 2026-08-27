@@ -648,6 +648,25 @@ fn query_format_reports_each_input_without_writing() {
 }
 
 #[test]
+fn query_format_uses_stdin_filename_without_requiring_the_file() {
+    let repo = temp_repo();
+    let output = run_stdin(
+        &repo,
+        &[
+            "--query-format",
+            "--no-config",
+            "--stdin-filename",
+            "new.f90",
+        ],
+        b"      program p\n      end program p\n",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"free\n");
+    assert!(output.stderr.is_empty());
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
 fn query_format_bulk_selection_applies_exclusions() {
     let repo = temp_repo();
     fs::create_dir(repo.join("vendor")).unwrap();
@@ -747,16 +766,14 @@ fn stdin_and_file_routes_produce_identical_bytes_for_the_same_source() {
         assert_eq!(
             isolated.status.code(),
             Some(0),
-            "isolated: {}\n{}",
-            fixture.display(),
-            String::from_utf8_lossy(&isolated.stderr)
+            "isolated: {}",
+            fixture.display()
         );
         assert_eq!(
             project.status.code(),
             Some(0),
-            "project: {}\n{}",
-            fixture.display(),
-            String::from_utf8_lossy(&project.stderr)
+            "project: {}",
+            fixture.display()
         );
         assert_eq!(
             stdin.stdout,
@@ -809,17 +826,9 @@ end subroutine s\n";
         String::from_utf8_lossy(&once.stdout)
             .matches("ZERO")
             .count(),
-        3,
-        "the split macro name was not cased on the first pass:\n{}",
-        String::from_utf8_lossy(&once.stdout)
+        3
     );
-    assert_eq!(
-        once.stdout,
-        twice.stdout,
-        "first pass:\n{}\nsecond pass:\n{}",
-        String::from_utf8_lossy(&once.stdout),
-        String::from_utf8_lossy(&twice.stdout)
-    );
+    assert_eq!(once.stdout, twice.stdout);
     let _ = fs::remove_dir_all(repo);
 }
 
@@ -1085,16 +1094,12 @@ fn overlapping_filesystem_context_roots_cannot_bypass_exclusions() {
     fs::create_dir_all(directory.join("vendor")).unwrap();
     fs::write(
         directory.join("visible.f90"),
-        b"module VisibleName
-end module VisibleName
-",
+        b"module VisibleName\nend module VisibleName\n",
     )
     .unwrap();
     fs::write(
         directory.join("vendor/hidden.f90"),
-        b"module HiddenName
-end module HiddenName
-",
+        b"module HiddenName\nend module HiddenName\n",
     )
     .unwrap();
 
@@ -1110,11 +1115,7 @@ end module HiddenName
             directory.join("vendor").to_str().unwrap(),
             "--exclude=vendor/",
         ],
-        b"program p
-use visiblename
-use hiddenname
-end program p
-",
+        b"program p\nuse visiblename\nuse hiddenname\nend program p\n",
     );
     assert_eq!(output.status.code(), Some(0));
     let output = String::from_utf8_lossy(&output.stdout);
@@ -1245,7 +1246,7 @@ fn context_paths_validate_directories_inside_the_checkout() {
 }
 
 #[test]
-fn file_project_context_replacement_respects_context_scope() {
+fn stdin_filename_replacement_respects_context_scope() {
     let repo = temp_repo();
     fs::create_dir(repo.join("src")).unwrap();
     let target = repo.join("src/target.f90");
@@ -1257,7 +1258,7 @@ fn file_project_context_replacement_respects_context_scope() {
         &[
             "--full",
             "--no-config",
-            "--project-context",
+            "--stdin-filename",
             "src/target.f90",
             "--context-path",
             "src",
@@ -1273,7 +1274,7 @@ fn file_project_context_replacement_respects_context_scope() {
 }
 
 #[test]
-fn project_context_implies_stdin_and_anchors_config_discovery() {
+fn project_context_implies_stdin_without_changing_config_discovery() {
     let repo = temp_repo();
     fs::create_dir(repo.join("src")).unwrap();
     fs::write(repo.join(".forformat.toml"), b"indent = 4\n").unwrap();
@@ -1285,12 +1286,12 @@ fn project_context_implies_stdin_and_anchors_config_discovery() {
         b"program p\nx=1\nend program p\n",
     );
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stdout, b"program p\n        x=1\nend program p\n");
+    assert_eq!(output.stdout, b"program p\n    x=1\nend program p\n");
     let _ = fs::remove_dir_all(repo);
 }
 
 #[test]
-fn file_project_context_matches_normal_file_config_discovery() {
+fn stdin_filename_matches_normal_file_config_discovery() {
     let repo = temp_repo();
     let source = b"program p\nx=1\nend program p\n";
     fs::create_dir(repo.join("src")).unwrap();
@@ -1300,29 +1301,88 @@ fn file_project_context_matches_normal_file_config_discovery() {
     git_add(&repo);
 
     let file = run(&repo, &["--indent-only", "--stdout", "src/foo.f90"]);
-    let project = run_stdin(
+    let stdin = run_stdin(
         &repo,
-        &["--indent-only", "--project-context", "src/foo.f90"],
+        &["--indent-only", "--stdin-filename", "src/foo.f90"],
         source,
     );
     assert_eq!(file.status.code(), Some(0));
-    assert_eq!(project.status.code(), Some(0));
-    assert_eq!(project.stdout, file.stdout);
-    assert_eq!(project.stdout, b"program p\n        x=1\nend program p\n");
+    assert_eq!(stdin.status.code(), Some(0));
+    assert_eq!(stdin.stdout, file.stdout);
+    assert_eq!(stdin.stdout, b"program p\n        x=1\nend program p\n");
 
     let _ = fs::remove_dir_all(repo);
 }
 
 #[test]
-fn file_project_context_uses_the_context_filename_for_detection() {
+fn stdin_filename_discovers_project_context_for_a_new_file() {
     let repo = temp_repo();
-    let target = repo.join("target.f90");
-    fs::write(&target, b"program p\nend program p\n").unwrap();
+    fs::create_dir(repo.join("src")).unwrap();
+    fs::write(
+        repo.join("shared.f90"),
+        b"module SharedName\nend module SharedName\n",
+    )
+    .unwrap();
     git_add(&repo);
 
     let output = run_stdin(
         &repo,
-        &["--full", "--no-config", "--project-context", "target.f90"],
+        &["--full", "--no-config", "--stdin-filename", "src/new.f90"],
+        b"program p\nuse sharedname\nend program p\n",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("use SharedName"));
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn stdin_filename_resolves_relative_includes_from_the_virtual_file() {
+    let repo = temp_repo();
+    fs::create_dir(repo.join("src")).unwrap();
+    fs::write(repo.join("src/defs.inc"), b"integer :: IncludedName\n").unwrap();
+
+    let output = run_stdin(
+        &repo,
+        &["--full", "--no-config", "--stdin-filename", "src/new.f90"],
+        b"program p\ninclude 'defs.inc'\nprint *, includedname\nend program p\n",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("print *, IncludedName"));
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn isolated_stdin_filename_keeps_file_identity_without_project_scanning() {
+    let repo = temp_repo();
+    fs::write(
+        repo.join("shared.f90"),
+        b"module SharedName\nend module SharedName\n",
+    )
+    .unwrap();
+    git_add(&repo);
+
+    let output = run_stdin(
+        &repo,
+        &[
+            "--full",
+            "--no-config",
+            "--stdin-filename",
+            "new.f90",
+            "--isolated",
+        ],
+        b"program p\nuse sharedname\nend program p\n",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("use sharedname"));
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn stdin_filename_uses_filename_for_detection_without_requiring_the_file() {
+    let repo = temp_repo();
+    let output = run_stdin(
+        &repo,
+        &["--full", "--no-config", "--stdin-filename", "target.f90"],
         b"      program p\n      end program p\n",
     );
     assert_eq!(output.status.code(), Some(0));
@@ -1331,7 +1391,7 @@ fn file_project_context_uses_the_context_filename_for_detection() {
 }
 
 #[test]
-fn file_project_context_excludes_the_stale_on_disk_target() {
+fn stdin_filename_excludes_the_stale_on_disk_target() {
     let repo = temp_repo();
     let target = repo.join("target.f90");
     fs::write(&target, b"program p\ninteger :: StaleName\nend program p\n").unwrap();
@@ -1349,7 +1409,7 @@ fn file_project_context_excludes_the_stale_on_disk_target() {
             "--stdin",
             "--full",
             "--no-config",
-            "--project-context",
+            "--stdin-filename",
             target.to_str().unwrap(),
         ],
         source,
@@ -1358,6 +1418,71 @@ fn file_project_context_excludes_the_stale_on_disk_target() {
     assert_eq!(
         output.stdout,
         b"program p\n   use SharedName\n   print *, stalename\nend program p\n"
+    );
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn stdin_filename_uses_its_config_origin_when_project_context_is_overridden() {
+    let input_repo = temp_repo();
+    fs::create_dir(input_repo.join("src")).unwrap();
+    fs::write(input_repo.join(".forformat.toml"), b"indent = 4\n").unwrap();
+    fs::write(input_repo.join("src/.forformat.toml"), b"indent = 8\n").unwrap();
+
+    let context_repo = temp_repo();
+    fs::write(context_repo.join(".forformat.toml"), b"indent = 2\n").unwrap();
+    fs::write(
+        context_repo.join("shared.f90"),
+        b"module ProjectName\nend module ProjectName\n",
+    )
+    .unwrap();
+    git_add(&context_repo);
+
+    let output = run_stdin(
+        &input_repo,
+        &[
+            "--full",
+            "--stdin-filename",
+            "src/new.f90",
+            "--project-context",
+            context_repo.to_str().unwrap(),
+        ],
+        b"program p\nuse projectname\nprint *, 1\nend program p\n",
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("        use ProjectName"));
+
+    let _ = fs::remove_dir_all(input_repo);
+    let _ = fs::remove_dir_all(context_repo);
+}
+
+#[test]
+fn stdin_filename_requires_an_existing_parent_directory() {
+    let repo = temp_repo();
+    let output = run_stdin(
+        &repo,
+        &["--no-config", "--stdin-filename", "missing/new.f90"],
+        b"program p\nend program p\n",
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("--stdin-filename parent directory does not exist"));
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn project_context_requires_a_directory() {
+    let repo = temp_repo();
+    fs::write(repo.join("target.f90"), b"program p\nend program p\n").unwrap();
+    git_add(&repo);
+    let output = run_stdin(
+        &repo,
+        &["--stdin", "--no-config", "--project-context", "target.f90"],
+        b"program p\nend program p\n",
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--project-context requires a directory")
     );
     let _ = fs::remove_dir_all(repo);
 }
@@ -1385,19 +1510,7 @@ fn project_context_rejects_a_non_repository_directory() {
 #[test]
 fn isolated_keeps_local_component_resolution_like_stdin() {
     let repo = temp_repo();
-    let source = b"module m
-type :: Parent
-real :: INTEGRATE_TOL
-procedure :: ParentRun
-end type Parent
-contains
-subroutine work(this)
-class(Parent) :: THIS
-this%integrate_tol = 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 14 + 15 + 16 + 17 + 18 + 19 + 20 + 21 + 22 + 23 + 24 + 25 + 26 + 27 + 28 + 29 + 30
-call this%parentrun()
-end subroutine work
-end module m
-";
+    let source = b"module m\ntype :: Parent\nreal :: INTEGRATE_TOL\nprocedure :: ParentRun\nend type Parent\ncontains\nsubroutine work(this)\nclass(Parent) :: THIS\nthis%integrate_tol = 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10 + 11 + 12 + 13 + 14 + 15 + 16 + 17 + 18 + 19 + 20 + 21 + 22 + 23 + 24 + 25 + 26 + 27 + 28 + 29 + 30\ncall this%parentrun()\nend subroutine work\nend module m\n";
     fs::write(repo.join("source.f90"), source).unwrap();
     let args = ["--full", "--indent=4", "--start-indent=4"];
     let stdin = run_stdin(&repo, &args, source);

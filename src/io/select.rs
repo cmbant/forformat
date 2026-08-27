@@ -1,17 +1,17 @@
 //! Which files this invocation reads, and where it is rooted.
 //!
 //! Three questions in order, each one a type: [`Scope`] settles the repository
-//! root and the directories `--project-context` and `--all` bound the run to,
-//! [`Selection`] turns that plus the command line into the two path lists —
-//! what to format and what to read for context — and [`Loaded`] reads each of
-//! those paths exactly once, so the bytes a target is formatted from are the
-//! same bytes the project tables were built from.
+//! root and the directories that bound the run, [`Selection`] turns that plus
+//! the command line into the two path lists — what to format and what to read
+//! for context — and [`Loaded`] reads each of those paths exactly once, so the
+//! bytes a target is formatted from are the same bytes the project tables were
+//! built from.
 
 use super::{
     exclude::ExcludeMatcher,
     sources::{
         context_sources, deduplicate, read_source, repository_root, resolve_context_paths,
-        resolve_input, tracked_sources, tracked_sources_without_submodules, validate_extension,
+        resolve_input, resolve_stdin_filename, tracked_sources, tracked_sources_without_submodules,
         Source,
     },
     WorkflowError,
@@ -27,9 +27,11 @@ use std::{
 /// read.
 pub(super) struct Scope {
     pub(super) root: Option<PathBuf>,
-    /// The directory a `--project-context` names and, when it named a file,
-    /// the tracked path whose on-disk bytes stdin replaces.
-    pub(super) project: Option<(PathBuf, Option<PathBuf>)>,
+    /// Explicit project-context directory, if one overrides the project that a
+    /// named stdin buffer would otherwise derive from its own directory.
+    pub(super) project: Option<PathBuf>,
+    /// Resolved file identity for stdin. The file itself may not exist.
+    stdin_path: Option<PathBuf>,
     /// The directory `--all`/`--all-files` was pointed at, if any.
     all: Option<PathBuf>,
     pub(super) context_paths: Vec<PathBuf>,
@@ -41,45 +43,37 @@ impl Scope {
         cwd: &Path,
         all_selection: bool,
     ) -> Result<Self, WorkflowError> {
-        // A directory-valued project context describes an anonymous stdin
-        // buffer.  A file-valued context additionally identifies the tracked
-        // file whose in-memory contents stdin replaces, so its stale on-disk
-        // bytes must not contribute to project analysis.
+        let stdin_path = invocation
+            .stdin_filename
+            .as_deref()
+            .map(|path| resolve_stdin_filename(path, cwd))
+            .transpose()?;
+
         let project = invocation
             .project_context
             .as_deref()
             .map(|path| {
-                let candidate = resolve_input(path, None);
+                let candidate = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    cwd.join(path)
+                };
                 let canonical = fs::canonicalize(&candidate).map_err(|error| {
                     WorkflowError::Usage(format!(
                         "--project-context path does not exist: {} ({error})",
                         candidate.display()
                     ))
                 })?;
-                let metadata = fs::metadata(&canonical)?;
-                if metadata.is_dir() {
-                    return Ok((canonical, None));
-                }
-                if !metadata.is_file() {
+                if !fs::metadata(&canonical)?.is_dir() {
                     return Err(WorkflowError::Usage(format!(
-                        "--project-context requires a directory or regular source file: {}",
+                        "--project-context requires a directory: {}",
                         candidate.display()
                     )));
                 }
-                validate_extension(&candidate).map_err(WorkflowError::Usage)?;
-                let parent = candidate
-                    .parent()
-                    .filter(|parent| !parent.as_os_str().is_empty())
-                    .unwrap_or_else(|| Path::new("."));
-                let directory = fs::canonicalize(parent)?;
-                let stdin_path = directory.join(
-                    candidate
-                        .file_name()
-                        .expect("a regular file must have a file name"),
-                );
-                Ok((directory, Some(stdin_path)))
+                Ok(canonical)
             })
             .transpose()?;
+
         let all = if all_selection {
             invocation
                 .paths
@@ -106,8 +100,10 @@ impl Scope {
         };
         let root = if let Some(scope) = all.as_deref() {
             repository_root(scope)?
-        } else if let Some((scope, _)) = project.as_ref() {
+        } else if let Some(scope) = project.as_deref() {
             repository_root(scope)?
+        } else if let Some(path) = stdin_path.as_deref() {
+            repository_root(path.parent().unwrap_or(cwd))?
         } else {
             repository_root(cwd)?
         };
@@ -124,15 +120,15 @@ impl Scope {
         Ok(Self {
             root,
             project,
+            stdin_path,
             all,
             context_paths,
         })
     }
 
-    /// The tracked path a file-valued `--project-context` named, if it named
-    /// one.
+    /// The project path assigned to stdin, if `--stdin-filename` named one.
     pub(super) fn stdin_path(&self) -> Option<&Path> {
-        self.project.as_ref().and_then(|(_, path)| path.as_deref())
+        self.stdin_path.as_deref()
     }
 
     pub(super) fn exclusion_root<'a>(&'a self, cwd: &'a Path) -> &'a Path {
@@ -256,23 +252,19 @@ pub(super) fn select_paths(
                 .collect::<Vec<_>>(),
         )
     };
-    let project = if invocation.isolated {
+    let mut project = if invocation.isolated {
         // Isolated means no project tables at all. The target is still read
         // and formatted, but its declarations remain local to the formatter,
-        // exactly as they are for stdin.
+        // exactly as they are for anonymous stdin.
         Vec::new()
     } else if scope.project.is_some() {
-        // A `--project-context` names the whole context itself, so the targets
-        // are not folded in.  When it named a file, stdin *is* that file's
-        // current contents and the stale copy on disk must not be read.
-        let stdin_path = scope.stdin_path();
+        // An explicit project context names the whole context itself, so the
+        // targets are not folded in. File identity remains independent in
+        // scope.stdin_path().
         context_tracked
             .as_ref()
             .expect("project-context requires tracked sources")
-            .iter()
-            .filter(|path| Some(path.as_path()) != stdin_path)
-            .cloned()
-            .collect()
+            .clone()
     } else if let Some(context_tracked) = context_tracked.as_ref() {
         if scope.context_paths.is_empty() {
             deduplicate(
@@ -288,6 +280,11 @@ pub(super) fn select_paths(
     } else {
         targets.clone()
     };
+    // A named stdin buffer is the current version of this path. Never analyze
+    // its stale on-disk copy as a second project source.
+    if let Some(stdin_path) = scope.stdin_path() {
+        project.retain(|path| path != stdin_path);
+    }
     Ok(Selection { targets, project })
 }
 

@@ -43,6 +43,7 @@ def format_source(
     source: str,
     *,
     options: Sequence[str] = (),
+    filename: Optional[Pathish] = None,
     repo_context_path: Optional[Pathish] = None,
 ) -> str: ...
 
@@ -52,6 +53,7 @@ def format_source(
     source: bytes,
     *,
     options: Sequence[str] = (),
+    filename: Optional[Pathish] = None,
     repo_context_path: Optional[Pathish] = None,
 ) -> bytes: ...
 
@@ -60,16 +62,19 @@ def format_source(
     source: Source,
     *,
     options: Sequence[str] = (),
+    filename: Optional[Pathish] = None,
     repo_context_path: Optional[Pathish] = None,
 ) -> Source:
     """Format one string or byte buffer and return the same input type.
 
     ``options`` accepts formatter and explicit configuration options from the
     command line. Project configuration discovery is disabled unless a
-    ``--config`` option is supplied. ``repo_context_path`` selects a path in a
-    Git checkout whose tracked Fortran declarations are used for name
-    resolution; pass the source file's path to replace its stale on-disk copy
-    with ``source`` in that analysis. It does not select configuration.
+    ``--config`` option is supplied. ``filename`` says which source file the
+    in-memory buffer represents; it supplies filename-aware source detection,
+    relative INCLUDE resolution, diagnostics, and the default Git project for
+    analysis. ``repo_context_path`` may override that project with an existing
+    directory in another Git checkout. It does not change ``filename`` or
+    configuration selection.
     """
 
     if not isinstance(source, (str, bytes)):
@@ -81,6 +86,8 @@ def format_source(
         raise TypeError("options must contain only strings")
 
     command = [os.fspath(bundled_binary()), "--stdin"]
+    if filename is not None:
+        command.extend(("--stdin-filename", os.fspath(filename)))
     if repo_context_path is not None:
         command.extend(("--project-context", os.fspath(repo_context_path)))
     if not _uses_explicit_config(arguments):

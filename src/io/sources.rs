@@ -150,6 +150,39 @@ pub(super) fn resolve_input(path: &Path, root: Option<&Path>) -> PathBuf {
     }
 }
 
+/// Resolve the file identity assigned to stdin without requiring that file to
+/// exist. Editors can therefore identify a newly-created buffer. The parent
+/// directory must exist so config, Git, INCLUDE, and diagnostic paths have a
+/// stable filesystem anchor.
+pub(super) fn resolve_stdin_filename(path: &Path, cwd: &Path) -> Result<PathBuf, WorkflowError> {
+    validate_extension(path).map_err(WorkflowError::Usage)?;
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let file_name = candidate.file_name().ok_or_else(|| {
+        WorkflowError::Usage(format!(
+            "--stdin-filename requires a source filename: {}",
+            path.display()
+        ))
+    })?;
+    let parent = candidate.parent().unwrap_or(cwd);
+    let directory = fs::canonicalize(parent).map_err(|error| {
+        WorkflowError::Usage(format!(
+            "--stdin-filename parent directory does not exist: {} ({error})",
+            parent.display()
+        ))
+    })?;
+    if !fs::metadata(&directory)?.is_dir() {
+        return Err(WorkflowError::Usage(format!(
+            "--stdin-filename parent is not a directory: {}",
+            parent.display()
+        )));
+    }
+    Ok(directory.join(file_name))
+}
+
 pub(super) fn read_source(
     path: &Path,
     force_free_input: bool,

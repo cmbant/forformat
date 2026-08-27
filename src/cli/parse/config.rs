@@ -34,20 +34,19 @@ impl ConfigSelection {
 
 pub(super) fn config_start(command: &Command, cwd: &Path) -> PathBuf {
     if let Command::Run(invocation) = command {
-        if let Some(path) = invocation.project_context.as_deref() {
+        // A virtual stdin filename is the input's identity, so configuration
+        // follows that file even when project analysis is explicitly rooted
+        // somewhere else with --project-context.
+        if let Some(path) = invocation.stdin_filename.as_deref() {
             let candidate = if path.is_absolute() {
                 path.to_path_buf()
             } else {
                 cwd.join(path)
             };
-            return if candidate.is_dir() {
-                candidate
-            } else {
-                candidate
-                    .parent()
-                    .map(Path::to_path_buf)
-                    .unwrap_or_else(|| cwd.to_path_buf())
-            };
+            return candidate
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| cwd.to_path_buf());
         }
         if invocation.paths.len() == 1 {
             let candidate = if invocation.paths[0].is_absolute() {

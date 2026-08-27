@@ -82,14 +82,17 @@ forformat --stdin < src/module.f90 > /tmp/module.f90
 forformat --stdout src/module.f90 > /tmp/module.f90
 ```
 
-For an editor buffer that needs declarations from the project, identify the buffer's source path:
+For an editor buffer, give stdin the filename it represents:
 
 ```sh
-forformat --stdin --project-context=src/module.f90 < src/module.f90
+forformat --stdin-filename=src/module.f90 < src/module.f90
 ```
 
-The stdin bytes replace that file's stale on-disk contents during project analysis; only the stdin
-buffer is formatted. Pass a directory instead when the buffer has no corresponding source file.
+The filename supplies configuration and Git-project discovery, source-form detection, relative
+`INCLUDE` resolution, and diagnostics. If the file is tracked, the stdin bytes shadow its stale
+on-disk contents during project analysis; the filename may also name a new file whose parent
+already exists. Use `--project-context=/path/to/other/checkout` to override only the Git project
+used for semantic context without changing the stdin filename or its configuration origin.
 
 ## Formatting modes
 
@@ -152,13 +155,15 @@ from forformat import format_source
 
 formatted = format_source(
     source,
+    filename="/path/to/checkout/src/module.f90",
     options=("--config=/absolute/path/to/.forformat.toml",),
-    repo_context_path="/path/to/checkout/src/module.f90",
 )
 ```
 
-The return type matches the input type. Automatic configuration discovery is disabled for this API
-unless `options` explicitly supplies `--config`.
+The return type matches the input type. `filename` gives an in-memory buffer the same file identity
+as `--stdin-filename`; `repo_context_path` can optionally override its project with a directory.
+Automatic configuration discovery is disabled for this API unless `options` explicitly supplies
+`--config`.
 
 ## Documentation
 
