@@ -7,8 +7,8 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
-      skip_signing:
-        description: "Skip macOS/Windows signing and notarization (for testing only)"
+      credentialed_signing:
+        description: "Use signing/notarization credentials for this manual artifact test (does not publish)"
         required: false
         default: false
         type: boolean
@@ -255,18 +255,18 @@ jobs:
           Write-Output $a
 
       - name: Authenticate to Google Cloud
-        if: github.event.inputs.skip_signing != 'true'
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.credentialed_signing == 'true'
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
 
       - name: Set up Cloud SDK
-        if: github.event.inputs.skip_signing != 'true'
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.credentialed_signing == 'true'
         uses: google-github-actions/setup-gcloud@v3
 
       - name: Sign Windows release binary
-        if: github.event.inputs.skip_signing != 'true'
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.credentialed_signing == 'true'
         shell: pwsh
         env:
           GCP_KMS_KEY: ${{ secrets.GCP_KMS_KEY }}
@@ -317,6 +317,10 @@ jobs:
           toolchain: stable
           target: ${{ matrix.target }}
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
       - name: Build reproducible binary A
         shell: bash
         run: |
@@ -346,7 +350,7 @@ jobs:
           cp "$a" "$artifact"
 
       - name: Sign and notarize macOS release binary
-        if: github.event.inputs.skip_signing != 'true'
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.credentialed_signing == 'true'
         shell: bash
         env:
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
@@ -362,9 +366,15 @@ jobs:
           keychain=$(mktemp).keychain-db
           api_key_dir=$(mktemp -d)
           notarization_zip=$(mktemp).zip
+          notarization_result=$(mktemp).json
+          notarization_log=$(mktemp).json
 
           cleanup() {
-            rm -f "$certificate" "$notarization_zip"
+            rm -f \
+              "$certificate" \
+              "$notarization_zip" \
+              "$notarization_result" \
+              "$notarization_log"
             rm -rf "$api_key_dir"
             security delete-keychain "$keychain" >/dev/null 2>&1 || true
           }
@@ -409,11 +419,40 @@ jobs:
           ditto -c -k --keepParent "$artifact" "$notarization_zip"
           # The notary service creates an online ticket for this standalone
           # binary; Apple does not support stapling tickets to loose binaries.
+          set +e
           xcrun notarytool submit "$notarization_zip" \
             --key "$api_key" \
             --key-id "$APP_STORE_CONNECT_API_KEY" \
             --issuer "$APP_STORE_CONNECT_API_ISSUER" \
-            --wait
+            --wait \
+            --output-format json \
+            > "$notarization_result"
+          notary_exit=$?
+          set -e
+
+          cat "$notarization_result"
+
+          read_notary_field() {
+            python3 -c \
+              'import json, sys; value = json.load(open(sys.argv[1], encoding="utf-8")).get(sys.argv[2], ""); print(value or "")' \
+              "$notarization_result" "$1" 2>/dev/null || true
+          }
+
+          submission_id=$(read_notary_field id)
+          notarization_status=$(read_notary_field status)
+
+          if [ "$notary_exit" -ne 0 ] || [ "$notarization_status" != "Accepted" ]; then
+            echo "Notarization failed with status: ${notarization_status:-unknown}" >&2
+            if [ -n "$submission_id" ]; then
+              xcrun notarytool log "$submission_id" \
+                --key "$api_key" \
+                --key-id "$APP_STORE_CONNECT_API_KEY" \
+                --issuer "$APP_STORE_CONNECT_API_ISSUER" \
+                "$notarization_log" || true
+              cat "$notarization_log" || true
+            fi
+            exit 1
+          fi
 
       - name: Write macOS release checksum
         shell: bash

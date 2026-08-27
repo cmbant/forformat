@@ -11,9 +11,8 @@ from __future__ import annotations
 
 import argparse
 import base64
-import json
+import hashlib
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -21,12 +20,13 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-KMS_RELEASES_API = (
-    "https://api.github.com/repos/GoogleCloudPlatform/kms-integrations/"
-    "releases?per_page=20"
+KMS_CNG_PROVIDER_URL = (
+    "https://github.com/GoogleCloudPlatform/kms-integrations/releases/download/"
+    "cng-v1.4/kmscng-1.4-windows-amd64.zip"
 )
-KMS_ARCHIVE_RE = re.compile(
-    r"^kmscng-[0-9][0-9A-Za-z.\-]*-windows-amd64\.zip$"
+KMS_CNG_PROVIDER_ARCHIVE = "kmscng-1.4-windows-amd64.zip"
+KMS_CNG_PROVIDER_SHA256 = (
+    "3c3570e4c7ff6e5ce21874b9cd595227e9e8bbe8183023f8121124c0e80738a3"
 )
 
 
@@ -63,52 +63,29 @@ def find_signtool() -> str:
 
 
 def download_cng_provider() -> Path:
-    request = urllib.request.Request(
-        KMS_RELEASES_API,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "forformat-sign-windows/1.0",
-        },
-    )
-    with urllib.request.urlopen(request) as response:
-        releases = json.loads(response.read().decode("utf-8"))
+    tools_dir = Path(tempfile.gettempdir()) / "forformat-signing-tools"
+    tools_dir.mkdir(parents=True, exist_ok=True)
+    archive = tools_dir / KMS_CNG_PROVIDER_ARCHIVE
 
-    candidates = []
-    for release in releases:
-        tag = release.get("tag_name", "")
-        if (
-            not tag.startswith("cng-v")
-            or release.get("draft")
-            or release.get("prerelease")
-        ):
-            continue
-        version = tuple(
-            int(part)
-            for part in tag.removeprefix("cng-v").split(".")
-            if part.isdigit()
+    if not archive.exists():
+        print(f"Downloading pinned Cloud KMS CNG provider: {KMS_CNG_PROVIDER_ARCHIVE}")
+        request = urllib.request.Request(
+            KMS_CNG_PROVIDER_URL,
+            headers={"User-Agent": "forformat-sign-windows/1.0"},
         )
-        candidates.append((version, release.get("published_at") or "", release))
+        with urllib.request.urlopen(request) as response:
+            archive.write_bytes(response.read())
 
-    for _, _, release in sorted(
-        candidates, key=lambda item: (item[0], item[1]), reverse=True
-    ):
-        for asset in release.get("assets", []):
-            name = asset.get("name", "")
-            if KMS_ARCHIVE_RE.fullmatch(name):
-                tools_dir = Path(tempfile.gettempdir()) / "forformat-signing-tools"
-                tools_dir.mkdir(parents=True, exist_ok=True)
-                archive = tools_dir / name
-                if not archive.exists():
-                    print(f"Downloading {release['tag_name']} {name}")
-                    asset_request = urllib.request.Request(
-                        asset["browser_download_url"],
-                        headers={"User-Agent": "forformat-sign-windows/1.0"},
-                    )
-                    with urllib.request.urlopen(asset_request) as response:
-                        archive.write_bytes(response.read())
-                return archive
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    if digest != KMS_CNG_PROVIDER_SHA256:
+        archive.unlink(missing_ok=True)
+        raise RuntimeError(
+            "Cloud KMS CNG provider checksum mismatch: "
+            f"expected {KMS_CNG_PROVIDER_SHA256}, got {digest}"
+        )
 
-    raise RuntimeError("Could not resolve the Google Cloud KMS CNG provider")
+    print(f"Verified Cloud KMS CNG provider SHA-256: {digest}")
+    return archive
 
 
 def install_cng_provider() -> None:
