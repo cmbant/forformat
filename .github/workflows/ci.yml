@@ -367,6 +367,7 @@ jobs:
           api_key_dir=$(mktemp -d)
           notarization_zip=$(mktemp).zip
           notarization_result=$(mktemp).json
+          notarization_stderr=$(mktemp)
           notarization_log=$(mktemp).json
 
           cleanup() {
@@ -374,6 +375,7 @@ jobs:
               "$certificate" \
               "$notarization_zip" \
               "$notarization_result" \
+              "$notarization_stderr" \
               "$notarization_log"
             rm -rf "$api_key_dir"
             security delete-keychain "$keychain" >/dev/null 2>&1 || true
@@ -414,7 +416,11 @@ jobs:
           codesign --verify --strict --verbose=4 "$artifact"
 
           api_key="$api_key_dir/AuthKey_$APP_STORE_CONNECT_API_KEY.p8"
-          printf '%s' "$APP_STORE_CONNECT_KEY" > "$api_key"
+          # Match the working GetDist secret handling: the stored secret is the
+          # PEM contents of the App Store Connect .p8 key. Preserve a trailing
+          # newline so notarytool receives a complete PEM document.
+          printf '%s\n' "$APP_STORE_CONNECT_KEY" > "$api_key"
+          openssl pkey -in "$api_key" -noout >/dev/null
 
           ditto -c -k --keepParent "$artifact" "$notarization_zip"
           # The notary service creates an online ticket for this standalone
@@ -426,11 +432,15 @@ jobs:
             --issuer "$APP_STORE_CONNECT_API_ISSUER" \
             --wait \
             --output-format json \
-            > "$notarization_result"
+            > "$notarization_result" \
+            2> "$notarization_stderr"
           notary_exit=$?
           set -e
 
           cat "$notarization_result"
+          if [ -s "$notarization_stderr" ]; then
+            cat "$notarization_stderr" >&2
+          fi
 
           read_notary_field() {
             python3 -c \
