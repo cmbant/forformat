@@ -57,6 +57,17 @@ forformat --stdin < src/module.f90 > /tmp/module.f90
 forformat --stdout src/module.f90 > /tmp/module.f90
 ```
 
+For an editor buffer, give stdin the filename it represents:
+
+```sh
+forformat --stdin-filename=src/module.f90 < src/module.f90
+```
+
+The filename supplies configuration and project discovery, source-form detection, relative
+`INCLUDE` resolution, and diagnostics. It may name a new file whose parent already exists. Use
+`--project-context=/path/to/other/checkout` only when semantic project context should come from a
+different Git checkout.
+
 Automatic fixed/free input detection is enabled by default. A source detected as fixed form is
 skipped unchanged. Use `-ifree` or `--input-format=free` to force free-form handling, and
 `--query-format` to print the detected form. Fixed-form output is unsupported.
@@ -92,12 +103,10 @@ For setup instructions for using `forformat` with VS Code, see the [VS Code setu
 ## Project context and configuration
 
 Explicit file paths use declarations from the surrounding Git checkout for project-aware case
-resolution. Use `--isolated` when each file should be processed independently. For an editor buffer
-on stdin, identify its source file so the buffer shadows the stale on-disk copy during analysis:
-
-```sh
-forformat --stdin --project-context=src/module.f90 < src/module.f90
-```
+resolution. Use `--isolated` when each file should be processed independently. A named stdin buffer
+uses `--stdin-filename=FILE` to derive the same project context and to shadow FILE's stale on-disk
+copy when it is tracked. `--project-context=DIRECTORY` can override only the Git project used for
+analysis.
 
 Project settings can live in `.forformat.toml`, the compatibility spelling `.findent.toml`, or
 `[tool.forformat]` in `pyproject.toml`:
@@ -124,10 +133,11 @@ from forformat import format_source
 
 formatted = format_source(
     source,
+    filename="/path/to/checkout/src/module.f90",
     options=("--config=/absolute/path/to/.forformat.toml",),
-    repo_context_path="/path/to/checkout/src/module.f90",
 )
 ```
 
-The return type matches the input type. Configuration discovery is disabled for this API unless
-`options` explicitly supplies `--config`.
+The return type matches the input type. `filename` supplies file identity and default project
+context; `repo_context_path` can override that project with a directory. Configuration discovery is
+disabled for this API unless `options` explicitly supplies `--config`.

@@ -11,7 +11,9 @@ enum InputSelection {
     #[default]
     Implicit,
     Stdin {
+        stdin_filename: Option<PathBuf>,
         project_context: Option<PathBuf>,
+        isolated: bool,
     },
     ExplicitPaths {
         paths: Vec<PathBuf>,
@@ -70,9 +72,15 @@ impl DraftInvocation {
                     isolated: false,
                 };
             }
-            InputSelection::Stdin { project_context } => {
+            InputSelection::Stdin {
+                stdin_filename,
+                project_context,
+                ..
+            } => {
                 return Err(if project_context.is_some() {
                     project_context_conflict()
+                } else if stdin_filename.is_some() {
+                    stdin_filename_conflict()
                 } else {
                     stdin_conflict()
                 });
@@ -91,7 +99,9 @@ impl DraftInvocation {
         match &self.selection {
             InputSelection::Implicit => {
                 self.selection = InputSelection::Stdin {
+                    stdin_filename: None,
                     project_context: None,
+                    isolated: false,
                 };
                 Ok(())
             }
@@ -102,15 +112,57 @@ impl DraftInvocation {
         }
     }
 
+    pub(super) fn select_stdin_filename(&mut self, path: PathBuf) -> Result<(), FormatError> {
+        match &mut self.selection {
+            InputSelection::Implicit => {
+                self.selection = InputSelection::Stdin {
+                    stdin_filename: Some(path),
+                    project_context: None,
+                    isolated: false,
+                };
+                Ok(())
+            }
+            InputSelection::Stdin { stdin_filename, .. } => {
+                if stdin_filename.replace(path).is_some() {
+                    Err(FormatError::InvalidOption(
+                        "--stdin-filename may be specified only once".into(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            InputSelection::ExplicitPaths { paths, isolated } if paths.is_empty() && *isolated => {
+                self.selection = InputSelection::Stdin {
+                    stdin_filename: Some(path),
+                    project_context: None,
+                    isolated: true,
+                };
+                Ok(())
+            }
+            InputSelection::ExplicitPaths { .. }
+            | InputSelection::All { .. }
+            | InputSelection::AllFiles { .. } => Err(stdin_filename_conflict()),
+        }
+    }
+
     pub(super) fn select_project_context(&mut self, path: PathBuf) -> Result<(), FormatError> {
         match &mut self.selection {
             InputSelection::Implicit => {
                 self.selection = InputSelection::Stdin {
+                    stdin_filename: None,
                     project_context: Some(path),
+                    isolated: false,
                 };
                 Ok(())
             }
-            InputSelection::Stdin { project_context } => {
+            InputSelection::Stdin {
+                project_context,
+                isolated,
+                ..
+            } => {
+                if *isolated {
+                    return Err(project_context_conflict());
+                }
                 if project_context.replace(path).is_some() {
                     Err(FormatError::InvalidOption(
                         "--project-context may be specified only once".into(),
@@ -129,21 +181,17 @@ impl DraftInvocation {
         let selection = std::mem::take(&mut self.selection);
         self.selection = match selection {
             InputSelection::Implicit => bulk_selection(all_files, None),
-            InputSelection::Stdin { project_context } => {
-                self.selection = InputSelection::Stdin { project_context };
-                return Err(
-                    if matches!(
-                        self.selection,
-                        InputSelection::Stdin {
-                            project_context: Some(_),
-                            ..
-                        }
-                    ) {
-                        project_context_conflict()
-                    } else {
-                        stdin_conflict()
-                    },
-                );
+            InputSelection::Stdin {
+                stdin_filename,
+                project_context,
+                isolated,
+            } => {
+                self.selection = InputSelection::Stdin {
+                    stdin_filename,
+                    project_context,
+                    isolated,
+                };
+                return Err(stdin_selection_conflict(&self.selection));
             }
             InputSelection::ExplicitPaths { paths, isolated } => {
                 if isolated {
@@ -191,11 +239,20 @@ impl DraftInvocation {
                 };
                 Ok(())
             }
-            InputSelection::Stdin { project_context } => Err(if project_context.is_some() {
-                project_context_conflict()
-            } else {
-                stdin_conflict()
-            }),
+            InputSelection::Stdin {
+                stdin_filename,
+                project_context,
+                isolated,
+            } => {
+                if project_context.is_some() {
+                    Err(project_context_conflict())
+                } else if stdin_filename.is_some() {
+                    *isolated = true;
+                    Ok(())
+                } else {
+                    Err(stdin_conflict())
+                }
+            }
             InputSelection::ExplicitPaths { isolated, .. } => {
                 *isolated = true;
                 Ok(())
@@ -210,6 +267,7 @@ impl DraftInvocation {
         if matches!(
             &self.selection,
             InputSelection::ExplicitPaths { isolated: true, .. }
+                | InputSelection::Stdin { isolated: true, .. }
         ) {
             return Err(FormatError::InvalidOption(
                 "--isolated cannot be combined with --context-path".into(),
@@ -268,31 +326,44 @@ impl DraftInvocation {
         self.validate()?;
         let action = self.resolve_action();
 
-        let (paths, project_context, all, all_files, stdin, isolated) = match self.selection {
-            InputSelection::Implicit => (Vec::new(), None, false, false, false, false),
-            InputSelection::Stdin { project_context } => {
-                (Vec::new(), project_context, false, false, true, false)
-            }
-            InputSelection::ExplicitPaths { paths, isolated } => {
-                (paths, None, false, false, false, isolated)
-            }
-            InputSelection::All { directory } => (
-                directory.into_iter().collect(),
-                None,
-                true,
-                false,
-                false,
-                false,
-            ),
-            InputSelection::AllFiles { directory } => (
-                directory.into_iter().collect(),
-                None,
-                false,
-                true,
-                false,
-                false,
-            ),
-        };
+        let (paths, stdin_filename, project_context, all, all_files, stdin, isolated) =
+            match self.selection {
+                InputSelection::Implicit => (Vec::new(), None, None, false, false, false, false),
+                InputSelection::Stdin {
+                    stdin_filename,
+                    project_context,
+                    isolated,
+                } => (
+                    Vec::new(),
+                    stdin_filename,
+                    project_context,
+                    false,
+                    false,
+                    true,
+                    isolated,
+                ),
+                InputSelection::ExplicitPaths { paths, isolated } => {
+                    (paths, None, None, false, false, false, isolated)
+                }
+                InputSelection::All { directory } => (
+                    directory.into_iter().collect(),
+                    None,
+                    None,
+                    true,
+                    false,
+                    false,
+                    false,
+                ),
+                InputSelection::AllFiles { directory } => (
+                    directory.into_iter().collect(),
+                    None,
+                    None,
+                    false,
+                    true,
+                    false,
+                    false,
+                ),
+            };
 
         let (stdout, check, diff, show_files, query_format, indent_query) = match action {
             Action::Rewrite => (false, false, false, false, false, None),
@@ -307,6 +378,7 @@ impl DraftInvocation {
         Ok(Invocation {
             config,
             paths,
+            stdin_filename,
             project_context,
             context_paths: self.options.context_paths.take().unwrap_or_default(),
             all,
@@ -339,13 +411,10 @@ impl DraftInvocation {
         // selection/action states only after every argv token has been seen.
         // This avoids argument-order-dependent diagnostics without restoring
         // the old boolean matrix as DraftInvocation state.
-        if let InputSelection::Stdin { project_context } = &self.selection {
-            if project_context.is_some() && (stdout || check || diff || show_files) {
-                return Err(project_context_conflict());
-            }
-            if project_context.is_none() && (stdout || check || diff || show_files) {
-                return Err(stdin_conflict());
-            }
+        if matches!(&self.selection, InputSelection::Stdin { .. })
+            && (stdout || check || diff || show_files)
+        {
+            return Err(stdin_selection_conflict(&self.selection));
         }
 
         if stdout
@@ -371,6 +440,7 @@ impl DraftInvocation {
         if matches!(
             &self.selection,
             InputSelection::ExplicitPaths { isolated: true, .. }
+                | InputSelection::Stdin { isolated: true, .. }
         ) && self
             .options
             .context_paths
@@ -407,8 +477,10 @@ impl DraftInvocation {
             && (matches!(
                 &self.selection,
                 InputSelection::Stdin {
-                    project_context: Some(_)
-                } | InputSelection::ExplicitPaths { isolated: true, .. }
+                    project_context: Some(_),
+                    ..
+                } | InputSelection::Stdin { isolated: true, .. }
+                    | InputSelection::ExplicitPaths { isolated: true, .. }
             ) || self
                 .options
                 .context_paths
@@ -472,6 +544,27 @@ impl DraftInvocation {
     }
 }
 
+fn stdin_selection_conflict(selection: &InputSelection) -> FormatError {
+    match selection {
+        InputSelection::Stdin {
+            stdin_filename,
+            project_context,
+            ..
+        } => stdin_conflict_for(stdin_filename.is_some(), project_context.is_some()),
+        _ => unreachable!("stdin conflict requested for a non-stdin selection"),
+    }
+}
+
+fn stdin_conflict_for(has_filename: bool, has_project_context: bool) -> FormatError {
+    if has_project_context {
+        project_context_conflict()
+    } else if has_filename {
+        stdin_filename_conflict()
+    } else {
+        stdin_conflict()
+    }
+}
+
 fn bulk_selection(all_files: bool, directory: Option<PathBuf>) -> InputSelection {
     if all_files {
         InputSelection::AllFiles { directory }
@@ -483,6 +576,12 @@ fn bulk_selection(all_files: bool, directory: Option<PathBuf>) -> InputSelection
 fn project_context_conflict() -> FormatError {
     FormatError::InvalidOption(
         "--project-context cannot be combined with paths, --all, --all-files, --stdout, --isolated, --check, --diff, or --show-files".into(),
+    )
+}
+
+fn stdin_filename_conflict() -> FormatError {
+    FormatError::InvalidOption(
+        "--stdin-filename cannot be combined with paths, --all, --all-files, --stdout, --check, --diff, or --show-files".into(),
     )
 }
 

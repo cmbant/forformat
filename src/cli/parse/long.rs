@@ -72,6 +72,15 @@ where
             }
             draft.select_project_context(PathBuf::from(path))?;
         }
+        OptionId::StdinFilename => {
+            let path = value.expect("required option has a value");
+            if path.is_empty() {
+                return Err(FormatError::InvalidOption(
+                    "--stdin-filename requires a path".into(),
+                ));
+            }
+            draft.select_stdin_filename(PathBuf::from(path))?;
+        }
         OptionId::Stdin => draft.select_stdin()?,
         OptionId::Stdout => draft.set_stdout()?,
         OptionId::Isolated => draft.set_isolated()?,

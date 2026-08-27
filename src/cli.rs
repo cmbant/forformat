@@ -48,6 +48,9 @@ pub enum IndentQuery {
 pub struct Invocation {
     pub config: FormatConfig,
     pub paths: Vec<PathBuf>,
+    /// The file identity of an stdin buffer, if one was supplied.
+    pub stdin_filename: Option<PathBuf>,
+    /// Explicit directory used to override stdin's derived project checkout.
     pub project_context: Option<PathBuf>,
     pub context_paths: Vec<ContextPath>,
     pub all: bool,

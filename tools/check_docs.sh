@@ -111,8 +111,8 @@ cmp stdin.out stdout.out
 "$binary" --keyword-case=upper --line-length=100 src/module.f90 >/dev/null
 grep -q '^MODULE Demo$' src/module.f90
 
-# Editor/project-context and context-path examples.
-"$binary" --stdin --project-context=src/module.f90 < src/module.f90 > project.out
+# Editor/named-stdin and context-path examples.
+"$binary" --stdin-filename=src/module.f90 < src/module.f90 > project.out
 "$binary" --stdout src/module.f90 --context-path=src --context-path=modules > context.out
 cmp project.out context.out
 
@@ -124,6 +124,8 @@ grep -Fxq 'modules/types.f90' files.out
 grep -Fxq 'src/module.f90' excluded.out
 ! grep -q 'modules/types.f90' excluded.out
 "$binary" --query-format src/module.f90 | grep -Fxq free
+printf '      program p\n      end program p\n' |
+    "$binary" --no-config --query-format --stdin-filename=src/new.f90 | grep -Fxq free
 
 # Configuration example and underscore/hyphen key equivalence.
 cat > .forformat.toml <<'TOML'

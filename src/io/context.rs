@@ -54,8 +54,9 @@ pub(super) fn project_context(
             )
         }),
     );
-    // A file-valued --project-context makes stdin the current version of that
-    // tracked source. Its already-extracted facts replace the stale disk copy.
+    // --stdin-filename makes stdin the current version of that project path.
+    // Its already-extracted facts replace the stale disk copy omitted during
+    // source selection.
     if let Some((path, local)) = stdin_source {
         context.absorb(path, local);
     }
