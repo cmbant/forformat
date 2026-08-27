@@ -30,7 +30,11 @@ pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, Fo
         &mut reconciler,
     )?;
     restore_implicit_letter_spellings(document, &protected);
-    Ok(changed)
+    if changed == Changed::Text && matches_analysis_snapshot(document, cx) {
+        Ok(Changed::No)
+    } else {
+        Ok(changed)
+    }
 }
 
 struct ProtectedSpelling {
@@ -75,6 +79,15 @@ fn restore_implicit_letter_spellings(document: &mut Document, protected: &[Prote
             line.splice(item.range.clone(), item.spelling.iter().copied());
         }
     }
+}
+
+fn matches_analysis_snapshot(document: &Document, cx: &PassContext) -> bool {
+    document.lines.len() == cx.analysis.buffer.lines.len()
+        && document
+            .lines
+            .iter()
+            .zip(&cx.analysis.buffer.lines)
+            .all(|(line, physical)| line.as_slice() == cx.analysis.buffer.line_bytes(physical))
 }
 
 struct ScopedReconciler<'a, 'cx> {
@@ -180,6 +193,28 @@ mod tests {
     };
     use std::path::Path;
 
+    fn run_declared(target: &[u8]) -> (Changed, Vec<u8>) {
+        let project = analyze_project([(Path::new("target.f90"), target)]).unwrap();
+        let local = analyze_file(target).unwrap();
+        let mut document = Document::from_bytes(target);
+        let analysis = document.analyze().unwrap();
+        let scopes = ScopeTree::build(&analysis);
+        let config = FormatConfig {
+            mode: FormatMode::NormalizeOnly,
+            ..FormatConfig::default()
+        };
+        let context = PassContext {
+            config: &config,
+            project: &project,
+            local: &local,
+            analysis: &analysis,
+            scopes: &scopes,
+        };
+
+        let changed = declared(&mut document, &context).unwrap();
+        (changed, document.to_bytes())
+    }
+
     #[test]
     fn restore_of_split_identifier_emits_no_edit() {
         let declarations =
@@ -216,30 +251,21 @@ mod tests {
     fn implicit_letter_ranges_do_not_follow_declared_symbol_case() {
         let target =
             b"subroutine s\ndimension H(3)\nimplicit real*8 (a-h,o-z)\nx = h\nend subroutine s\n";
-        let project = analyze_project([(Path::new("target.f90"), target.as_slice())]).unwrap();
-        let local = analyze_file(target).unwrap();
-        let mut document = Document::from_bytes(target);
-        let analysis = document.analyze().unwrap();
-        let scopes = ScopeTree::build(&analysis);
-        let config = FormatConfig {
-            mode: FormatMode::NormalizeOnly,
-            ..FormatConfig::default()
-        };
-        let context = PassContext {
-            config: &config,
-            project: &project,
-            local: &local,
-            analysis: &analysis,
-            scopes: &scopes,
-        };
-
-        declared(&mut document, &context).unwrap();
-        let output = document.to_bytes();
+        let (changed, output) = run_declared(target);
+        assert_eq!(changed, Changed::Text);
         assert!(output
             .windows(b"(a-h,o-z)".len())
             .any(|window| window == b"(a-h,o-z)"));
         assert!(output
             .windows(b"x = H".len())
             .any(|window| window == b"x = H"));
+    }
+
+    #[test]
+    fn protected_implicit_letters_do_not_report_a_change() {
+        let target = b"subroutine s\ndimension H(3)\nimplicit real*8 (a-h,o-z)\nend subroutine s\n";
+        let (changed, output) = run_declared(target);
+        assert_eq!(changed, Changed::No);
+        assert_eq!(output, target);
     }
 }
