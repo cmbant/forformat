@@ -98,9 +98,17 @@ pub fn detect(source: &[u8]) -> SourceForm {
 }
 
 fn has_modern_free_suffix(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| !extension.eq_ignore_ascii_case("f"))
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return false;
+    };
+    !extension.eq_ignore_ascii_case("f")
+        && crate::transform::vocab::SOURCE_EXTENSIONS
+            .iter()
+            .any(|candidate| {
+                candidate
+                    .strip_prefix('.')
+                    .is_some_and(|known| known.eq_ignore_ascii_case(extension))
+            })
 }
 
 fn collect_evidence(source: &[u8]) -> FormEvidence {

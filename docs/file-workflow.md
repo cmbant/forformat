@@ -12,9 +12,12 @@ initialized submodule sources as targets. Both modes have repeatable `--exclude=
 context. An excluded source named explicitly remains a formatting target; exclusions are not force
 exclusions.
 
-`--stdin-filename=<file>` identifies the source represented by stdin. The file itself need not exist,
-which makes the option suitable for an unsaved editor buffer, but its parent directory must exist.
-The filename is the buffer's identity for configuration discovery, default Git-project discovery,
+`--stdin-filename=<file>` identifies the source represented by stdin and accepts any filename; it is
+virtual-input metadata, not a request to discover that path as a filesystem formatting target. The
+file itself need not exist, which makes the option suitable for an unsaved editor buffer, but its
+parent directory must exist. If the path already exists it is canonicalized as a whole and must be a
+regular file, so alternate spellings and symlink aliases resolve to the same tracked identity. The
+filename is the buffer's identity for configuration discovery, default Git-project discovery,
 source-form detection, relative Fortran `INCLUDE` resolution, and diagnostics. When the filename is
 a tracked source, its stale on-disk copy is omitted from project analysis and the stdin facts take
 its place. `--stdin-filename` implies stdin; `--isolated` may be added when the filename-local
@@ -100,10 +103,12 @@ Relative paths are normalized to `/` before matching.
 
 Every file target is read before formatting and classified by an evidence-based fixed/free detector.
 Strong fixed-form evidence wins; otherwise clear free-form syntax is accepted. When a filename is
-available — including through `--stdin-filename` — modern suffixes such as `.f90` and `.F90` add a
-strong free-form prior, while bare `.f` and `.F` remain content-driven. Anonymous stdin has no
-filename prior, so it is formatted when the bytes contain positive free-form evidence and remains
-conservatively fixed when the content is ambiguous. Fixed-form sources are skipped: their bytes are
+available — including through `--stdin-filename` — recognized modern Fortran suffixes such as `.f90`
+and `.F90` add a strong free-form prior, while bare `.f` and `.F` remain content-driven. Arbitrary
+virtual filenames are accepted, but unrecognized suffixes add no prior; use `-ifree` for ambiguous
+free-form editor buffers such as `.fypp`. Anonymous stdin has no filename prior, so it is formatted
+when the bytes contain positive free-form evidence and remains conservatively fixed when the content
+is ambiguous. Fixed-form sources are skipped: their bytes are
 not written, they do not make `--check` fail, and `--stdout` returns the original bytes. Each skipped
 target receives a `forformat: <path>: fixed-form source, skipped` diagnostic on stderr. Use `-ifree`
 or `--input-format=free` when a source uses free form despite a legacy-looking layout; this forces

@@ -140,9 +140,12 @@ Explicit fixed-form input or output requests (`-ifixed`, `-ofixed`, `--input-for
 `--output-format=fixed`) are unsupported. Automatic detection may still classify an input as fixed;
 that source is then left unchanged.
 
-`--stdin-filename` implies stdin. Its parent directory must exist, but FILE itself may be a new
-unsaved path. The filename participates in automatic source-form detection, so
-`--query-format --stdin-filename=FILE` uses the same filename prior as a real file without opening FILE.
+`--stdin-filename` implies stdin and accepts any filename; it is virtual-input metadata rather than
+a filesystem target selector. Its parent directory must exist, and an existing FILE must be a regular
+file, but FILE itself may be a new unsaved path. Recognized Fortran suffixes participate in automatic
+source-form detection exactly as they do for real targets; other suffixes provide no form prior, so
+use `-ifree`/`--input-format=free` for ambiguous free-form buffers such as `foo.fypp`.
+`--query-format --stdin-filename=FILE` uses the same recognized filename prior without opening a new FILE.
 
 `--stdout` requires exactly one explicit path. `--check`, `--diff`, and `--show-files` require
 explicit paths, `--all`, or `--all-files`. Query modes cannot be combined with rewrite/check/diff
@@ -161,9 +164,10 @@ modes.
 
 `--stdin-filename=FILE` is the stdin buffer's file identity. Configuration discovery starts from
 FILE's parent, the default project checkout is discovered there, relative `INCLUDE` paths are
-resolved there, and diagnostics name FILE. If FILE is tracked, its stale on-disk copy is removed
-from project input and the stdin facts replace it. The file itself need not exist; this supports new
-editor buffers.
+resolved there, and diagnostics name FILE. Existing paths are canonicalized as a whole, so alternate
+spellings or symlink aliases still shadow the same tracked source; an existing path must be a regular
+file. If FILE is tracked, its stale on-disk copy is removed from project input and the stdin facts
+replace it. The file itself need not exist; this supports new editor buffers.
 
 `--project-context=DIRECTORY` is independent of that file identity. It requires an existing
 directory in a Git checkout and changes only the project used for semantic context. It never changes

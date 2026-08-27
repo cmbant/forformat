@@ -1391,6 +1391,42 @@ fn stdin_filename_uses_filename_for_detection_without_requiring_the_file() {
 }
 
 #[test]
+fn stdin_filename_accepts_arbitrary_extensions_and_ifree_controls_the_form() {
+    let repo = temp_repo();
+    let source = b"      program p\n      x=1\n      end program p\n";
+    let automatic = run_stdin(
+        &repo,
+        &[
+            "--full",
+            "--no-config",
+            "--isolated",
+            "--stdin-filename",
+            "buffer.fypp",
+        ],
+        source,
+    );
+    assert_eq!(automatic.status.code(), Some(0));
+    assert_eq!(automatic.stdout, source);
+    assert!(String::from_utf8_lossy(&automatic.stderr).contains("fixed-form source, skipped"));
+    let forced = run_stdin(
+        &repo,
+        &[
+            "--full",
+            "--no-config",
+            "--isolated",
+            "--stdin-filename",
+            "buffer.fypp",
+            "-ifree",
+        ],
+        source,
+    );
+    assert_eq!(forced.status.code(), Some(0));
+    assert_ne!(forced.stdout, source);
+    assert!(forced.stderr.is_empty());
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
 fn stdin_filename_excludes_the_stale_on_disk_target() {
     let repo = temp_repo();
     let target = repo.join("target.f90");
@@ -1413,6 +1449,40 @@ fn stdin_filename_excludes_the_stale_on_disk_target() {
             target.to_str().unwrap(),
         ],
         source,
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.stdout,
+        b"program p\n   use SharedName\n   print *, stalename\nend program p\n"
+    );
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn stdin_filename_case_alias_excludes_the_stale_on_disk_target_when_supported() {
+    let repo = temp_repo();
+    let target = repo.join("target.f90");
+    fs::write(&target, b"program p\ninteger :: StaleName\nend program p\n").unwrap();
+    fs::write(
+        repo.join("shared.f90"),
+        b"module SharedName\nend module SharedName\n",
+    )
+    .unwrap();
+    git_add(&repo);
+    let alias = repo.join("TARGET.F90");
+    if !alias.exists() {
+        let _ = fs::remove_dir_all(repo);
+        return;
+    }
+    let output = run_stdin(
+        &repo,
+        &[
+            "--full",
+            "--no-config",
+            "--stdin-filename",
+            alias.to_str().unwrap(),
+        ],
+        b"program p\nuse sharedname\nprint *, stalename\nend program p\n",
     );
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
@@ -1467,6 +1537,21 @@ fn stdin_filename_requires_an_existing_parent_directory() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr)
         .contains("--stdin-filename parent directory does not exist"));
+    let _ = fs::remove_dir_all(repo);
+}
+
+#[test]
+fn stdin_filename_rejects_an_existing_non_file_path() {
+    let repo = temp_repo();
+    fs::create_dir(repo.join("looks-like-source.f90")).unwrap();
+    let output = run_stdin(
+        &repo,
+        &["--no-config", "--stdin-filename", "looks-like-source.f90"],
+        b"program p\nend program p\n",
+    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("--stdin-filename requires a regular file when the path exists"));
     let _ = fs::remove_dir_all(repo);
 }
 
