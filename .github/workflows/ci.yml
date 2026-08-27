@@ -721,12 +721,3 @@ jobs:
               --generate-notes \
               --title "forformat $GITHUB_REF_NAME"
           fi
-
-  publish-pypi:
-    name: publish Python package to PyPI
-    if: startsWith(github.ref, 'refs/tags/')
-    needs: artifact-verification
-    uses: ./.github/workflows/pypi.yml
-    permissions:
-      contents: read
-      id-token: write
