@@ -375,7 +375,7 @@ jobs:
             -output "$binary"
           chmod 0755 "$binary"
 
-          lipo -verify_arch x86_64 arm64 "$binary"
+          lipo "$binary" -verify_arch x86_64 arm64
 
       - name: Package unsigned macOS installer
         if: github.event.inputs.credentialed_signing != 'true' && !startsWith(github.ref, 'refs/tags/')
@@ -477,7 +477,7 @@ jobs:
             --sign "$app_identity" \
             "$binary"
           codesign --verify --strict --verbose=4 "$binary"
-          lipo -verify_arch x86_64 arm64 "$binary"
+          lipo "$binary" -verify_arch x86_64 arm64
 
           version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)
           pkgbuild \
