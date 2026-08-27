@@ -23,7 +23,10 @@ use diff::unified_diff;
 use exclude::ExcludeMatcher;
 use report::{fixed_message, input_name, skips_fixed_form, DeclineReporter};
 use select::{deduplicate_indices, select_paths, Loaded, Scope, Selection};
-use sources::{display_path, read_source, resolve_input, tracked_sources_without_submodules};
+use sources::{
+    display_path, read_source, resolve_input, resolve_stdin_filename,
+    tracked_sources_without_submodules,
+};
 use write::write_all_stdout;
 
 pub use sources::{repository_root, tracked_sources, validate_extension};
@@ -130,15 +133,22 @@ fn in_input<T, E: Into<WorkflowError>>(
 }
 
 fn execute_query_format(invocation: Invocation) -> Result<i32, WorkflowError> {
+    let cwd = env::current_dir()?;
     if invocation.stdin || (invocation.paths.is_empty() && !invocation.all && !invocation.all_files)
     {
         let mut source = Vec::new();
         io::stdin().read_to_end(&mut source)?;
-        println!("{}", source_form_name(crate::source::detect(&source)));
+        let form = match invocation.stdin_filename.as_deref() {
+            Some(path) => {
+                let path = resolve_stdin_filename(path, &cwd)?;
+                crate::source::detect_path(&path, &source)
+            }
+            None => crate::source::detect(&source),
+        };
+        println!("{}", source_form_name(form));
         return Ok(0);
     }
 
-    let cwd = env::current_dir()?;
     let all_scope = if invocation.all || invocation.all_files {
         invocation
             .paths
@@ -247,10 +257,15 @@ pub fn execute(invocation: Invocation) -> Result<i32, WorkflowError> {
     }
     let all_selection = invocation.all || invocation.all_files;
     let stdin_mode = invocation.stdin || (invocation.paths.is_empty() && !all_selection);
-    // A buffer on stdin with no project to read needs none of the discovery
-    // below, and this is the route an editor takes on every keystroke, so it
-    // does not pay for any of it.
-    if stdin_mode && invocation.project_context.is_none() && invocation.context_paths.is_empty() {
+    // A truly anonymous stdin buffer with no project to read needs none of the
+    // discovery below. A named buffer deliberately takes the normal path-aware
+    // route so config, source form, INCLUDEs, and project context see its file
+    // identity.
+    if stdin_mode
+        && invocation.stdin_filename.is_none()
+        && invocation.project_context.is_none()
+        && invocation.context_paths.is_empty()
+    {
         return format_bare_stdin(&invocation);
     }
 
@@ -390,7 +405,7 @@ fn format_bare_stdin(invocation: &Invocation) -> Result<i32, WorkflowError> {
         return Ok(0);
     }
     let result = in_input(format_source(&source, &invocation.config), None, None)?;
-    write_stdin_result(invocation, result, None)
+    write_stdin_result(invocation, result, None, None)
 }
 
 /// The two stdin routes that answer before any project source is read: a
@@ -406,20 +421,21 @@ fn stdin_shortcut(
     };
     let input_path = scope.stdin_path();
     if skips_fixed_form(invocation, input_path, source) {
-        let input = input_path
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "<stdin>".to_string());
-        eprintln!("{}", fixed_message(&input));
+        eprintln!(
+            "{}",
+            fixed_message(&input_name(input_path, scope.root.as_deref()))
+        );
         write_all_stdout(source)?;
         return Ok(Some(0));
     }
     if !invocation.config.mode.normalizes() {
         let formatted = in_input(
             format_source(source, &invocation.config),
-            None,
+            input_path,
             scope.root.as_deref(),
         )?;
-        return write_stdin_result(invocation, formatted, scope.root.as_deref()).map(Some);
+        return write_stdin_result(invocation, formatted, input_path, scope.root.as_deref())
+            .map(Some);
     }
     Ok(None)
 }
@@ -461,10 +477,11 @@ fn format_project_stdin(
     context: &crate::analysis::ProjectContext,
     stdin_local: Option<&crate::analysis::FileFacts>,
 ) -> Result<i32, WorkflowError> {
+    let input_path = scope.stdin_path();
     let formatted = if !invocation.config.mode.normalizes() {
         in_input(
             format_source(source, &invocation.config),
-            None,
+            input_path,
             scope.root.as_deref(),
         )?
     } else {
@@ -475,11 +492,11 @@ fn format_project_stdin(
                 stdin_local.expect("full-mode stdin must have precomputed facts"),
                 &invocation.config,
             ),
-            None,
+            input_path,
             scope.root.as_deref(),
         )?
     };
-    write_stdin_result(invocation, formatted, scope.root.as_deref())
+    write_stdin_result(invocation, formatted, input_path, scope.root.as_deref())
 }
 
 /// Deliver one successfully formatted stdin buffer.
@@ -491,10 +508,11 @@ fn format_project_stdin(
 fn write_stdin_result(
     invocation: &Invocation,
     formatted: crate::FormatResult,
+    input_path: Option<&Path>,
     root: Option<&Path>,
 ) -> Result<i32, WorkflowError> {
     let mut declines = DeclineReporter::default();
-    declines.report(&formatted.meta, None, root);
+    declines.report(&formatted.meta, input_path, root);
     declines.finish();
     if let Some(query) = invocation.indent_query {
         let value = match query {
