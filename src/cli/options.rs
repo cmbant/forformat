@@ -43,6 +43,7 @@ pub(crate) enum OptionId {
     NoSubmodules,
     ContextPath,
     ProjectContext,
+    StdinFilename,
     Stdin,
     Stdout,
     Isolated,
@@ -479,8 +480,12 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
             "limit project context to sources beneath DIRECTORY; repeatable",
         ),
     OptionSpec::new(OptionId::ProjectContext, "project-context", ValueKind::Path).help(
-        "--project-context=<path>",
-        "treat stdin as belonging to the Git project containing PATH",
+        "--project-context=<directory>",
+        "override stdin project context with the Git checkout containing DIRECTORY",
+    ),
+    OptionSpec::new(OptionId::StdinFilename, "stdin-filename", ValueKind::Path).help(
+        "--stdin-filename=<file>",
+        "treat stdin as the current contents of FILE",
     ),
     OptionSpec::new(OptionId::Stdin, "stdin", ValueKind::Flag)
         .help("--stdin", "read source from stdin (default without paths)"),

@@ -334,6 +334,7 @@ pub(crate) fn parse_format_setting(
         | OptionId::NoSubmodules
         | OptionId::ContextPath
         | OptionId::ProjectContext
+        | OptionId::StdinFilename
         | OptionId::Stdin
         | OptionId::Stdout
         | OptionId::Isolated

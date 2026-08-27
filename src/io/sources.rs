@@ -150,6 +150,59 @@ pub(super) fn resolve_input(path: &Path, root: Option<&Path>) -> PathBuf {
     }
 }
 
+/// Resolve the file identity assigned to stdin. Existing paths are
+/// canonicalized as a whole so aliases compare equal to tracked project
+/// sources, while genuinely new editor buffers keep their requested filename
+/// under a canonical parent. Virtual filenames are not restricted to the
+/// filesystem source-extension allow-list.
+pub(super) fn resolve_stdin_filename(path: &Path, cwd: &Path) -> Result<PathBuf, WorkflowError> {
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        cwd.join(path)
+    };
+    let file_name = candidate.file_name().ok_or_else(|| {
+        WorkflowError::Usage(format!(
+            "--stdin-filename requires a filename: {}",
+            path.display()
+        ))
+    })?;
+    match fs::symlink_metadata(&candidate) {
+        Ok(_) => {
+            let canonical = fs::canonicalize(&candidate).map_err(|error| {
+                WorkflowError::Usage(format!(
+                    "--stdin-filename path could not be resolved: {} ({error})",
+                    candidate.display()
+                ))
+            })?;
+            if !fs::metadata(&canonical)?.is_file() {
+                return Err(WorkflowError::Usage(format!(
+                    "--stdin-filename requires a regular file when the path exists: {}",
+                    candidate.display()
+                )));
+            }
+            Ok(canonical)
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = candidate.parent().unwrap_or(cwd);
+            let directory = fs::canonicalize(parent).map_err(|error| {
+                WorkflowError::Usage(format!(
+                    "--stdin-filename parent directory does not exist: {} ({error})",
+                    parent.display()
+                ))
+            })?;
+            if !fs::metadata(&directory)?.is_dir() {
+                return Err(WorkflowError::Usage(format!(
+                    "--stdin-filename parent is not a directory: {}",
+                    parent.display()
+                )));
+            }
+            Ok(directory.join(file_name))
+        }
+        Err(error) => Err(WorkflowError::Io(error)),
+    }
+}
+
 pub(super) fn read_source(
     path: &Path,
     force_free_input: bool,

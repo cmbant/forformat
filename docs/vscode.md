@@ -57,8 +57,21 @@ extension's `findent` formatter adapter.
    ```
 
 The wrapper passes the editor buffer through `forformat` on stdin. The `--project-context` setting
-lets `forformat` use declarations from the rest of the repository when resolving identifier case.
-It also discovers the repository's `[tool.forformat]` settings in `pyproject.toml`, if present.
+only selects the Git checkout used for semantic project analysis, so `forformat` can use declarations
+from the rest of the repository when resolving identifier case. Configuration discovery remains
+based on the wrapper process working directory; use `--config=/path/to/.forformat.toml` in
+`findentArgs` when that is not the repository directory.
+
+A native editor/plugin integration should prefer `--stdin-filename=FILE` when it knows the file
+represented by the unsaved buffer. That single identity also supplies configuration discovery,
+default project discovery, filename-aware source-form detection, relative `INCLUDE` resolution, and
+stale on-disk shadowing. The virtual filename is not limited to forformat's filesystem source
+extension allow-list, so editor-only names such as `.fypp` are accepted; pass `-ifree` when such an
+unrecognized suffix needs an explicit free-form override. For example:
+
+```sh
+forformat --stdin-filename=/path/to/file.fypp -ifree
+```
 
 Use **Format Document** (`Shift+Alt+F`) to test the setup.
 

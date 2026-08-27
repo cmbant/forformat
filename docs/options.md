@@ -61,7 +61,7 @@ forformat --rewrap --line-length=100 src/module.f90
 Format an editor buffer from stdin while using the rest of the checkout for declaration context:
 
 ```sh
-forformat --stdin --project-context=src/module.f90 < src/module.f90
+forformat --stdin-filename=src/module.f90 < src/module.f90
 ```
 
 Limit semantic context without changing the explicit formatting target:
@@ -124,6 +124,7 @@ policy instead of adding independent compatibility switches.
 | positional `PATH ...` | — | format explicit files in place |
 | positional `DIR` (single argument) | — | equivalent to `--all-files DIR`: format that directory's tracked sources |
 | `--stdin` | — | read source from stdin; this is also the default when no path is supplied |
+| `--stdin-filename=FILE` | — | read stdin as FILE, using that file identity without requiring FILE itself to exist |
 | `--stdout` | — | write one explicit file's formatted result to stdout instead of replacing it |
 | `--all-files [DIR]` | — | select tracked sources owned by the checkout; submodules provide context only |
 | `--all [DIR]` | — | select tracked sources recursively, including initialized submodule sources |
@@ -139,6 +140,13 @@ Explicit fixed-form input or output requests (`-ifixed`, `-ofixed`, `--input-for
 `--output-format=fixed`) are unsupported. Automatic detection may still classify an input as fixed;
 that source is then left unchanged.
 
+`--stdin-filename` implies stdin and accepts any filename; it is virtual-input metadata rather than
+a filesystem target selector. Its parent directory must exist, and an existing FILE must be a regular
+file, but FILE itself may be a new unsaved path. Recognized Fortran suffixes participate in automatic
+source-form detection exactly as they do for real targets; other suffixes provide no form prior, so
+use `-ifree`/`--input-format=free` for ambiguous free-form buffers such as `foo.fypp`.
+`--query-format --stdin-filename=FILE` uses the same recognized filename prior without opening a new FILE.
+
 `--stdout` requires exactly one explicit path. `--check`, `--diff`, and `--show-files` require
 explicit paths, `--all`, or `--all-files`. Query modes cannot be combined with rewrite/check/diff
 modes.
@@ -147,16 +155,31 @@ modes.
 
 | Option | Configuration | Meaning | Default |
 | --- | --- | --- | --- |
-| `--project-context=PATH` | — | associate stdin with the Git project containing `PATH`; a source-file path also shadows that on-disk file | none |
+| `--project-context=DIRECTORY` | — | override stdin project analysis with the Git checkout containing DIRECTORY | derived from stdin filename or current directory |
 | `--context-path=DIR` | `context_paths = ["..."]` | limit semantic project context; repeatable on CLI | whole eligible project |
-| `--isolated` | — | disable project scanning for explicit files | false |
+| `--isolated` | — | disable project scanning for explicit files or named stdin | false |
 | `--no-submodules[=BOOL]` | `no_submodules = true/false` | omit initialized submodules from targets and context | false |
 | `--exclude=GLOB` | `exclude = ["..."]` | select the exclusion set for bulk targets and project context | empty set |
 | `--extend-exclude=GLOB` | `extend_exclude = ["..."]` | add exclusions without replacing the selected set | empty |
 
-`--project-context` identifies a project or stdin file identity; it does **not** restrict which files
-supply semantic context. Use `--context-path` for that. Command-line context paths replace configured
-`context_paths` rather than accumulating with them.
+`--stdin-filename=FILE` is the stdin buffer's file identity. Configuration discovery starts from
+FILE's parent, the default project checkout is discovered there, relative `INCLUDE` paths are
+resolved there, and diagnostics name FILE. Existing paths are canonicalized as a whole, so alternate
+spellings or symlink aliases still shadow the same tracked source; an existing path must be a regular
+file. If FILE is tracked, its stale on-disk copy is removed from project input and the stdin facts
+replace it. The file itself need not exist; this supports new editor buffers.
+
+`--project-context=DIRECTORY` is independent of that file identity. It requires an existing
+directory in a Git checkout and changes only the project used for semantic context. It never changes
+configuration discovery: named stdin follows `--stdin-filename`, while anonymous stdin continues to
+start from the current working directory. `--project-context` implies stdin even without a filename.
+It does **not** restrict which files in the selected project supply semantic context; use
+`--context-path` for that. Command-line context paths replace configured `context_paths` rather than
+accumulating with them.
+
+`--isolated` can be combined with `--stdin-filename` when filename-aware detection, configuration,
+diagnostics, and other file identity are wanted without project scanning. It cannot be
+combined with `--project-context` or `--context-path`.
 
 `--exclude` is also replacement-style: any command-line `--exclude` discards configured `exclude`
 patterns. `--extend-exclude` is additive. Explicit formatting paths are not force-excluded even when
@@ -168,10 +191,11 @@ the repository root.
 
 Neither `--context-path` nor the exclusion options restrict Fortran `INCLUDE` resolution. A fragment
 named by a source that is already being analyzed is read from disk relative to that source, because
-it is part of that source's text; absolute paths are also honored. Compiler include-directory (`-I`)
-search paths are not modeled, and missing/unreadable/unanalysable fragments are left unresolved
-rather than guessed. An include fragment is never selected as a project source in its own right. Use
-`--isolated` to disable project analysis, and with it include resolution, entirely.
+it is part of that source's text; named stdin uses `--stdin-filename` as that source path. Absolute
+paths are also honored. Compiler include-directory (`-I`) search paths are not modeled, and
+missing/unreadable/unanalysable fragments are left unresolved rather than guessed. An include
+fragment is never selected as a project source in its own right. `--isolated` disables project
+analysis and with it project INCLUDE expansion.
 
 See [file-workflow.md](file-workflow.md) for repository discovery, non-Git context discovery,
 submodule behaviour, symlinks, and write semantics.
@@ -443,11 +467,12 @@ options cannot be combined. CLI scalar options take precedence over configuratio
 `exclude`; command-line `--context-path` replaces configured `context_paths`.
 
 Relative configured `context_paths` are resolved from the configuration file's directory, not from
-the process working directory.
+the process working directory. For named stdin, configuration discovery starts at
+`--stdin-filename`'s parent even when `--project-context` selects a different checkout.
 
 The following workflow/query settings are intentionally command-line-only and are rejected as TOML
 keys: `all`, `all-files`, `check`, `config`, `diff`, `isolated`, `last-indent`, `last-usable`,
-`no-config`, `project-context`, `query-format`, `stdin`, `stdout`, and `show-files`.
+`no-config`, `project-context`, `query-format`, `stdin`, `stdin-filename`, `stdout`, and `show-files`.
 
 ## Boolean syntax
 
