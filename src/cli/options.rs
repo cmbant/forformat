@@ -637,13 +637,13 @@ pub(crate) static OPTIONS: &[OptionSpec] = &[
     OptionSpec::new(
         OptionId::ModernizeDecls,
         "modernize-decls",
-        ValueKind::Boolean,
+        ValueKind::OptionalBoolean,
     )
     .aliases(&["modernize-declarations"])
     .config(ConfigMapping::Same)
     .default_text("false")
     .help(
-        "--modernize-decls=<BOOL>",
+        "--modernize-decls[=<BOOL>]",
         "insert `::` in legacy declarations (default false)",
     ),
     OptionSpec::new(
