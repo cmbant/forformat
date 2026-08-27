@@ -319,7 +319,11 @@ impl<'a> ReflowScope<'a> {
         }
         // Step 17 may compress an authored declaration alignment run. Measure
         // and break the emitted spelling, not the authored spacing.
-        body = with_laid_out_separator(body, laid_out_separator_line(laid_out, span));
+        body = with_laid_out_separator(
+            body,
+            laid_out_separator_line(laid_out, span),
+            self.config().mode.aligns_after_layout() && self.config().align_declarations,
+        );
         let detached = detach_final_inline_comment(
             self.document,
             &self.analysis().buffer,
@@ -645,15 +649,30 @@ fn laid_out_separator_line<'a>(
 
 /// Rewrite whitespace around `body`'s `::` to the runs final alignment already
 /// chose for this line, so wrapping measures emitted spelling.
-fn with_laid_out_separator(body: Vec<u8>, laid_out: Option<&Vec<u8>>) -> Vec<u8> {
-    let Some(laid_out) = laid_out else {
+///
+/// A previous round may have moved `::` to the start of a continuation body.
+/// That physical line is deliberately not an independent alignment carrier,
+/// so no laid-out separator is visible. Project the one-space spelling that
+/// joining and normalizing that continuation will use on the next invocation
+/// instead of falling back to authored alignment slack and oscillating.
+fn with_laid_out_separator(
+    body: Vec<u8>,
+    laid_out: Option<&Vec<u8>>,
+    alignment_active: bool,
+) -> Vec<u8> {
+    let Some((at, run, after)) =
+        crate::transform::passes::layout_post::declaration_separator_info(&body)
+    else {
         return body;
     };
-    let (Some((at, run, after)), Some((_, laid_out_run, laid_out_after))) = (
-        crate::transform::passes::layout_post::declaration_separator_info(&body),
-        crate::transform::passes::layout_post::declaration_separator_info(laid_out),
-    ) else {
-        return body;
+    let laid_out_runs = laid_out.and_then(|line| {
+        crate::transform::passes::layout_post::declaration_separator_info(line)
+            .map(|(_, before, after)| (before, after))
+    });
+    let (laid_out_run, laid_out_after) = match laid_out_runs {
+        Some(runs) => runs,
+        None if alignment_active => (1, 1),
+        None => return body,
     };
     // A missing space on either side is `declaration_separator_growth`'s
     // business, not this function's.

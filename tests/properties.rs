@@ -1790,6 +1790,51 @@ fn full_twice(source: &str, config: &FormatConfig) -> (String, String) {
 }
 
 #[test]
+fn a_continuation_leading_declaration_separator_keeps_its_wrapping_projection() {
+    // Reduced from CP2K `src/motion/neb_utils.F`. The first round compresses
+    // the authored gap before `::` and wraps there. Once `::` leads the new
+    // continuation, it is no longer a standalone alignment carrier; reverting
+    // to the authored gap made the next round decline and restore the original
+    // line, producing a two-state wrapping cycle.
+    let source = "\
+module m
+implicit none
+integer, parameter :: default_string_length=256
+contains
+subroutine s
+  integer :: i
+  logical :: x
+  do i = 1, 2
+    if (x) then
+      continue
+    else
+      block
+        CHARACTER(LEN=default_string_length)    :: dummy_char
+        continue
+      end block
+    end if
+  end do
+end subroutine s
+end module m
+";
+    let config = FormatConfig {
+        align_paren: (8).into(),
+        ..deep_wrapping_config()
+    };
+    let (once, twice) = full_twice(source, &config);
+
+    assert_eq!(once, twice, "first pass:\n{once}\nsecond pass:\n{twice}");
+    assert!(
+        once.contains("character(len=default_string_length) &\n"),
+        "declaration did not wrap before its separator:\n{once}"
+    );
+    assert!(
+        once.lines().all(|line| line.len() <= 80),
+        "generated line exceeded the wrapping budget:\n{once}"
+    );
+}
+
+#[test]
 fn wrapping_a_block_mate_does_not_change_the_separator_a_declaration_was_measured_against() {
     // Reduced from CP2K `src/rpa_grad.F`.  `TYPE(...)` is aligned into a block
     // with the `REAL` declarations, so step 17 holds its `::` out at the
