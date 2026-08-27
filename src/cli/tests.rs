@@ -852,7 +852,7 @@ fn file_workflow_flags_and_query_mode_validation_are_explicit() {
 #[test]
 fn option_metadata_drives_help_and_single_dash_suggestions() {
     let usage = super::usage();
-    for spelling in ["--all", "--project-context=<path>", "--keyword-case"] {
+    for spelling in ["--all", "--project-context=<directory>", "--keyword-case"] {
         assert!(usage.contains(spelling), "missing {spelling} from help");
     }
     assert!(matches!(
