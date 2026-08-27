@@ -13,7 +13,12 @@ pub(super) fn declared_variable_names(text: &[u8]) -> Vec<Vec<u8>> {
         return Vec::new();
     };
     let first = &tokens[first_index];
-    if first.kind != TokenKind::Name || first.is(b"use") || first.is(b"import") {
+    if first.kind != TokenKind::Name
+        || matches!(
+            first.text.to_ascii_lowercase().as_slice(),
+            b"use" | b"import" | b"public" | b"private"
+        )
+    {
         return Vec::new();
     }
     let start = match declaration_separator(&tokens) {
@@ -220,16 +225,6 @@ pub(super) fn type_definition_parent(text: &[u8]) -> Option<(&[u8], &[u8])> {
     Some((child, parent))
 }
 
-pub(super) fn is_old_style_type_context(tokens: &[Token<'_>], first_index: usize) -> bool {
-    let first = &tokens[first_index];
-    if !(first.is(b"type") || first.is(b"class")) {
-        return false;
-    }
-    tokens
-        .get(first_index + 1)
-        .is_none_or(|token| token.is_name(b"is") || token.is_name(b"default"))
-}
-
 pub(super) fn old_style_type_name<'a>(
     tokens: &'a [Token<'a>],
     first_index: usize,
@@ -260,19 +255,22 @@ mod tests {
             (b"INTEGER*1 count", b"count"),
             (b"DIMENSION RADSAV(2)", b"RADSAV"),
             (b"INTENT(IN) Arg", b"Arg"),
-            (b"PUBLIC kmlAddScale", b"kmlAddScale"),
         ] {
             assert_eq!(declared_variable_names(source), vec![expected.to_vec()]);
         }
     }
 
     #[test]
-    fn import_names_are_host_association_not_local_declarations() {
+    fn association_and_access_names_are_not_declarations() {
         for source in [
             b"import HostName".as_slice(),
             b"import :: HostName".as_slice(),
+            b"public ExportedName".as_slice(),
+            b"public :: ExportedName".as_slice(),
+            b"private HiddenName".as_slice(),
+            b"private :: HiddenName".as_slice(),
         ] {
-            assert!(declared_variable_names(source).is_empty());
+            assert!(declared_variable_names(source).is_empty(), "{source:?}");
         }
     }
 
@@ -284,7 +282,6 @@ mod tests {
                 b"dimension :: RADSAV(2)".as_slice(),
             ),
             (b"intent(in) Arg", b"intent(in) :: Arg"),
-            (b"public kmlAddScale", b"public :: kmlAddScale"),
             (b"procedure(cb) Handler", b"procedure(cb) :: Handler"),
         ] {
             assert_eq!(
@@ -295,6 +292,7 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn binding_facts_do_not_depend_on_separator_modernization() {
         for (legacy, modern) in [
