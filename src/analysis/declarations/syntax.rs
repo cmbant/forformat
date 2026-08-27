@@ -13,7 +13,7 @@ pub(super) fn declared_variable_names(text: &[u8]) -> Vec<Vec<u8>> {
         return Vec::new();
     };
     let first = &tokens[first_index];
-    if first.kind != TokenKind::Name || first.is(b"use") {
+    if first.kind != TokenKind::Name || first.is(b"use") || first.is(b"import") {
         return Vec::new();
     }
     let start = match declaration_separator(&tokens) {
@@ -263,6 +263,16 @@ mod tests {
             (b"PUBLIC kmlAddScale", b"kmlAddScale"),
         ] {
             assert_eq!(declared_variable_names(source), vec![expected.to_vec()]);
+        }
+    }
+
+    #[test]
+    fn import_names_are_host_association_not_local_declarations() {
+        for source in [
+            b"import HostName".as_slice(),
+            b"import :: HostName".as_slice(),
+        ] {
+            assert!(declared_variable_names(source).is_empty());
         }
     }
 

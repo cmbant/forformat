@@ -5,10 +5,7 @@
 //! correction does not need a retained evidence map or a second token walk.
 
 use crate::{
-    analysis::{
-        is_implicit_letter_name, project::ResolvedType, scoped_declared_names, DeclaredNameIndex,
-        DeclaredSpelling,
-    },
+    analysis::{is_implicit_letter_name, project::ResolvedType, scoped_declared_names},
     error::FormatError,
     source::{tokens::tokenize, LexState},
     transform::{
@@ -25,10 +22,7 @@ use std::ops::Range;
 pub fn declared(document: &mut Document, cx: &PassContext) -> Result<Changed, FormatError> {
     let protected = implicit_letter_spellings(cx);
     let declared_names = scoped_declared_names(cx.analysis, cx.scopes);
-    let mut reconciler = ScopedReconciler {
-        cx,
-        declared_names: &declared_names,
-    };
+    let mut reconciler = ScopedReconciler { cx };
     let changed = case_pass::declared_with_names_and_reconciler(
         document,
         cx,
@@ -85,14 +79,13 @@ fn restore_implicit_letter_spellings(document: &mut Document, protected: &[Prote
 
 struct ScopedReconciler<'a, 'cx> {
     cx: &'a PassContext<'cx>,
-    declared_names: &'a DeclaredNameIndex,
 }
 
 impl CaseReconciler for ScopedReconciler<'_, '_> {
     const ENABLED: bool = true;
 
     fn reconcile(&mut self, evidence: &CaseEvidence, name: &[u8], line: usize) -> Reconciliation {
-        scoped_spelling(evidence, name, line, self.cx, self.declared_names)
+        scoped_spelling(evidence, name, line, self.cx)
     }
 }
 
@@ -101,7 +94,6 @@ fn scoped_spelling(
     name: &[u8],
     line: usize,
     cx: &PassContext,
-    declared_names: &DeclaredNameIndex,
 ) -> Reconciliation {
     match evidence {
         CaseEvidence::KeepBase => Reconciliation::KeepBase,
@@ -121,13 +113,6 @@ fn scoped_spelling(
             resolved_owner,
         } => scoped_member_spelling(owner, resolved_owner.as_ref(), name, line, cx),
         CaseEvidence::Symbol { allow_external } => {
-            match declared_names.file_declared_case(line, name) {
-                DeclaredSpelling::Spelling(spelling) => {
-                    return Reconciliation::Replace(spelling.to_vec());
-                }
-                DeclaredSpelling::Ambiguous => return Reconciliation::Restore,
-                DeclaredSpelling::Absent => {}
-            }
             if let Some(spelling) = cx.project.visible_symbol_spelling(cx.local, line, name) {
                 return Reconciliation::Replace(spelling);
             }
