@@ -182,3 +182,27 @@ jobs:
           merge-multiple: true
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  sync-pre-commit:
+    name: Sync pre-commit mirror
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Dispatch pre-commit sync
+        env:
+          GH_TOKEN: ${{ secrets.FORFORMAT_PRE_COMMIT_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "FORFORMAT_PRE_COMMIT_TOKEN secret is not configured" >&2
+            exit 1
+          fi
+
+          version="${FORFORMAT_RELEASE_REF#v}"
+          gh workflow run .github/workflows/sync.yml \
+            --repo cmbant/forformat-pre-commit \
+            --ref master \
+            --field version="$version"
