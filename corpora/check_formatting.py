@@ -286,6 +286,34 @@ PROFILES.update(
             "--define=USE_MPI",
             "--define=REAL_KIND=8",
         ],
+        # END completion and declaration modernization are source-changing
+        # full-mode passes.  Keep each switch isolated as well as combined so
+        # a failure can be attributed to the pass that introduced it.
+        "full-refactor-end": [
+            *FULL,
+            "--refactor-end",
+        ],
+        "full-refactor-end-upcase": [
+            *FULL,
+            "--refactor-end=upcase",
+        ],
+        "full-modernize-decls": [
+            *FULL,
+            "--modernize-decls",
+        ],
+        "full-refactor-modernize-decls": [
+            *FULL,
+            "--refactor-end=upcase",
+            "--modernize-decls",
+        ],
+        "full-refactor-modernize-layout": [
+            *FULL,
+            "--refactor-end=upcase",
+            "--modernize-decls",
+            "--line-length=80",
+            "--indent=8",
+            "--align-paren=8",
+        ],
         # Verify command-line values override a discovered project config
         # (where one exists) while retaining the ordinary corpus invocation.
         "config-cli-overrides": [

@@ -86,7 +86,11 @@ TOKEN_RE = re.compile(r"('[^']*'|\"[^\"]*\"|![^\n]*|[A-Za-z_]\w*|\d+(?:\.\d*)?|\
 def find_formatter() -> Path:
     candidates = [
         os.environ.get("FORFORMAT_BIN"),
-        str(Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "release" / "forformat"),
+        str(
+            Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+            / "release"
+            / "forformat"
+        ),
         str(ROOT / "target" / "release" / "forformat"),
     ]
     for candidate in candidates:
@@ -106,12 +110,18 @@ def genuine_after() -> str:
         check=True,
     )
     if "particles(i)%position = &\n" not in result.stdout:
-        raise RuntimeError("README example no longer demonstrates default line wrapping")
+        raise RuntimeError(
+            "README example no longer demonstrates default line wrapping"
+        )
     return result.stdout
 
 
 def font_path(monospace: bool) -> str:
-    names = ["DejaVuSansMono.ttf", "LiberationMono-Regular.ttf"] if monospace else ["DejaVuSans.ttf"]
+    names = (
+        ["DejaVuSansMono.ttf", "LiberationMono-Regular.ttf"]
+        if monospace
+        else ["DejaVuSans.ttf"]
+    )
     patterns = [f"/usr/share/fonts/**/{name}" for name in names]
     patterns += [
         "/vscode/vscode-server/**/KaTeX_Typewriter-Regular*.ttf"
@@ -135,11 +145,18 @@ def rounded(
     draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline)
 
 
-def draw_code(draw: ImageDraw.ImageDraw, code: str, code_font: ImageFont.FreeTypeFont) -> None:
+def draw_code(
+    draw: ImageDraw.ImageDraw, code: str, code_font: ImageFont.FreeTypeFont
+) -> None:
     for line_number, line in enumerate(code.rstrip("\n").split("\n"), 1):
         y = CODE_Y + (line_number - 1) * LINE_HEIGHT
         number = str(line_number)
-        draw.text((51 - draw.textlength(number, font=code_font), y), number, font=code_font, fill=COLORS["muted"])
+        draw.text(
+            (51 - draw.textlength(number, font=code_font), y),
+            number,
+            font=code_font,
+            fill=COLORS["muted"],
+        )
         x = CODE_X
         for token in TOKEN_RE.findall(line):
             lower = token.lower()
@@ -159,7 +176,12 @@ def draw_code(draw: ImageDraw.ImageDraw, code: str, code_font: ImageFont.FreeTyp
             x += draw.textlength(token, font=code_font)
 
 
-def base_frame(code: str, state: str, code_font: ImageFont.FreeTypeFont, ui_font: ImageFont.FreeTypeFont) -> Image.Image:
+def base_frame(
+    code: str,
+    state: str,
+    code_font: ImageFont.FreeTypeFont,
+    ui_font: ImageFont.FreeTypeFont,
+) -> Image.Image:
     image = Image.new("RGB", (WIDTH, HEIGHT), COLORS["editor"])
     draw = ImageDraw.Draw(image)
 
