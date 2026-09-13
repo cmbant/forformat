@@ -4,7 +4,7 @@
 fixed/free detection is enabled by default; input detected as fixed form is skipped unchanged rather
 than formatted. `--indent-only` is a byte-for-byte compatibility contract against `findent -ifree`;
 `--full` (the default) adds lexical normalization and wrapping on top of it. The reference build is
-findent 4.3.8~pre01.
+findent 4.3.8.
 
 A difference in `--indent-only` output is treated as a bug in `forformat`, except for the cases
 listed under [Reviewed indentation differences](#reviewed-indentation-differences).
@@ -131,8 +131,7 @@ compatibility claims:
 - Conditional `!$` sentinels keep their authored boundary spacing while the Fortran-like body is
   normalized, including declaration-driven identifier casing.
 - `--reduce-whitespace` (equivalent to findent-compatible `--ws_remred`) leaves the bytes of a valid
-  literal intact. A legacy heuristic can treat the quote after `error stop` as code and collapse
-  spaces inside that literal.
+  literal intact.
 
 ## Whitespace boundary
 

@@ -148,7 +148,7 @@ fn style_switches_have_exact_spelling_and_fixed_points() {
 #[test]
 fn compact_select_spellings_indent_like_the_two_word_form() {
     // findent's own recognizer accepts `selectcase`/`selecttype`/`selectrank`
-    // as SELECT openers (verified against findent 4.3.8~pre01), and the compact
+    // as SELECT openers (verified against findent 4.3.8), and the compact
     // `end...` spellings are already split by `--split-compound-keywords`;
     // the same must hold for these so the indent-only engine's frame
     // nesting does not diverge from the oracle for every statement inside

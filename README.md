@@ -194,7 +194,7 @@ for the full repository verification bar.
 
 ## Relationship to findent
 
-`--indent-only` implements the findent-compatible indentation contract for findent 4.3.8~pre01;
+`--indent-only` implements the findent-compatible indentation contract for findent 4.3.8;
 full mode intentionally adds behavior beyond that contract. See
 [compatibility](docs/compatibility.md) for the reviewed differences and
 [migration](docs/migration.md) for legacy option mapping.

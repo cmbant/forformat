@@ -25,9 +25,19 @@ RUN groupadd --gid ${USER_GID} ${USERNAME} \
     && chmod 0440 /etc/sudoers.d/${USERNAME} \
     && git config --system --add safe.directory '*'
 
+# Keep the Rust toolchain in the remote user's home so Cargo's registry and
+# build caches are writable during normal devcontainer use.  The repository's
+# checks require rustfmt and Clippy as well as cargo and rustc.
+USER ${USERNAME}
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+        | sh -s -- -y --profile minimal --default-toolchain stable \
+            --component rustfmt --component clippy
+ENV PATH=/home/${USERNAME}/.cargo/bin:${PATH}
+USER root
+
 # The compatibility oracle. Trunk lags the released line, so take the tarball:
 # see docs/compatibility.md for what the pinned version is contracted to do.
-ARG FINDENT_VERSION=4.3.8~pre01
+ARG FINDENT_VERSION=4.3.8
 RUN curl -fsSL -o /tmp/findent.tar.gz \
         "https://ratrabbit.nl/downloads/findent/findent-${FINDENT_VERSION}.tar.gz" \
     && mkdir -p /opt/findent \

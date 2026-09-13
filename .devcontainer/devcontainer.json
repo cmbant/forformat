@@ -1,5 +1,5 @@
 {
-  "name": "Findent (SVN trunk)",
+  "name": "forformat with findent",
   "build": {
     "dockerfile": "Dockerfile",
     "context": ".."
