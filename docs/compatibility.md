@@ -115,6 +115,16 @@ call work(arg1, &
 arg2)
 ```
 
+Separately, with `--align-paren`, findent 4.3.8 misplaces the lines after an empty nested call such
+as `b()`: it re-seeks the enclosing delimiter's first item and indents the next continuation far to
+the right. `forformat` keeps them aligned; the difference should disappear once findent is fixed.
+
+```fortran
+call s(a, &
+       b(), &
+       c)        ! findent: `c` moves right; forformat: stays under `a`
+```
+
 ## Full-mode differences
 
 `--full` adds normalization and wrapping, which are policy choices rather than indentation

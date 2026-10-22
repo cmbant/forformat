@@ -136,15 +136,7 @@ impl ParenAlignmentState {
                     indent = alignment;
                 }
                 b')' | b']' => {
-                    let was_empty = self.stack.pop().is_some_and(|open| !open.first_item_seen);
-                    if was_empty {
-                        if let Some(parent) = self.stack.last_mut() {
-                            // An empty nested call leaves the oracle in its
-                            // lparen state, so the next separator can become
-                            // the active target for the parent delimiter.
-                            parent.first_item_seen = false;
-                        }
-                    }
+                    self.stack.pop();
                     indent = self
                         .stack
                         .last()
@@ -205,5 +197,14 @@ mod tests {
         assert_eq!(state.current(), Some(9));
         assert_eq!(state.scan(b"/ a, &", 9), Some(9));
         assert_eq!(state.current(), Some(9));
+    }
+
+    #[test]
+    fn empty_nested_call_keeps_the_parent_alignment() {
+        let mut state = ParenAlignmentState::default();
+        state.scan(b"call s(a, &", 0);
+        state.scan(b"b(), &", 7);
+        assert_eq!(state.scan(b"c, &", 7), Some(7));
+        assert_eq!(state.current(), Some(7));
     }
 }
